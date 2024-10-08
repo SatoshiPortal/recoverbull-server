@@ -28,7 +28,6 @@ pub fn read_key_by_id_and_secret(
     key_id: &str,
     secret_hash: &str,
 ) -> Option<Key> {
-    // Perform the query with Diesel's query builder
     key.filter(id.eq(key_id))
         .filter(secret.eq(secret_hash))
         .first::<Key>(connection)

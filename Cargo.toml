@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+sha2 = "0.9"
 axum = "0.7.7"
-serde = { version = "1.0.210", features = ["derive"] }
+dotenv = "0.15.0"
 tokio = { version = "1.40", features = ["full"] }
+serde = { version = "1.0.210", features = ["derive"] }
+diesel = { version = "2.2", features = ["sqlite"] }
+chrono = { version = "0.4.38", features = ["serde"] }

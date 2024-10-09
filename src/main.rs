@@ -2,6 +2,7 @@ mod database;
 mod handlers;
 mod models;
 mod schema;
+mod utils;
 
 use axum::{routing::post, Router};
 

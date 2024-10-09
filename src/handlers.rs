@@ -23,9 +23,13 @@ pub async fn store_key(Json(payload): Json<StoreKey>) -> StatusCode {
     };
 
     let mut connection = establish_connection();
-    crate::database::write_key(&mut connection, &key);
+    let is_stored = crate::database::write_key(&mut connection, &key);
 
-    StatusCode::CREATED
+    match is_stored {
+        Some(true) => return StatusCode::CREATED,
+        Some(false) => return StatusCode::BAD_REQUEST,
+        None => return StatusCode::FORBIDDEN,
+    }
 }
 
 pub async fn fetch_key(Json(payload): Json<FetchKey>) -> (StatusCode, Json<Option<Key>>) {

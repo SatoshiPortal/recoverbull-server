@@ -16,11 +16,18 @@ pub fn establish_connection() -> SqliteConnection {
     SqliteConnection::establish(&database_url).expect("Error connecting to database")
 }
 
-pub fn write_key(connection: &mut SqliteConnection, new_key: &Key) {
-    diesel::insert_into(crate::schema::key::table)
+pub fn write_key(connection: &mut SqliteConnection, new_key: &Key) -> Option<bool> {
+    match diesel::insert_into(crate::schema::key::table)
         .values(new_key)
         .execute(connection)
-        .expect("Error writing new key");
+    {
+        Ok(_) => Some(true),
+        Err(diesel::result::Error::DatabaseError(
+            diesel::result::DatabaseErrorKind::UniqueViolation,
+            _,
+        )) => None,
+        Err(_) => Some(false),
+    }
 }
 
 pub fn read_key_by_id_and_secret(

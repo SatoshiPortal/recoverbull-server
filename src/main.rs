@@ -8,6 +8,8 @@ use axum::{routing::post, Router};
 
 #[tokio::main]
 async fn main() {
+    crate::database::init_db();
+
     let app = Router::new()
         .route("/key", post(crate::handlers::store_key))
         .route("/recover", post(crate::handlers::fetch_key));

@@ -5,14 +5,31 @@ use crate::{
     schema::key::{id, secret},
 };
 
+use diesel::sql_query;
 use diesel::{
     Connection, ExpressionMethods, OptionalExtension, QueryDsl, RunQueryDsl, SqliteConnection,
 };
 use dotenv::dotenv;
 use std::env;
+
+pub fn init_db() {
+    let mut connection = establish_connection();
+    let create_table_query = "
+        CREATE TABLE IF NOT EXISTS key (
+            id TEXT PRIMARY KEY NOT NULL,
+            created_at TEXT NOT NULL,
+            secret TEXT NOT NULL,
+            private TEXT NOT NULL
+        );
+    ";
+    sql_query(create_table_query)
+        .execute(&mut connection)
+        .expect("Error creating table");
+}
+
 pub fn establish_connection() -> SqliteConnection {
     dotenv().ok();
-    let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let database_url: String = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     SqliteConnection::establish(&database_url).expect("Error connecting to database")
 }
 

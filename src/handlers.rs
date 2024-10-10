@@ -44,7 +44,7 @@ pub async fn fetch_key(Json(payload): Json<FetchKey>) -> (StatusCode, Json<Optio
     let result = read_key_by_id_and_secret(&mut connection, &id, &secret_hash);
 
     match result {
-        Some(key) => (StatusCode::FOUND, Json(Some(key))),
+        Some(key) => (StatusCode::OK, Json(Some(key))),
         None => (StatusCode::NOT_FOUND, Json(None)),
     }
 }

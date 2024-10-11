@@ -5,5 +5,5 @@
 file = "src/schema.rs"
 custom_type_derives = ["diesel::query_builder::QueryId", "Clone"]
 
-[migrations_directory]
-dir = "/Users/azad/Code/RecoverBull/keychain/migrations"
+# [migrations_directory]
+# dir = "/Users/azad/Code/RecoverBull/keychain/migrations"

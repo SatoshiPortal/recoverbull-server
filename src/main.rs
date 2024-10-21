@@ -4,10 +4,14 @@ mod models;
 mod schema;
 mod utils;
 
+use std::env;
+
 use axum::{routing::post, Router};
 
 #[tokio::main]
 async fn main() {
+    crate::utils::init();
+
     crate::database::init_db();
 
     let app = Router::new()
@@ -26,6 +30,11 @@ async fn main() {
                 .allow_headers(tower_http::cors::Any),
         );
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
+    let keychain_address: String =
+        env::var("KEYCHAIN_ADDRESS").expect("KEYCHAIN_ADDRESS must be set");
+
+    let listener = tokio::net::TcpListener::bind(keychain_address)
+        .await
+        .unwrap();
     axum::serve(listener, app).await.unwrap();
 }

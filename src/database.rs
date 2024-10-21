@@ -1,15 +1,11 @@
 use crate::schema::key::dsl::*;
 
-use crate::{
-    models::Key,
-    schema::key::{id, secret},
-};
+use crate::{models::Key, schema::key::*};
 
 use diesel::sql_query;
 use diesel::{
     Connection, ExpressionMethods, OptionalExtension, QueryDsl, RunQueryDsl, SqliteConnection,
 };
-use dotenv::dotenv;
 use std::env;
 
 pub fn init_db() {
@@ -19,7 +15,8 @@ pub fn init_db() {
             id TEXT PRIMARY KEY NOT NULL,
             created_at TEXT NOT NULL,
             secret TEXT NOT NULL,
-            private TEXT NOT NULL
+            private TEXT NOT NULL,
+            requested_at TEXT
         );
     ";
     sql_query(create_table_query)
@@ -28,7 +25,6 @@ pub fn init_db() {
 }
 
 pub fn establish_connection() -> SqliteConnection {
-    dotenv().ok();
     let database_url: String = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     SqliteConnection::establish(&database_url).expect("Error connecting to database")
 }
@@ -47,14 +43,21 @@ pub fn write_key(connection: &mut SqliteConnection, new_key: &Key) -> Option<boo
     }
 }
 
-pub fn read_key_by_id_and_secret(
-    connection: &mut SqliteConnection,
-    key_id: &str,
-    secret_hash: &str,
-) -> Option<Key> {
-    key.filter(id.eq(key_id))
-        .filter(secret.eq(secret_hash))
+pub fn read_key_by_id(connection: &mut SqliteConnection, key_id: &str) -> Option<Key> {
+    match key
+        .filter(id.eq(key_id))
         .first::<Key>(connection)
         .optional()
-        .expect("Error reading key")
+    {
+        Ok(Some(found_key)) => Some(found_key),
+        Ok(None) => None,
+        Err(_) => None,
+    }
+}
+
+pub fn update_requested_at(connection: &mut diesel::SqliteConnection, key_id: &str) {
+    diesel::update(key.filter(id.eq(key_id)))
+        .set(requested_at.eq(chrono::Utc::now().to_rfc3339()))
+        .execute(connection)
+        .expect("Error updating requested_at");
 }

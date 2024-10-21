@@ -20,4 +20,5 @@ pub struct Key {
     pub created_at: String,
     pub secret: String,
     pub private: String,
+    pub requested_at: Option<String>,
 }

@@ -6,5 +6,6 @@ diesel::table! {
         created_at -> Text,
         secret -> Text,
         private -> Text,
+        requested_at -> Nullable<Text>,
     }
 }

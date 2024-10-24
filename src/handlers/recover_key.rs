@@ -2,42 +2,13 @@ use std::env;
 
 use axum::{http::StatusCode, Json};
 use chrono::Duration;
+use serde_json::{json, Value};
 
 use crate::database::{establish_connection, read_key_by_id, update_requested_at};
-use crate::models::{FetchKey, Key, StoreKey};
+use crate::models::FetchKey;
 use crate::utils::is_sha256_hash;
 
-use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
-
-pub async fn store_key(Json(payload): Json<StoreKey>) -> StatusCode {
-    let mut hasher = Sha256::new();
-    hasher.update(&payload.backup_key);
-    let backup_key_hash = hasher.finalize();
-
-    if !is_sha256_hash(payload.secret_hash.as_str()) {
-        return StatusCode::BAD_REQUEST;
-    }
-
-    let key = Key {
-        id: format!("{:x}", backup_key_hash),
-        created_at: chrono::Utc::now().to_rfc3339(),
-        secret: payload.secret_hash,
-        private: payload.backup_key,
-        requested_at: None,
-    };
-
-    let mut connection = establish_connection();
-    let is_stored = crate::database::write_key(&mut connection, &key);
-
-    match is_stored {
-        Some(true) => return StatusCode::CREATED,
-        Some(false) => return StatusCode::BAD_REQUEST,
-        None => return StatusCode::FORBIDDEN,
-    }
-}
-
-pub async fn fetch_key(Json(payload): Json<FetchKey>) -> (StatusCode, Json<Option<Value>>) {
+pub async fn recover_key(Json(payload): Json<FetchKey>) -> (StatusCode, Json<Option<Value>>) {
     let id = &payload.id;
     let secret_hash = &payload.secret_hash;
 

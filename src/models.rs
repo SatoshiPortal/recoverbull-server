@@ -1,19 +1,19 @@
 use diesel::prelude::*;
 use serde::{Deserialize, Serialize};
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct StoreKey {
     pub secret_hash: String,
     pub backup_key: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct FetchKey {
     pub id: String,
     pub secret_hash: String,
 }
 
-#[derive(Insertable, Serialize, Queryable, Selectable)]
+#[derive(Insertable, Serialize, Deserialize, Queryable, Selectable)]
 #[diesel(table_name = crate::schema::key)]
 pub struct Key {
     pub id: String,

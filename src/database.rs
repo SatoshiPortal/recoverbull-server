@@ -25,7 +25,12 @@ pub fn init_db() {
 }
 
 pub fn establish_connection() -> SqliteConnection {
-    let database_url: String = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let database_url;
+    if cfg!(test) {
+        database_url = env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set");
+    } else {
+        database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    }
     SqliteConnection::establish(&database_url).expect("Error connecting to database")
 }
 
@@ -38,7 +43,7 @@ pub fn write_key(connection: &mut SqliteConnection, new_key: &Key) -> Option<boo
         Err(diesel::result::Error::DatabaseError(
             diesel::result::DatabaseErrorKind::UniqueViolation,
             _,
-        )) => None,
+        )) => None, // Duplicate
         Err(_) => Some(false),
     }
 }

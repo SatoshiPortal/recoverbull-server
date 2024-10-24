@@ -4,7 +4,7 @@ mod models;
 mod router;
 mod schema;
 #[cfg(test)]
-mod test;
+mod tests;
 mod utils;
 
 use std::env;

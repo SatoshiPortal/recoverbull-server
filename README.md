@@ -3,7 +3,8 @@
 ## Setup dotenv
 
 ```sh
-echo "DATABASE_URL=mydb.sqlite3" > .env && \
+echo "DATABASE_URL=keychain_db.sqlite3" > .env && \
+echo "TEST_DATABASE_URL=test_db.sqlite3" > .env && \
 echo "KEYCHAIN_ADDRESS=0.0.0.0:3000" > .env && \
 echo "REQUEST_COOLDOWN=720" > .env && \
 echo "MIGRATIONS_DIR=$(pwd)/migrations" >> .env
@@ -21,7 +22,7 @@ diesel migration run
 cargo run
 ```
 
-## Test
+## Usage
 
 ```sh
 # Create a new entry
@@ -38,6 +39,21 @@ curl -i -X POST http://localhost:3000/recover \
 '
 # id is the sha256 of my_backup_key
 ```
+
+## Tests
+
+### End to End
+Do not run tests in parallel
+```sh
+cargo test -- --test-threads=1
+```
+
+### Coverage
+```sh
+cargo tarpaulin
+```
+
+
 
 ## Note on rust-analyzer
 

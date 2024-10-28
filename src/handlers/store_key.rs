@@ -1,4 +1,6 @@
 use axum::{http::StatusCode, Json};
+use base64::prelude::BASE64_STANDARD;
+use base64::Engine;
 use sha2::{Digest, Sha256};
 
 use crate::database::establish_connection;
@@ -6,8 +8,10 @@ use crate::models::{Key, StoreKey};
 use crate::utils::is_sha256_hash;
 
 pub async fn store_key(Json(payload): Json<StoreKey>) -> StatusCode {
+    let decoded_backup_key = BASE64_STANDARD.decode(payload.backup_key.clone()).unwrap();
+
     let mut hasher = Sha256::new();
-    hasher.update(&payload.backup_key);
+    hasher.update(&decoded_backup_key);
     let backup_key_hash = hasher.finalize();
 
     if !is_sha256_hash(payload.secret.as_str()) {

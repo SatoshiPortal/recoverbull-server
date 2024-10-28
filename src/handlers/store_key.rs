@@ -10,14 +10,14 @@ pub async fn store_key(Json(payload): Json<StoreKey>) -> StatusCode {
     hasher.update(&payload.backup_key);
     let backup_key_hash = hasher.finalize();
 
-    if !is_sha256_hash(payload.secret_hash.as_str()) {
+    if !is_sha256_hash(payload.secret.as_str()) {
         return StatusCode::BAD_REQUEST;
     }
 
     let key = Key {
         id: format!("{:x}", backup_key_hash),
         created_at: chrono::Utc::now().to_rfc3339(),
-        secret: payload.secret_hash,
+        secret: payload.secret,
         backup_key: payload.backup_key,
         requested_at: None,
     };

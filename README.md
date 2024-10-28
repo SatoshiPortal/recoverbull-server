@@ -26,16 +26,16 @@ cargo run
 
 ```sh
 # Create a new entry
-curl -i -X POST http://localhost:3000/key \
+curl -i -X POST http://localhost:3000/store_key \
 -H "Content-Type: application/json" \
--d '{"secret_hash": "8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92", "backup_key": "my_backup_key"}'
+-d '{"secret": "8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92", "backup_key": "my_backup_key"}'
 
-# secret_hash is the sha256 of 123456
+# secret is the sha256 of 123456
 
 # Recover
-curl -i -X POST http://localhost:3000/recover \
+curl -i -X POST http://localhost:3000/recover_key \
 -H "Content-Type: application/json" \
--d '{"id": "a5d1320aab2aef2570449ee3af767bcb541d1b62f01a1b19be3ad9ae131dc0a1", "secret_hash": "8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92"}
+-d '{"id": "a5d1320aab2aef2570449ee3af767bcb541d1b62f01a1b19be3ad9ae131dc0a1", "secret": "8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92"}
 '
 # id is the sha256 of my_backup_key
 ```

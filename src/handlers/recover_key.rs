@@ -10,9 +10,9 @@ use crate::utils::is_sha256_hash;
 
 pub async fn recover_key(Json(payload): Json<FetchKey>) -> (StatusCode, Json<Option<Value>>) {
     let id = &payload.id;
-    let secret_hash = &payload.secret_hash;
+    let secret = &payload.secret;
 
-    if !is_sha256_hash(id) || !is_sha256_hash(secret_hash) {
+    if !is_sha256_hash(id) || !is_sha256_hash(secret) {
         return (StatusCode::BAD_REQUEST, Json(None));
     }
 
@@ -47,7 +47,7 @@ pub async fn recover_key(Json(payload): Json<FetchKey>) -> (StatusCode, Json<Opt
 
             if has_cooled_down {
                 update_requested_at(&mut connection, &key.id);
-                if key.secret == secret_hash.clone() {
+                if key.secret == secret.clone() {
                     return (
                         StatusCode::OK,
                         Json(Some(serde_json::to_value(&key).unwrap())),

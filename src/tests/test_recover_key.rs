@@ -29,7 +29,7 @@ async fn test_recover_key_success() {
     let body: Key = response.json::<Key>();
     assert_eq!(body.id, fetch_key.id);
     assert_eq!(body.secret, fetch_key.secret_hash);
-    assert_eq!(body.private, "123456");
+    assert_eq!(body.backup_key, "123456");
 }
 
 #[tokio::test]

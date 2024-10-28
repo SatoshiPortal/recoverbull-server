@@ -19,6 +19,6 @@ pub struct Key {
     pub id: String,
     pub created_at: String,
     pub secret: String,
-    pub private: String,
+    pub backup_key: String,
     pub requested_at: Option<String>,
 }

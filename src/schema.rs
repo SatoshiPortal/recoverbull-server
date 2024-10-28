@@ -5,7 +5,7 @@ diesel::table! {
         id -> Text,
         created_at -> Text,
         secret -> Text,
-        private -> Text,
+        backup_key -> Text,
         requested_at -> Nullable<Text>,
     }
 }

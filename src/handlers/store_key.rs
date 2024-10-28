@@ -18,7 +18,7 @@ pub async fn store_key(Json(payload): Json<StoreKey>) -> StatusCode {
         id: format!("{:x}", backup_key_hash),
         created_at: chrono::Utc::now().to_rfc3339(),
         secret: payload.secret_hash,
-        private: payload.backup_key,
+        backup_key: payload.backup_key,
         requested_at: None,
     };
 

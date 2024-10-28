@@ -15,7 +15,7 @@ pub fn init_db() {
             id TEXT PRIMARY KEY NOT NULL,
             created_at TEXT NOT NULL,
             secret TEXT NOT NULL,
-            private TEXT NOT NULL,
+            backup_key TEXT NOT NULL,
             requested_at TEXT
         );
     ";

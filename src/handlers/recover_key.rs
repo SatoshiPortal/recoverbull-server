@@ -1,7 +1,5 @@
-use std::env;
-
-use axum::{extract::State, http::StatusCode, Json};
-use chrono::Duration;
+use axum::extract::State;
+use axum::{http::StatusCode, Json};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
@@ -32,17 +30,8 @@ pub async fn recover_key(
         None => None,
     };
 
-    let request_cooldown = env::var("REQUEST_COOLDOWN").expect("REQUEST_COOLDOWN must be set");
-    let cooldown = match request_cooldown.parse::<i64>() {
-        Ok(number) => Duration::minutes(number),
-        Err(e) => {
-            println!("Error: REQUEST_COOLDOWN must be a integer: {}", e);
-            std::process::exit(1);
-        }
-    };
-
     let has_cooled_down = match last_request {
-        Some(x) => current_time.signed_duration_since(x) > cooldown,
+        Some(x) => current_time.signed_duration_since(x) > state.cooldown,
         None => true,
     };
 
@@ -63,7 +52,7 @@ pub async fn recover_key(
         let key_id_hex = format!("{:x}", key_id);
 
         // look in db for this key_id_hex
-        let mut connection: diesel::SqliteConnection = establish_connection();
+        let mut connection: diesel::SqliteConnection = establish_connection(state.database_url);
         let result = read_key_by_id(&mut connection, &key_id_hex);
         match result {
             Some(key) => {
@@ -76,7 +65,7 @@ pub async fn recover_key(
                 let response = json!({
                     "error": "Invalid key/secret_hash",
                     "requested_at": current_time.to_rfc3339(),
-                    "cooldown": cooldown.num_minutes(),
+                    "cooldown": state.cooldown.num_minutes(),
                 });
                 return (StatusCode::UNAUTHORIZED, Json(Some(response)));
             }
@@ -85,7 +74,7 @@ pub async fn recover_key(
         let response = json!({
             "error": "Too many attempts",
             "requested_at": last_request_time.unwrap(),
-            "cooldown": cooldown.num_minutes(),
+            "cooldown": state.cooldown.num_minutes(),
         });
         return (StatusCode::TOO_MANY_REQUESTS, Json(Some(response)));
     }

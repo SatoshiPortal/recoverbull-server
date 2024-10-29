@@ -1,11 +1,13 @@
+use axum::extract::State;
 use axum::{http::StatusCode, Json};
 use sha2::{Digest, Sha256};
 
 use crate::database::establish_connection;
 use crate::models::{Key, StoreKey};
 use crate::utils::is_sha256_hash;
+use crate::AppState;
 
-pub async fn store_key(Json(payload): Json<StoreKey>) -> StatusCode {
+pub async fn store_key(State(state): State<AppState>, Json(payload): Json<StoreKey>) -> StatusCode {
     let secret_hash = &payload.secret_hash;
     let backup_key_bytes = hex::decode(payload.backup_key).unwrap();
 
@@ -31,7 +33,7 @@ pub async fn store_key(Json(payload): Json<StoreKey>) -> StatusCode {
         backup_key: hex::encode(backup_key_bytes),
     };
 
-    let mut connection = establish_connection();
+    let mut connection = establish_connection(state.database_url);
     let is_stored = crate::database::write_key(&mut connection, &key);
 
     match is_stored {

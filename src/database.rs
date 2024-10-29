@@ -1,15 +1,15 @@
 use crate::schema::key::dsl::*;
 
+use crate::AppState;
 use crate::{models::Key, schema::key::*};
 
 use diesel::sql_query;
 use diesel::{
     Connection, ExpressionMethods, OptionalExtension, QueryDsl, RunQueryDsl, SqliteConnection,
 };
-use std::env;
 
-pub fn init_db() {
-    let mut connection = establish_connection();
+pub fn init_db(state: AppState) {
+    let mut connection = establish_connection(state.database_url);
     let create_table_query = "
         CREATE TABLE IF NOT EXISTS key (
             id TEXT PRIMARY KEY NOT NULL,
@@ -22,13 +22,7 @@ pub fn init_db() {
         .expect("Error creating table");
 }
 
-pub fn establish_connection() -> SqliteConnection {
-    let database_url;
-    if cfg!(test) {
-        database_url = env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set");
-    } else {
-        database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    }
+pub fn establish_connection(database_url: String) -> SqliteConnection {
     SqliteConnection::establish(&database_url).expect("Error connecting to database")
 }
 

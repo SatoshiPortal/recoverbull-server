@@ -14,9 +14,7 @@ pub fn init_db() {
         CREATE TABLE IF NOT EXISTS key (
             id TEXT PRIMARY KEY NOT NULL,
             created_at TEXT NOT NULL,
-            secret TEXT NOT NULL,
-            backup_key TEXT NOT NULL,
-            requested_at TEXT
+            backup_key TEXT NOT NULL
         );
     ";
     sql_query(create_table_query)
@@ -58,11 +56,4 @@ pub fn read_key_by_id(connection: &mut SqliteConnection, key_id: &str) -> Option
         Ok(None) => None,
         Err(_) => None,
     }
-}
-
-pub fn update_requested_at(connection: &mut diesel::SqliteConnection, key_id: &str) {
-    diesel::update(key.filter(id.eq(key_id)))
-        .set(requested_at.eq(chrono::Utc::now().to_rfc3339()))
-        .execute(connection)
-        .expect("Error updating requested_at");
 }

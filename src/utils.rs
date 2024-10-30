@@ -1,5 +1,6 @@
 use chrono::Duration;
 use dotenv::dotenv;
+use sha2::{Digest, Sha256};
 use std::{collections::HashMap, env, sync::Arc};
 use tokio::sync::Mutex;
 
@@ -39,4 +40,16 @@ pub fn init() -> AppState {
         cooldown: Duration::minutes(cooldown),
         key_access_time: Arc::new(Mutex::new(HashMap::new())),
     };
+}
+
+pub fn generate_key_id(backup_id: &String, secret_hash: &String) -> String {
+    let mut backup_id_and_secret_hash = Vec::new();
+    backup_id_and_secret_hash.extend_from_slice(&backup_id.as_bytes());
+    backup_id_and_secret_hash.extend_from_slice(&secret_hash.as_bytes());
+
+    let mut hasher = Sha256::new();
+    hasher.update(&backup_id_and_secret_hash);
+
+    let key_id = hasher.finalize();
+    return hex::encode(key_id);
 }

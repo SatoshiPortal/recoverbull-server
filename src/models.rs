@@ -3,13 +3,14 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
 pub struct StoreKey {
+    pub backup_id: String,
     pub secret_hash: String,
     pub backup_key: String,
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct FetchKey {
-    pub backup_key_hash: String,
+    pub backup_id: String,
     pub secret_hash: String,
 }
 

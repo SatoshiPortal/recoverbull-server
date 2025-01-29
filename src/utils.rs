@@ -6,11 +6,16 @@ use tokio::sync::Mutex;
 
 use crate::AppState;
 
+fn is_hex(input: &str) -> bool {
+    input.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn is_length(length: usize, input: &str) -> bool {
+    input.len() == length
+}
+
 pub fn is_sha256_hash(input: &str) -> bool {
-    if input.len() != 64 || !input.chars().all(|c| c.is_digit(16)) {
-        return false;
-    }
-    return true;
+     is_length(64, input) && is_hex(input) 
 }
 
 pub fn init() -> AppState {

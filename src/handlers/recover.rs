@@ -35,9 +35,6 @@ pub async fn recover_secret(
     };
 
     if has_cooled_down || last_request.is_none() {
-        // set cooldown
-        let mut request_times = state.key_access_time.lock().await;
-        request_times.insert(identifier.to_string(), current_time);
 
         // re-generate the key_id
         let key_id = generate_secret_id(identifier, authentication_key);
@@ -53,11 +50,17 @@ pub async fn recover_secret(
                 );
             }
             None => {
+                // target brute-force mitigation
+                // set cooldown only if the entry is not found (because it doesn't exist or the user input is invalid)
+                let mut request_times = state.key_access_time.lock().await;
+                request_times.insert(identifier.to_string(), current_time);
+
                 let response = json!({
                     "error": "Invalid key_id/authentication_key",
                     "requested_at": current_time.to_rfc3339(),
                     "cooldown": state.cooldown.num_minutes(),
                 });
+                
                 return (StatusCode::UNAUTHORIZED, Json(Some(response)));
             }
         }

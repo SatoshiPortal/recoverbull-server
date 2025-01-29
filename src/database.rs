@@ -1,22 +1,20 @@
-use crate::schema::key::dsl::*;
+use crate::schema::secret::dsl::*;
 
-use crate::{models::Key, schema::key::*};
+use crate::AppState;
+use crate::{models::Secret, schema::secret::*};
 
 use diesel::sql_query;
 use diesel::{
     Connection, ExpressionMethods, OptionalExtension, QueryDsl, RunQueryDsl, SqliteConnection,
 };
-use std::env;
 
-pub fn init_db() {
-    let mut connection = establish_connection();
+pub fn init_db(state: AppState) {
+    let mut connection = establish_connection(state.database_url);
     let create_table_query = "
-        CREATE TABLE IF NOT EXISTS key (
+        CREATE TABLE IF NOT EXISTS secret (
             id TEXT PRIMARY KEY NOT NULL,
             created_at TEXT NOT NULL,
-            secret TEXT NOT NULL,
-            backup_key TEXT NOT NULL,
-            requested_at TEXT
+            encrypted_secret TEXT NOT NULL
         );
     ";
     sql_query(create_table_query)
@@ -24,19 +22,13 @@ pub fn init_db() {
         .expect("Error creating table");
 }
 
-pub fn establish_connection() -> SqliteConnection {
-    let database_url;
-    if cfg!(test) {
-        database_url = env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set");
-    } else {
-        database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    }
+pub fn establish_connection(database_url: String) -> SqliteConnection {
     SqliteConnection::establish(&database_url).expect("Error connecting to database")
 }
 
-pub fn write_key(connection: &mut SqliteConnection, new_key: &Key) -> Option<bool> {
-    match diesel::insert_into(crate::schema::key::table)
-        .values(new_key)
+pub fn write(connection: &mut SqliteConnection, new_secret: &Secret) -> Option<bool> {
+    match diesel::insert_into(crate::schema::secret::table)
+        .values(new_secret)
         .execute(connection)
     {
         Ok(_) => Some(true),
@@ -48,21 +40,14 @@ pub fn write_key(connection: &mut SqliteConnection, new_key: &Key) -> Option<boo
     }
 }
 
-pub fn read_key_by_id(connection: &mut SqliteConnection, key_id: &str) -> Option<Key> {
-    match key
-        .filter(id.eq(key_id))
-        .first::<Key>(connection)
+pub fn read_secret_by_id(connection: &mut SqliteConnection, secret_id: &str) -> Option<Secret> {
+    match secret
+        .filter(id.eq(secret_id))
+        .first::<Secret>(connection)
         .optional()
     {
-        Ok(Some(found_key)) => Some(found_key),
+        Ok(Some(found_secret)) => Some(found_secret),
         Ok(None) => None,
         Err(_) => None,
     }
-}
-
-pub fn update_requested_at(connection: &mut diesel::SqliteConnection, key_id: &str) {
-    diesel::update(key.filter(id.eq(key_id)))
-        .set(requested_at.eq(chrono::Utc::now().to_rfc3339()))
-        .execute(connection)
-        .expect("Error updating requested_at");
 }

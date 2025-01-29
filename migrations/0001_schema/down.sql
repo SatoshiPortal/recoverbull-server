@@ -1,1 +1,1 @@
-DROP TABLE key;
+DROP TABLE secret;

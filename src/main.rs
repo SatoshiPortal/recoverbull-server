@@ -7,20 +7,28 @@ mod schema;
 mod tests;
 mod utils;
 
-use std::env;
+use std::{collections::HashMap, sync::Arc};
+
+use chrono::{DateTime, TimeDelta, Utc};
+use tokio::sync::Mutex;
+
+#[derive(Clone)]
+struct AppState {
+    keychain_address: String,
+    database_url: String,
+    cooldown: TimeDelta,
+    key_access_time: Arc<Mutex<HashMap<String, DateTime<Utc>>>>,
+}
 
 #[tokio::main]
 async fn main() {
-    crate::utils::init();
+    let app_state = crate::utils::init();
 
-    crate::database::init_db();
+    crate::database::init_db(app_state.clone());
 
-    let app = router::new();
+    let app = router::new(app_state.clone());
 
-    let keychain_address: String =
-        env::var("KEYCHAIN_ADDRESS").expect("KEYCHAIN_ADDRESS must be set");
-
-    let listener = tokio::net::TcpListener::bind(keychain_address)
+    let listener = tokio::net::TcpListener::bind(&app_state.keychain_address)
         .await
         .unwrap();
     axum::serve(listener, app).await.unwrap();

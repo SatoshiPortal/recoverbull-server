@@ -42,14 +42,14 @@ pub fn init() -> AppState {
     };
 }
 
-pub fn generate_key_id(backup_id: &String, secret_hash: &String) -> String {
-    let mut backup_id_and_secret_hash = Vec::new();
-    backup_id_and_secret_hash.extend_from_slice(&backup_id.as_bytes());
-    backup_id_and_secret_hash.extend_from_slice(&secret_hash.as_bytes());
+pub fn generate_secret_id(identifier: &String, authentication_key: &String) -> String {
+    let mut identifier_and_authentication_key = Vec::new();
+    identifier_and_authentication_key.extend_from_slice(&identifier.as_bytes());
+    identifier_and_authentication_key.extend_from_slice(&authentication_key.as_bytes());
 
     let mut hasher = Sha256::new();
-    hasher.update(&backup_id_and_secret_hash);
+    hasher.update(&identifier_and_authentication_key);
 
-    let key_id = hasher.finalize();
-    return hex::encode(key_id);
+    let secret_id = hasher.finalize();
+    return hex::encode(secret_id);
 }

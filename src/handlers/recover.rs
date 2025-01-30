@@ -19,7 +19,7 @@ pub async fn recover_secret(
     }
 
     let last_request_time = {
-        let key_access_time = state.key_access_time.lock().await;
+        let key_access_time = state.identifier_access_time.lock().await;
         key_access_time.get(identifier).cloned()
     };
 
@@ -52,7 +52,7 @@ pub async fn recover_secret(
             None => {
                 // target brute-force mitigation
                 // set cooldown only if the entry is not found (because it doesn't exist or the user input is invalid)
-                let mut request_times = state.key_access_time.lock().await;
+                let mut request_times = state.identifier_access_time.lock().await;
                 request_times.insert(identifier.to_string(), current_time);
 
                 let response = json!({

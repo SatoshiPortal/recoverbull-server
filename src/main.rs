@@ -14,10 +14,10 @@ use tokio::sync::Mutex;
 
 #[derive(Clone)]
 struct AppState {
-    keychain_address: String,
+    server_address: String,
     database_url: String,
     cooldown: TimeDelta,
-    key_access_time: Arc<Mutex<HashMap<String, DateTime<Utc>>>>,
+    identifier_access_time: Arc<Mutex<HashMap<String, DateTime<Utc>>>>,
 }
 
 #[tokio::main]
@@ -28,7 +28,7 @@ async fn main() {
 
     let app = router::new(app_state.clone());
 
-    let listener = tokio::net::TcpListener::bind(&app_state.keychain_address)
+    let listener = tokio::net::TcpListener::bind(&app_state.server_address)
         .await
         .unwrap();
     axum::serve(listener, app).await.unwrap();

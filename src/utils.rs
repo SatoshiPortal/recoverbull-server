@@ -21,7 +21,7 @@ pub fn is_sha256_hash(input: &str) -> bool {
 pub fn init() -> AppState {
     dotenv().ok();
 
-    let keychain_addr: String = env::var("KEYCHAIN_ADDRESS").expect("KEYCHAIN_ADDRESS must be set");
+    let server_addr: String = env::var("KEYCHAIN_ADDRESS").expect("KEYCHAIN_ADDRESS must be set");
     let request_cooldown = env::var("REQUEST_COOLDOWN").expect("REQUEST_COOLDOWN must be set");
 
     let database_url;
@@ -40,10 +40,10 @@ pub fn init() -> AppState {
     };
 
     return AppState {
-        keychain_address: keychain_addr,
+        server_address: server_addr,
         database_url: database_url,
         cooldown: Duration::minutes(cooldown),
-        key_access_time: Arc::new(Mutex::new(HashMap::new())),
+        identifier_access_time: Arc::new(Mutex::new(HashMap::new())),
     };
 }
 

@@ -21,7 +21,7 @@ pub fn is_sha256_hash(input: &str) -> bool {
 pub fn init() -> AppState {
     dotenv().ok();
 
-    let server_addr: String = env::var("KEYCHAIN_ADDRESS").expect("KEYCHAIN_ADDRESS must be set");
+    let server_addr: String = env::var("SERVER_ADDRESS").expect("SERVER_ADDRESS must be set");
     let request_cooldown = env::var("REQUEST_COOLDOWN").expect("REQUEST_COOLDOWN must be set");
 
     let database_url;

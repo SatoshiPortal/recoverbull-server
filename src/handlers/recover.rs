@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 
 use crate::database::{establish_connection, read_secret_by_id};
 use crate::models::FetchSecret;
-use crate::utils::{generate_secret_id, is_sha256_hash};
+use crate::utils::{generate_secret_id, is_256bits_hex_hash};
 use crate::AppState;
 
 pub async fn recover_secret(
@@ -14,8 +14,10 @@ pub async fn recover_secret(
     let identifier = &payload.identifier;
     let authentication_key = &payload.authentication_key;
 
-    if !is_sha256_hash(identifier) || !is_sha256_hash(authentication_key) {
-        return (StatusCode::BAD_REQUEST, Json(None));
+    if !is_256bits_hex_hash(identifier) || !is_256bits_hex_hash(authentication_key) {
+        return (StatusCode::BAD_REQUEST, Json(Some(json!({
+            "error": "identifier or authentication_key are not 256 bits HEX hashes",
+        }))));
     }
 
     let last_request_time = {
@@ -56,7 +58,7 @@ pub async fn recover_secret(
                 request_times.insert(identifier.to_string(), current_time);
 
                 let response = json!({
-                    "error": "Invalid key_id/authentication_key",
+                    "error": "Invalid identifier/authentication_key",
                     "requested_at": current_time.to_rfc3339(),
                     "cooldown": state.cooldown.num_minutes(),
                 });

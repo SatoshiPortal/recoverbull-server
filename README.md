@@ -69,10 +69,11 @@ If an attacker can steal informations to a targeted user such as `salt`, `nonce`
 ### dotenv
 
 ```sh
-echo "DATABASE_URL=keychain_db.sqlite3" >> .env && \
+echo "DATABASE_URL=production_db.sqlite3" >> .env && \
 echo "TEST_DATABASE_URL=test_db.sqlite3" >> .env && \
 echo "SERVER_ADDRESS=0.0.0.0:3000" >> .env && \
 echo "REQUEST_COOLDOWN=720" >> .env && \
+echo "SECRET_MAX_LETTER_LIMIT=1000" >> .env && \
 echo "MIGRATIONS_DIR=$(pwd)/migrations" >> .env
 ```
 

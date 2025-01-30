@@ -14,7 +14,7 @@ fn is_length(length: usize, input: &str) -> bool {
     input.len() == length
 }
 
-pub fn is_sha256_hash(input: &str) -> bool {
+pub fn is_256bits_hex_hash(input: &str) -> bool {
      is_length(64, input) && is_hex(input) 
 }
 
@@ -23,6 +23,7 @@ pub fn init() -> AppState {
 
     let server_addr: String = env::var("SERVER_ADDRESS").expect("SERVER_ADDRESS must be set");
     let request_cooldown = env::var("REQUEST_COOLDOWN").expect("REQUEST_COOLDOWN must be set");
+    let secret_max_letter_limit = env::var("SECRET_MAX_LETTER_LIMIT").expect("SECRET_MAX_LETTER_LIMIT must be set");
 
     let database_url;
     if cfg!(test) {
@@ -39,11 +40,21 @@ pub fn init() -> AppState {
         }
     };
 
+    let secret_max_letter_limit = match secret_max_letter_limit.parse::<usize>() {
+        Ok(number) => number,
+        Err(e) => {
+            println!("Error: SECRET_MAX_LETTER_LIMIT must be a usize: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+
     return AppState {
         server_address: server_addr,
         database_url: database_url,
         cooldown: Duration::minutes(cooldown),
         identifier_access_time: Arc::new(Mutex::new(HashMap::new())),
+        secret_max_letter_limit:secret_max_letter_limit,
     };
 }
 

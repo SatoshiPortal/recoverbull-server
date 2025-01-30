@@ -18,6 +18,7 @@ struct AppState {
     database_url: String,
     cooldown: TimeDelta,
     identifier_access_time: Arc<Mutex<HashMap<String, DateTime<Utc>>>>,
+    secret_max_letter_limit: usize,
 }
 
 #[tokio::main]

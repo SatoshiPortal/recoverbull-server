@@ -94,7 +94,7 @@ cargo run
 # Create a new entry
 curl -i -X POST http://localhost:3000/store \
 -H "Content-Type: application/json" \
--d '{"identifier": "bcb15f821479b4d5772bd0ca866c00ad5f926e3580720659cc80d39c9d09802a", "authentication_key": "4cc8f4d609b717356701c57a03e737e5ac8fe885da8c7163d3de47e01849c635", "encrypted_secret": "backup_key_encrypted_using_authentication_key"}'
+-d '{"identifier": "bcb15f821479b4d5772bd0ca866c00ad5f926e3580720659cc80d39c9d09802a", "authentication_key": "4cc8f4d609b717356701c57a03e737e5ac8fe885da8c7163d3de47e01849c635", "encrypted_secret": "secret_encrypted_using_encryption_key"}'
 
 # secret is the sha256 of 123456
 

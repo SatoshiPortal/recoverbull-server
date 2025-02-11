@@ -19,7 +19,7 @@ pub async fn store_secret(State(state): State<AppState>, Json(payload): Json<Sto
     }
 
 
-    if encrypted_secret.len() > state.secret_max_letter_limit  {
+    if encrypted_secret.len() > state.secret_max_length  {
         return (StatusCode::BAD_REQUEST, Json(Some(json!({
             "error": "encrypted_secret length exceeds the limit",
         }))));

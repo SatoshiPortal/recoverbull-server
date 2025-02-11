@@ -23,7 +23,7 @@ pub fn init() -> AppState {
 
     let server_addr: String = env::var("SERVER_ADDRESS").expect("SERVER_ADDRESS must be set");
     let request_cooldown = env::var("REQUEST_COOLDOWN").expect("REQUEST_COOLDOWN must be set");
-    let secret_max_letter_limit = env::var("SECRET_MAX_LETTER_LIMIT").expect("SECRET_MAX_LETTER_LIMIT must be set");
+    let secret_max_length = env::var("SECRET_MAX_LENGTH").expect("SECRET_MAX_LENGTH must be set");
     env::var("INFO_MESSAGE").expect("INFO_MESSAGE must be set");
 
     let database_url;
@@ -41,10 +41,10 @@ pub fn init() -> AppState {
         }
     };
 
-    let secret_max_letter_limit = match secret_max_letter_limit.parse::<usize>() {
+    let secret_max_length = match secret_max_length.parse::<usize>() {
         Ok(number) => number,
         Err(e) => {
-            println!("Error: SECRET_MAX_LETTER_LIMIT must be a usize: {}", e);
+            println!("Error: SECRET_MAX_LENGTH must be a usize: {}", e);
             std::process::exit(1);
         }
     };
@@ -55,7 +55,7 @@ pub fn init() -> AppState {
         database_url: database_url,
         cooldown: Duration::minutes(cooldown),
         identifier_access_time: Arc::new(Mutex::new(HashMap::new())),
-        secret_max_letter_limit:secret_max_letter_limit,
+        secret_max_length:secret_max_length,
     };
 }
 

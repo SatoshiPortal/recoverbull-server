@@ -1,3 +1,5 @@
+
+use base64::{prelude::BASE64_STANDARD, Engine};
 use chrono::Duration;
 use dotenv::dotenv;
 use sha2::{Digest, Sha256};
@@ -8,6 +10,13 @@ use crate::AppState;
 
 fn is_hex(input: &str) -> bool {
     input.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+pub fn is_base64(input: &str) -> bool {
+    if input.len() % 4 != 0 {
+        return false;
+    }
+    return BASE64_STANDARD.decode(input).is_ok();
 }
 
 fn is_length(length: usize, input: &str) -> bool {

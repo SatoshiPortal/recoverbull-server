@@ -1,6 +1,6 @@
 use crate::{
     models::{FetchSecret, Secret, StoreSecret},
-    tests::{NOT_PASSWORD_HASH, SHA256_111111, SHA256_222222, SHA256_CONCAT_111111_222222},
+    tests::{BASE64_ENCRYPTED_SECRET, NOT_PASSWORD_HASH, SHA256_111111, SHA256_222222, SHA256_CONCAT_111111_222222},
 };
 use axum::http::StatusCode;
 
@@ -12,7 +12,7 @@ async fn test_recover_success() {
     let payload = StoreSecret {
         identifier: SHA256_111111.to_string(),
         authentication_key: SHA256_222222.to_string(),
-        encrypted_secret: "123456".to_string(),
+        encrypted_secret: BASE64_ENCRYPTED_SECRET.to_string(),
     };
     
     server
@@ -36,7 +36,7 @@ async fn test_recover_success() {
 
     let body: Secret = response.json::<Secret>();
     assert_eq!(body.id, SHA256_CONCAT_111111_222222);
-    assert_eq!(body.encrypted_secret, "123456");
+    assert_eq!(body.encrypted_secret, BASE64_ENCRYPTED_SECRET);
 }
 
 #[tokio::test]
@@ -85,7 +85,7 @@ async fn test_recover_failure_too_many_attempts() {
         .json(&StoreSecret {
             identifier: SHA256_111111.to_string(),
             authentication_key: SHA256_222222.to_string(),
-            encrypted_secret: "this should be an encrypted secret".to_string()
+            encrypted_secret: BASE64_ENCRYPTED_SECRET.to_string()
         })
         .expect_success()
         .await;

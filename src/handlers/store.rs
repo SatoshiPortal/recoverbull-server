@@ -4,7 +4,7 @@ use serde_json::{json,Value};
 
 use crate::database::establish_connection;
 use crate::models::{Secret, StoreSecret};
-use crate::utils::{generate_secret_id, is_256bits_hex_hash};
+use crate::utils::{generate_secret_id, is_256bits_hex_hash, is_base64};
 use crate::AppState;
 
 pub async fn store_secret(State(state): State<AppState>, Json(payload): Json<StoreSecret>) -> (StatusCode, Json<Option<Value>>) {
@@ -18,10 +18,15 @@ pub async fn store_secret(State(state): State<AppState>, Json(payload): Json<Sto
         }))));
     }
 
+    if !is_base64(encrypted_secret){
+        return (StatusCode::BAD_REQUEST, Json(Some(json!({
+            "error": "encrypted_secret should be base64 encoded",
+        }))));
+    }
 
     if encrypted_secret.len() > state.secret_max_length  {
         return (StatusCode::BAD_REQUEST, Json(Some(json!({
-            "error": "encrypted_secret length exceeds the limit",
+            "error": format!("encrypted_secret length exceeds the limit {}", state.secret_max_length),
         }))));
     }
 

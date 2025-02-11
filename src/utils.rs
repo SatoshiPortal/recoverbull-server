@@ -24,6 +24,7 @@ pub fn init() -> AppState {
     let server_addr: String = env::var("SERVER_ADDRESS").expect("SERVER_ADDRESS must be set");
     let request_cooldown = env::var("REQUEST_COOLDOWN").expect("REQUEST_COOLDOWN must be set");
     let secret_max_letter_limit = env::var("SECRET_MAX_LETTER_LIMIT").expect("SECRET_MAX_LETTER_LIMIT must be set");
+    env::var("INFO_MESSAGE").expect("INFO_MESSAGE must be set");
 
     let database_url;
     if cfg!(test) {

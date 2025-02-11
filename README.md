@@ -73,7 +73,8 @@ echo "DATABASE_URL=production_db.sqlite3" >> .env && \
 echo "TEST_DATABASE_URL=test_db.sqlite3" >> .env && \
 echo "SERVER_ADDRESS=0.0.0.0:3000" >> .env && \
 echo "REQUEST_COOLDOWN=720" >> .env && \
-echo "SECRET_MAX_LETTER_LIMIT=1000" >> .env && \
+echo "SECRET_MAX_LETTER_LIMIT=44" >> .env && \
+echo "INFO_MESSAGE='Hello World'" >> .env && \
 echo "MIGRATIONS_DIR=$(pwd)/migrations" >> .env
 ```
 

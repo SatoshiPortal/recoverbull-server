@@ -7,7 +7,7 @@ use crate::models::FetchSecret;
 use crate::utils::{generate_secret_id, is_256bits_hex_hash};
 use crate::AppState;
 
-pub async fn recover_secret(
+pub async fn fetch_secret(
     State(state): State<AppState>,
     Json(payload): Json<FetchSecret>,
 ) -> (StatusCode, Json<Option<Value>>) {

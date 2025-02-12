@@ -37,7 +37,7 @@ The server provides secret storage without relying on traditional credentials sy
 
 ### Fetch
 
- 1. The client, must own informations needed to recover such as his `identifier`, `password`, `salt`…
+ 1. The client, must own informations needed such as `identifier`, `password`, `salt`…
 
  2. From the `password` we re-generate the two derived keys `authentication_key` and `encryption_key` using the same Argon2 params and `salt`.
 
@@ -49,7 +49,7 @@ The server provides secret storage without relying on traditional credentials sy
 - Look-up in an in-memory cache `Map<identifier, DateTime?>` to check if this `identifier` has already been requested recently. If not enough time elapsed, the user remains rate-limited. –> Mitigate targeted brute-force.
 - If the user is not rate-limited, the server compute `secret_id` = `hash(identifier + authentication_key)` and fetch the entry in the database. If something is found it returns the `encrypted_secret` else it add the `identifier` to the in-memory cache to the map to limit further attempts.
 
-5. The user can recover his `secret` by deciphering `encrypted_secret` using his `encryption_key` as encryption key.
+5. The user can fetch his `secret` by deciphering `encrypted_secret` using his `encryption_key` as encryption key.
 
 
 
@@ -95,15 +95,15 @@ cargo run
 ### Usage
 
 ```sh
-# Create a new entry
+# Store
 curl -i -X POST http://localhost:3000/store \
 -H "Content-Type: application/json" \
 -d '{"identifier": "bcb15f821479b4d5772bd0ca866c00ad5f926e3580720659cc80d39c9d09802a", "authentication_key": "4cc8f4d609b717356701c57a03e737e5ac8fe885da8c7163d3de47e01849c635", "encrypted_secret": "4a1dl1T8cxcP2pnvxwYWDwm/I68vVd9oWMY0nTOmBSNbonEN/mfBjkPWkSNlxjWacsS2lRVzoGUQ4guZArKf415dLvbObReqWNtzmA4vaB9/feJapmgWAssVI9EbhJFf"}'
 
 # secret is the sha256 of 123456
 
-# Recover
-curl -i -X POST http://localhost:3000/recover \
+# Fetch
+curl -i -X POST http://localhost:3000/fetch \
 -H "Content-Type: application/json" \
 -d '{"identifier": "bcb15f821479b4d5772bd0ca866c00ad5f926e3580720659cc80d39c9d09802a", "authentication_key": "4cc8f4d609b717356701c57a03e737e5ac8fe885da8c7163d3de47e01849c635"}'
 # id is the sha256 of my_backup_key

@@ -1,7 +1,7 @@
 use axum::{routing::{get, post}, Router};
 
 use crate::{
-    handlers::{info, recover, store},
+    handlers::{info, fetch, store},
     AppState,
 };
 
@@ -15,7 +15,7 @@ pub fn new(app_state: AppState) -> Router {
                 .allow_methods(tower_http::cors::Any)
                 .allow_headers(tower_http::cors::Any),
         )
-        .route("/recover", post(recover::recover_secret))
+        .route("/fetch", post(fetch::fetch_secret))
         .with_state(app_state.clone())
         .layer(
             tower_http::cors::CorsLayer::new()

@@ -1,4 +1,4 @@
-pub mod test_recover_key;
+pub mod test_fetch_key;
 pub mod test_server;
 pub mod test_store_key;
 

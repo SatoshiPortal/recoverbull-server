@@ -5,7 +5,7 @@ use crate::{
 use axum::http::StatusCode;
 
 #[tokio::test]
-async fn test_recover_success() {
+async fn test_fetch_success() {
 
     let (server, _) = crate::tests::test_server::new_test_server().await;
 
@@ -27,7 +27,7 @@ async fn test_recover_success() {
     };
 
     let response = server
-        .post("/recover")
+        .post("/fetch")
         .json(&fetch)
         .expect_success()
         .await;
@@ -40,7 +40,7 @@ async fn test_recover_success() {
 }
 
 #[tokio::test]
-async fn test_recover_key_failure_invalid_hash_for_format_identifier() {
+async fn test_fetch_key_failure_invalid_hash_for_format_identifier() {
     let (server, _) = crate::tests::test_server::new_test_server().await;
 
     let fetch = FetchSecret {
@@ -49,7 +49,7 @@ async fn test_recover_key_failure_invalid_hash_for_format_identifier() {
     };
 
     let response = server
-        .post("/recover")
+        .post("/fetch")
         .json(&fetch)
         .expect_failure()
         .await;
@@ -58,7 +58,7 @@ async fn test_recover_key_failure_invalid_hash_for_format_identifier() {
 }
 
 #[tokio::test]
-async fn test_recover_failure_invalid_hash_format_for_authentication_key() {
+async fn test_fetch_failure_invalid_hash_format_for_authentication_key() {
     let (server, _) = crate::tests::test_server::new_test_server().await;
 
     let fetch = FetchSecret {
@@ -67,7 +67,7 @@ async fn test_recover_failure_invalid_hash_format_for_authentication_key() {
     };
 
     let response = server
-        .post("/recover")
+        .post("/fetch")
         .json(&fetch)
         .expect_failure()
         .await;
@@ -77,7 +77,7 @@ async fn test_recover_failure_invalid_hash_format_for_authentication_key() {
 
 
 #[tokio::test]
-async fn test_recover_failure_too_many_attempts() {
+async fn test_fetch_failure_too_many_attempts() {
     let (server, _) = crate::tests::test_server::new_test_server().await;
 
     server
@@ -92,14 +92,14 @@ async fn test_recover_failure_too_many_attempts() {
 
     let fetch = FetchSecret {
         identifier: SHA256_111111.to_string(),
-        authentication_key: NOT_PASSWORD_HASH.to_string(), // this should make the recovery fail
+        authentication_key: NOT_PASSWORD_HASH.to_string(), // this should make the fetchy fail
     };
 
     // set the cooldown
-    server.post("/recover").json(&fetch).expect_failure().await;
+    server.post("/fetch").json(&fetch).expect_failure().await;
 
     // trigger the cooldown
-    let response = server.post("/recover").json(&fetch).expect_failure().await;
+    let response = server.post("/fetch").json(&fetch).expect_failure().await;
 
     assert_eq!(response.status_code(), StatusCode::TOO_MANY_REQUESTS);
 }

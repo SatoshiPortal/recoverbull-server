@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use std::{collections::HashMap, env, error::Error, sync::Arc};
 use tokio::sync::Mutex;
 
-use crate::{models::Payload, AppState};
+use crate::AppState;
 
 fn is_hex(input: &str) -> bool {
     input.chars().all(|c| c.is_ascii_hexdigit())
@@ -34,7 +34,7 @@ pub fn init() -> AppState {
     let server_addr: String = env::var("SERVER_ADDRESS").expect("SERVER_ADDRESS must be set");
     let request_cooldown = env::var("REQUEST_COOLDOWN").expect("REQUEST_COOLDOWN must be set");
     let secret_max_length = env::var("SECRET_MAX_LENGTH").expect("SECRET_MAX_LENGTH must be set");
-    env::var("INFO_MESSAGE").expect("INFO_MESSAGE must be set");
+    env::var("CANARY").expect("CANARY must be set");
     get_secret_key_from_dotenv(); // Check if SECRET_KEY is set
 
     let database_url;
@@ -87,20 +87,16 @@ pub fn get_secret_key_from_dotenv() -> String {
     return env::var("SECRET_KEY").expect("SECRET_KEY must be set");
 }
 
-pub fn decrypt_body(secret_key: &String, payload: Payload) -> Result<String, Box<dyn Error>>{
+pub fn decrypt_body(secret_key: &String, public_key: &String, ciphertext: String) -> Result<String, Box<dyn Error>>{
     let secret_key = SecretKey::parse(secret_key)?;
-
-    let ciphertext = payload.encrypted_body;
-    let public_key = PublicKey::from_hex(&payload.public_key)?;
-    
+    let public_key = PublicKey::from_hex(&public_key)?;
     let plaintext = nip44::decrypt(&secret_key, &public_key, ciphertext)?;
     return Ok(plaintext);
 }
 
-pub fn encrypt_body(secret_key: &String, public_key: &String, plaintext: String) -> Result<Payload, Box<dyn Error>>{
+pub fn encrypt_body(secret_key: &String, public_key: &String, plaintext: String) -> Result<String, Box<dyn Error>>{
     let keys = Keys::parse(secret_key)?;
     let public_key = PublicKey::from_hex(public_key)?;
-
     let ciphertext = nip44::encrypt(&keys.secret_key(), &public_key, plaintext, nip44::Version::V2)?;
-    return Ok(Payload { public_key: keys.public_key().to_hex(), encrypted_body: ciphertext, });
+    return Ok(ciphertext);
 }

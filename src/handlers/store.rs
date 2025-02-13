@@ -3,14 +3,16 @@ use axum::{http::StatusCode, Json};
 use serde_json::{json,Value};
 
 use crate::database::establish_connection;
-use crate::models::{Payload, Secret, StoreSecret};
+use crate::models::{EncryptedRequest, Secret, StoreSecret};
 use crate::utils::{decrypt_body, generate_secret_id, get_secret_key_from_dotenv, is_256bits_hex_hash, is_base64};
 use crate::AppState;
 
-pub async fn store_secret(State(state): State<AppState>,Json(payload): Json<Payload>) -> (StatusCode, Json<Option<Value>>) {
+pub async fn store_secret(State(state): State<AppState>,Json(encryptedrequest): Json<EncryptedRequest>) -> (StatusCode, Json<Option<Value>>) {
     let server_secret_key = get_secret_key_from_dotenv();
+    let client_public_key = encryptedrequest.public_key.clone();
+    let encrypted_body = encryptedrequest.encrypted_body.clone();
 
-    let body: String = match decrypt_body(&server_secret_key, payload) {
+    let body: String = match decrypt_body(&server_secret_key, &client_public_key, encrypted_body) {
         Ok(value) => value,
         Err(_) => {
             return (
@@ -70,6 +72,6 @@ pub async fn store_secret(State(state): State<AppState>,Json(payload): Json<Payl
     match is_stored {
         Some(true) => return (StatusCode::CREATED, Json(None)),
         Some(false) => return (StatusCode::BAD_REQUEST, Json(None)),
-        None => return (StatusCode::FORBIDDEN, Json(None)),
+        None => return (StatusCode::FORBIDDEN, Json(None)), // duplicate
     }
 }

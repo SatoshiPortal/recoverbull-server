@@ -1,7 +1,7 @@
 use axum::http::StatusCode;
 use nostr::key::Keys;
 
-use crate::{models::{Payload, StoreSecret}, tests::{test_server::get_test_server_public_key, BASE64_ENCRYPTED_SECRET, CLIENT_SECRET_KEY, SHA256_111111, SHA256_222222}, utils::encrypt_body};
+use crate::{models::{EncryptedRequest, StoreSecret}, tests::{test_server::get_test_server_public_key, BASE64_ENCRYPTED_SECRET, CLIENT_SECRET_KEY, SHA256_111111, SHA256_222222}, utils::encrypt_body};
 
 #[tokio::test]
 async fn test_success_created() {
@@ -17,11 +17,14 @@ async fn test_success_created() {
         encrypted_secret: BASE64_ENCRYPTED_SECRET.to_string(),
     }).unwrap();
 
-    let encrypted_body: Payload = encrypt_body(&client_secret_key, &server_public_key, body).unwrap();
+    let encrypted_body: String = encrypt_body(&client_secret_key, &server_public_key, body).unwrap();
     
     let response =     server
         .post("/store")
-        .json(&encrypted_body)
+        .json(&EncryptedRequest{
+        public_key:client_keys.public_key.to_hex(),
+        encrypted_body:    encrypted_body
+        })
         .expect_success()
         .await;
 
@@ -43,11 +46,14 @@ async fn test_failure_identifier_not_64_letters() {
         encrypted_secret: BASE64_ENCRYPTED_SECRET.to_string(),
     }).unwrap();
 
-    let encrypted_body: Payload = encrypt_body(&client_secret_key, &server_public_key, body).unwrap();
+    let encrypted_body: String = encrypt_body(&client_secret_key, &server_public_key, body).unwrap();
     
     let response =     server
         .post("/store")
-        .json(&encrypted_body)
+        .json(&EncryptedRequest{
+            public_key:client_keys.public_key.to_hex(),
+            encrypted_body:    encrypted_body
+            })
         .expect_failure()
         .await;
 
@@ -67,15 +73,16 @@ async fn test_failure_encrypted_empty_secret() {
         encrypted_secret: "".to_string(),
     }).unwrap();
 
-    let encrypted_body: Payload = encrypt_body(&client_secret_key, &server_public_key, body).unwrap();
+    let encrypted_body: String = encrypt_body(&client_secret_key, &server_public_key, body).unwrap();
     
     let response =     server
         .post("/store")
-        .json(&encrypted_body)
+        .json(&EncryptedRequest{
+            public_key:client_keys.public_key.to_hex(),
+            encrypted_body:    encrypted_body
+            })
         .expect_failure()
         .await;
-
-    println!("{}", response.status_code());
 
     assert_eq!(response.status_code(), StatusCode::BAD_REQUEST);
 }
@@ -93,11 +100,14 @@ async fn test_failure_encrypted_secret_invalid_base64() {
         encrypted_secret: "!@#$%^&*()".to_string(), // invalid_base64
     }).unwrap();
 
-    let encrypted_body: Payload = encrypt_body(&client_secret_key, &server_public_key, body).unwrap();
+    let encrypted_body: String = encrypt_body(&client_secret_key, &server_public_key, body).unwrap();
     
     let response =     server
         .post("/store")
-        .json(&encrypted_body)
+        .json(&EncryptedRequest{
+            public_key:client_keys.public_key.to_hex(),
+            encrypted_body:    encrypted_body
+            })
         .expect_failure()
         .await;
 

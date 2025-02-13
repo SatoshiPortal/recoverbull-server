@@ -39,6 +39,8 @@ pub fn init() -> AppState {
     env::var("CANARY").expect("CANARY must be set");
     get_secret_key_from_dotenv(); // Check if SECRET_KEY is set
 
+    println!("SERVER PUBKEY: {}", get_test_server_public_key());
+
     let database_url = if cfg!(test) {
         env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set")
     } else {
@@ -84,6 +86,12 @@ pub fn generate_secret_id(identifier: &str, authentication_key: &str) -> String 
 
 pub fn get_secret_key_from_dotenv() -> String {
     env::var("SECRET_KEY").expect("SECRET_KEY must be set")
+}
+
+pub fn get_test_server_public_key() -> String {
+    let secret_key_from_dotenv = get_secret_key_from_dotenv();
+    let keys = Keys::parse(&secret_key_from_dotenv).unwrap();
+    keys.public_key().to_hex()
 }
 
 pub fn decrypt_body(

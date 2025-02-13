@@ -1,8 +1,5 @@
 use axum_test::TestServer;
 use diesel::{RunQueryDsl, SqliteConnection};
-use nostr::key::Keys;
-
-use crate::utils::get_secret_key_from_dotenv;
 
 #[cfg(test)]
 pub async fn new_test_server() -> (TestServer, crate::AppState) {
@@ -16,12 +13,6 @@ pub async fn new_test_server() -> (TestServer, crate::AppState) {
     clear_table_secret(&mut connection).await;
 
     (TestServer::new(app).unwrap(), app_state)
-}
-
-pub fn get_test_server_public_key() -> String {
-    let secret_key_from_dotenv = get_secret_key_from_dotenv();
-    let keys = Keys::parse(&secret_key_from_dotenv).unwrap();
-    keys.public_key().to_hex()
 }
 
 pub async fn clear_table_secret(connection: &mut SqliteConnection) {

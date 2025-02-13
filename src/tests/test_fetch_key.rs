@@ -1,10 +1,10 @@
 use crate::{
     models::{EncryptedRequest, EncryptedResponse, FetchSecret, Secret, StoreSecret},
     tests::{
-        test_server::get_test_server_public_key, BASE64_ENCRYPTED_SECRET, CLIENT_SECRET_KEY,
-        NOT_PASSWORD_HASH, SHA256_111111, SHA256_222222, SHA256_CONCAT_111111_222222,
+        BASE64_ENCRYPTED_SECRET, CLIENT_SECRET_KEY, NOT_PASSWORD_HASH, SHA256_111111,
+        SHA256_222222, SHA256_CONCAT_111111_222222,
     },
-    utils::{decrypt_body, encrypt_body},
+    utils::{decrypt_body, encrypt_body, get_test_server_public_key},
 };
 use axum::http::StatusCode;
 use nostr::key::Keys;

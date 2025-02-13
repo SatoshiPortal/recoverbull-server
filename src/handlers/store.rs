@@ -70,8 +70,8 @@ pub async fn store_secret(State(state): State<AppState>,Json(encryptedrequest): 
     let is_stored = crate::database::write(&mut connection, &key);
 
     match is_stored {
-        Some(true) => return (StatusCode::CREATED, Json(None)),
-        Some(false) => return (StatusCode::BAD_REQUEST, Json(None)),
-        None => return (StatusCode::FORBIDDEN, Json(None)), // duplicate
+        Some(true) => (StatusCode::CREATED, Json(None)),
+        Some(false) => (StatusCode::BAD_REQUEST, Json(None)),
+        None => (StatusCode::FORBIDDEN, Json(None)), // duplicate
     }
 }

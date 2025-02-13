@@ -50,10 +50,7 @@ pub async fn fetch_secret(
     };
 
     let current_time: chrono::DateTime<chrono::Utc> = chrono::Utc::now();
-    let last_request = match last_request_time {
-        Some(ref requested_at) => Some(requested_at),
-        None => None,
-    };
+    let last_request = last_request_time.as_ref();
 
     let has_cooled_down = match last_request {
         Some(x) => current_time.signed_duration_since(x) > state.cooldown,
@@ -72,10 +69,10 @@ pub async fn fetch_secret(
             Some(key) => {
                 let response = serde_json::to_string(&key).unwrap();
                 let encrypted_response = encrypt_body(&server_secret_key, &client_public_key,response).unwrap();
-                return (
+                (
                     StatusCode::OK,
-                    Json(json!(&EncryptedResponse{encrypted_response: encrypted_response})),
-                );
+                    Json(json!(&EncryptedResponse{encrypted_response})),
+                )
             }
 
             None => {
@@ -90,7 +87,7 @@ pub async fn fetch_secret(
                     "cooldown": state.cooldown.num_minutes(),
                 });
                 
-                return (StatusCode::UNAUTHORIZED, Json(response));
+                (StatusCode::UNAUTHORIZED, Json(response))
             }
         }
     } else {
@@ -99,6 +96,6 @@ pub async fn fetch_secret(
             "requested_at": last_request_time.unwrap(),
             "cooldown": state.cooldown.num_minutes(),
         });
-        return (StatusCode::TOO_MANY_REQUESTS, Json(response));
+        (StatusCode::TOO_MANY_REQUESTS, Json(response))
     }
 }

@@ -23,7 +23,7 @@ async fn test_success_created() {
         .post("/store")
         .json(&EncryptedRequest{
         public_key:client_keys.public_key.to_hex(),
-        encrypted_body:    encrypted_body
+        encrypted_body
         })
         .expect_success()
         .await;
@@ -52,7 +52,7 @@ async fn test_failure_identifier_not_64_letters() {
         .post("/store")
         .json(&EncryptedRequest{
             public_key:client_keys.public_key.to_hex(),
-            encrypted_body:    encrypted_body
+            encrypted_body
             })
         .expect_failure()
         .await;
@@ -79,7 +79,7 @@ async fn test_failure_encrypted_empty_secret() {
         .post("/store")
         .json(&EncryptedRequest{
             public_key:client_keys.public_key.to_hex(),
-            encrypted_body:    encrypted_body
+            encrypted_body
             })
         .expect_failure()
         .await;
@@ -106,7 +106,7 @@ async fn test_failure_encrypted_secret_invalid_base64() {
         .post("/store")
         .json(&EncryptedRequest{
             public_key:client_keys.public_key.to_hex(),
-            encrypted_body:    encrypted_body
+            encrypted_body
             })
         .expect_failure()
         .await;

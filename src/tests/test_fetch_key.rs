@@ -20,7 +20,7 @@ async fn test_fetch_success() {
 
     let encrypted_body: String = encrypt_body(&client_secret_key, &server_public_key, body).unwrap();
 
-    server.post("/store").json(&EncryptedRequest{public_key: client_keys.public_key().to_hex(), encrypted_body: encrypted_body}).expect_success().await;
+    server.post("/store").json(&EncryptedRequest{public_key: client_keys.public_key().to_hex(), encrypted_body}).expect_success().await;
 
     let body = serde_json::to_string(&FetchSecret {
         identifier: SHA256_111111.to_string(),
@@ -29,7 +29,7 @@ async fn test_fetch_success() {
 
     let encrypted_body = encrypt_body(&client_secret_key, &server_public_key, body).unwrap();
     
-    let response = server.post("/fetch").json(&EncryptedRequest{public_key: client_keys.public_key().to_hex(), encrypted_body: encrypted_body}).expect_success().await;
+    let response = server.post("/fetch").json(&EncryptedRequest{public_key: client_keys.public_key().to_hex(), encrypted_body}).expect_success().await;
 
     assert_eq!(response.status_code(), StatusCode::OK);
 
@@ -56,7 +56,7 @@ async fn test_fetch_key_failure_invalid_hash_for_format_identifier() {
 
     let encrypted_body = encrypt_body(&client_secret_key, &server_public_key, body).unwrap();
     
-    let response = server.post("/fetch").json(&EncryptedRequest{public_key: client_keys.public_key().to_hex(), encrypted_body: encrypted_body}).expect_failure().await;
+    let response = server.post("/fetch").json(&EncryptedRequest{public_key: client_keys.public_key().to_hex(), encrypted_body}).expect_failure().await;
 
     assert_eq!(response.status_code(), StatusCode::BAD_REQUEST);
 }
@@ -75,7 +75,7 @@ async fn test_fetch_failure_invalid_hash_format_for_authentication_key() {
 
     let encrypted_body = encrypt_body(&client_secret_key, &server_public_key, body).unwrap();
     
-    let response = server.post("/fetch").json(&EncryptedRequest{public_key: client_keys.public_key().to_hex(), encrypted_body: encrypted_body}).expect_failure().await;
+    let response = server.post("/fetch").json(&EncryptedRequest{public_key: client_keys.public_key().to_hex(), encrypted_body}).expect_failure().await;
 
     assert_eq!(response.status_code(), StatusCode::BAD_REQUEST);
 }

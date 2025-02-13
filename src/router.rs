@@ -6,7 +6,7 @@ use crate::{
 };
 
 pub fn new(app_state: AppState) -> Router {
-    return Router::new()
+    Router::new()
         .route("/store", post(store::store_secret))
         .with_state(app_state.clone())
         .layer(
@@ -30,6 +30,6 @@ pub fn new(app_state: AppState) -> Router {
                 .allow_origin(tower_http::cors::Any)
                 .allow_methods(tower_http::cors::Any)
                 .allow_headers(tower_http::cors::Any),
-        );
+        )
 
 }

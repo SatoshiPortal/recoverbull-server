@@ -2,11 +2,12 @@
 use base64::{prelude::BASE64_STANDARD, Engine};
 use chrono::Duration;
 use dotenv::dotenv;
+use nostr::{key::{ Keys, PublicKey, SecretKey}, nips::nip44};
 use sha2::{Digest, Sha256};
-use std::{collections::HashMap, env, sync::Arc};
+use std::{collections::HashMap, env, error::Error, sync::Arc};
 use tokio::sync::Mutex;
 
-use crate::AppState;
+use crate::{models::Payload, AppState};
 
 fn is_hex(input: &str) -> bool {
     input.chars().all(|c| c.is_ascii_hexdigit())
@@ -34,6 +35,7 @@ pub fn init() -> AppState {
     let request_cooldown = env::var("REQUEST_COOLDOWN").expect("REQUEST_COOLDOWN must be set");
     let secret_max_length = env::var("SECRET_MAX_LENGTH").expect("SECRET_MAX_LENGTH must be set");
     env::var("INFO_MESSAGE").expect("INFO_MESSAGE must be set");
+    get_secret_key_from_dotenv(); // Check if SECRET_KEY is set
 
     let database_url;
     if cfg!(test) {
@@ -65,6 +67,7 @@ pub fn init() -> AppState {
         cooldown: Duration::minutes(cooldown),
         identifier_access_time: Arc::new(Mutex::new(HashMap::new())),
         secret_max_length:secret_max_length,
+
     };
 }
 
@@ -78,4 +81,26 @@ pub fn generate_secret_id(identifier: &String, authentication_key: &String) -> S
 
     let secret_id = hasher.finalize();
     return hex::encode(secret_id);
+}
+
+pub fn get_secret_key_from_dotenv() -> String {
+    return env::var("SECRET_KEY").expect("SECRET_KEY must be set");
+}
+
+pub fn decrypt_body(secret_key: &String, payload: Payload) -> Result<String, Box<dyn Error>>{
+    let secret_key = SecretKey::parse(secret_key)?;
+
+    let ciphertext = payload.encrypted_body;
+    let public_key = PublicKey::from_hex(&payload.public_key)?;
+    
+    let plaintext = nip44::decrypt(&secret_key, &public_key, ciphertext)?;
+    return Ok(plaintext);
+}
+
+pub fn encrypt_body(secret_key: &String, public_key: &String, plaintext: String) -> Result<Payload, Box<dyn Error>>{
+    let keys = Keys::parse(secret_key)?;
+    let public_key = PublicKey::from_hex(public_key)?;
+
+    let ciphertext = nip44::encrypt(&keys.secret_key(), &public_key, plaintext, nip44::Version::V2)?;
+    return Ok(Payload { public_key: keys.public_key().to_hex(), encrypted_body: ciphertext, });
 }

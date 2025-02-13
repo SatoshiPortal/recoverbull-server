@@ -3,16 +3,39 @@ use axum::{http::StatusCode, Json};
 use serde_json::{json, Value};
 
 use crate::database::{establish_connection, read_secret_by_id};
-use crate::models::FetchSecret;
-use crate::utils::{generate_secret_id, is_256bits_hex_hash};
+use crate::models::{Payload, FetchSecret};
+use crate::utils::{decrypt_body, encrypt_body, generate_secret_id, get_secret_key_from_dotenv, is_256bits_hex_hash};
 use crate::AppState;
 
 pub async fn fetch_secret(
     State(state): State<AppState>,
-    Json(payload): Json<FetchSecret>,
+    Json(payload): Json<Payload>,
 ) -> (StatusCode, Json<Option<Value>>) {
-    let identifier = &payload.identifier;
-    let authentication_key = &payload.authentication_key;
+    let client_public_key = payload.public_key.clone();
+    let server_secret_key = get_secret_key_from_dotenv();
+
+    let body: String = match decrypt_body(&server_secret_key, payload) {
+        Ok(value) => value,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(Some(json!({"error": "server not able to decrypt the encrypted_body"}))),
+            );
+        }
+    };
+
+    let request: FetchSecret = match serde_json::from_str(&body){
+        Ok(value) => value,
+        Err(_)=> {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(Some(json!({"error": "the decrypted body is invalid"}))),
+            );
+        }
+    };
+
+    let identifier = &request.identifier;
+    let authentication_key = &request.authentication_key;
 
     if !is_256bits_hex_hash(identifier) || !is_256bits_hex_hash(authentication_key) {
         return (StatusCode::BAD_REQUEST, Json(Some(json!({
@@ -46,11 +69,14 @@ pub async fn fetch_secret(
         let result = read_secret_by_id(&mut connection, &key_id);
         match result {
             Some(key) => {
+                let response = serde_json::to_string(&key).unwrap();
+                let encrypted_response = encrypt_body(&server_secret_key, &client_public_key,response).unwrap();
                 return (
                     StatusCode::OK,
-                    Json(Some(serde_json::to_value(&key).unwrap())),
+                    Json(Some(serde_json::to_value(&encrypted_response).unwrap())),
                 );
             }
+
             None => {
                 // target brute-force mitigation
                 // set cooldown only if the entry is not found (because it doesn't exist or the user input is invalid)

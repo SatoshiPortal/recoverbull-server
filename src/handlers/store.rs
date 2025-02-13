@@ -3,18 +3,46 @@ use axum::{http::StatusCode, Json};
 use serde_json::{json,Value};
 
 use crate::database::establish_connection;
-use crate::models::{Secret, StoreSecret};
-use crate::utils::{generate_secret_id, is_256bits_hex_hash, is_base64};
+use crate::models::{Payload, Secret, StoreSecret};
+use crate::utils::{decrypt_body, generate_secret_id, get_secret_key_from_dotenv, is_256bits_hex_hash, is_base64};
 use crate::AppState;
 
-pub async fn store_secret(State(state): State<AppState>, Json(payload): Json<StoreSecret>) -> (StatusCode, Json<Option<Value>>) {
-    let authentication_key = &payload.authentication_key;
-    let encrypted_secret = &payload.encrypted_secret;
-    let identifier = &payload.identifier;
+pub async fn store_secret(State(state): State<AppState>,Json(payload): Json<Payload>) -> (StatusCode, Json<Option<Value>>) {
+    let server_secret_key = get_secret_key_from_dotenv();
+
+    let body: String = match decrypt_body(&server_secret_key, payload) {
+        Ok(value) => value,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(Some(json!({"error": "not able to decrypt the encrypted_body"}))),
+            );
+        }
+    };
+
+    let request: StoreSecret = match serde_json::from_str(&body){
+        Ok(value) => value,
+        Err(_)=> {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(Some(json!({"error": "the decrypted body is invalid"}))),
+            );
+        }
+    };
+
+    let authentication_key = &request.authentication_key;
+    let encrypted_secret = &request.encrypted_secret;
+    let identifier = &request.identifier;
 
     if !is_256bits_hex_hash(identifier) || !is_256bits_hex_hash(authentication_key) {
         return (StatusCode::BAD_REQUEST, Json(Some(json!({
             "error": "identifier or authentication_key are not 256 bits HEX hashes",
+        }))));
+    }
+
+    if encrypted_secret.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(Some(json!({
+            "error": "encrypted_secret is empty",
         }))));
     }
 

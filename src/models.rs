@@ -2,6 +2,22 @@ use diesel::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
+pub struct Payload {
+    pub public_key: String,
+    pub encrypted_body: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct InfoResponse {
+    pub timestamp: i64,
+    pub cooldown: i64,
+    pub secret_max_length: usize,
+    pub public_key: String,
+    pub message: String,
+}
+
+
+#[derive(Serialize, Deserialize)]
 pub struct StoreSecret {
     pub identifier: String,
     pub authentication_key: String,

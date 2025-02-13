@@ -1,7 +1,10 @@
-use axum::{routing::{get, post}, Router};
+use axum::{
+    routing::{get, post},
+    Router,
+};
 
 use crate::{
-    handlers::{info, fetch, store},
+    handlers::{fetch, info, store},
     AppState,
 };
 
@@ -31,5 +34,4 @@ pub fn new(app_state: AppState) -> Router {
                 .allow_methods(tower_http::cors::Any)
                 .allow_headers(tower_http::cors::Any),
         )
-
 }

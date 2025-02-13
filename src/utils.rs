@@ -1,8 +1,10 @@
-
 use base64::{prelude::BASE64_STANDARD, Engine};
 use chrono::Duration;
 use dotenv::dotenv;
-use nostr::{key::{ Keys, PublicKey, SecretKey}, nips::nip44};
+use nostr::{
+    key::{Keys, PublicKey, SecretKey},
+    nips::nip44,
+};
 use sha2::{Digest, Sha256};
 use std::{collections::HashMap, env, error::Error, sync::Arc};
 use tokio::sync::Mutex;
@@ -25,7 +27,7 @@ fn is_length(length: usize, input: &str) -> bool {
 }
 
 pub fn is_256bits_hex_hash(input: &str) -> bool {
-     is_length(64, input) && is_hex(input) 
+    is_length(64, input) && is_hex(input)
 }
 
 pub fn init() -> AppState {
@@ -37,13 +39,11 @@ pub fn init() -> AppState {
     env::var("CANARY").expect("CANARY must be set");
     get_secret_key_from_dotenv(); // Check if SECRET_KEY is set
 
-    
-    let database_url;
-      if cfg!(test) {
-        database_url = env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set");
+    let database_url = if cfg!(test) {
+        env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set")
     } else {
-         database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    }
+        env::var("DATABASE_URL").expect("DATABASE_URL must be set")
+    };
 
     let cooldown = match request_cooldown.parse::<i64>() {
         Ok(number) => number,
@@ -61,14 +61,12 @@ pub fn init() -> AppState {
         }
     };
 
-
     AppState {
         server_address: server_addr,
         database_url,
         cooldown: Duration::minutes(cooldown),
         identifier_access_time: Arc::new(Mutex::new(HashMap::new())),
         secret_max_length,
-
     }
 }
 
@@ -88,16 +86,29 @@ pub fn get_secret_key_from_dotenv() -> String {
     env::var("SECRET_KEY").expect("SECRET_KEY must be set")
 }
 
-pub fn decrypt_body(secret_key: &str, public_key: &str, ciphertext: String) -> Result<String, Box<dyn Error>>{
+pub fn decrypt_body(
+    secret_key: &str,
+    public_key: &str,
+    ciphertext: String,
+) -> Result<String, Box<dyn Error>> {
     let secret_key = SecretKey::parse(secret_key)?;
     let public_key = PublicKey::from_hex(public_key)?;
     let plaintext = nip44::decrypt(&secret_key, &public_key, ciphertext)?;
     Ok(plaintext)
 }
 
-pub fn encrypt_body(secret_key: &str, public_key: &str, plaintext: String) -> Result<String, Box<dyn Error>>{
+pub fn encrypt_body(
+    secret_key: &str,
+    public_key: &str,
+    plaintext: String,
+) -> Result<String, Box<dyn Error>> {
     let keys = Keys::parse(secret_key)?;
     let public_key = PublicKey::from_hex(public_key)?;
-    let ciphertext = nip44::encrypt(keys.secret_key(), &public_key, plaintext, nip44::Version::V2)?;
+    let ciphertext = nip44::encrypt(
+        keys.secret_key(),
+        &public_key,
+        plaintext,
+        nip44::Version::V2,
+    )?;
     Ok(ciphertext)
 }

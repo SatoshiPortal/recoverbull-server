@@ -3,8 +3,10 @@ use axum::{http::StatusCode, Json};
 use serde_json::{json, Value};
 
 use crate::database::{establish_connection, read_secret_by_id};
-use crate::models::{EncryptedResponse, FetchSecret, EncryptedRequest};
-use crate::utils::{decrypt_body, encrypt_body, generate_secret_id, get_secret_key_from_dotenv, is_256bits_hex_hash};
+use crate::models::{EncryptedRequest, EncryptedResponse, FetchSecret};
+use crate::utils::{
+    decrypt_body, encrypt_body, generate_secret_id, get_secret_key_from_dotenv, is_256bits_hex_hash,
+};
 use crate::AppState;
 
 pub async fn fetch_secret(
@@ -25,9 +27,9 @@ pub async fn fetch_secret(
         }
     };
 
-    let request: FetchSecret = match serde_json::from_str(&body){
+    let request: FetchSecret = match serde_json::from_str(&body) {
         Ok(value) => value,
-        Err(_)=> {
+        Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({"error": "the decrypted body is invalid"})),
@@ -39,9 +41,12 @@ pub async fn fetch_secret(
     let authentication_key = &request.authentication_key;
 
     if !is_256bits_hex_hash(identifier) || !is_256bits_hex_hash(authentication_key) {
-        return (StatusCode::BAD_REQUEST, Json(json!({
-            "error": "identifier or authentication_key are not 256 bits HEX hashes",
-        })));
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "identifier or authentication_key are not 256 bits HEX hashes",
+            })),
+        );
     }
 
     let last_request_time = {
@@ -58,7 +63,6 @@ pub async fn fetch_secret(
     };
 
     if has_cooled_down || last_request.is_none() {
-
         // re-generate the key_id
         let key_id = generate_secret_id(identifier, authentication_key);
 
@@ -68,10 +72,11 @@ pub async fn fetch_secret(
         match result {
             Some(key) => {
                 let response = serde_json::to_string(&key).unwrap();
-                let encrypted_response = encrypt_body(&server_secret_key, &client_public_key,response).unwrap();
+                let encrypted_response =
+                    encrypt_body(&server_secret_key, &client_public_key, response).unwrap();
                 (
                     StatusCode::OK,
-                    Json(json!(&EncryptedResponse{encrypted_response})),
+                    Json(json!(&EncryptedResponse { encrypted_response })),
                 )
             }
 
@@ -86,7 +91,7 @@ pub async fn fetch_secret(
                     "requested_at": current_time.to_rfc3339(),
                     "cooldown": state.cooldown.num_minutes(),
                 });
-                
+
                 (StatusCode::UNAUTHORIZED, Json(response))
             }
         }

@@ -1,12 +1,9 @@
 use base64::{prelude::BASE64_STANDARD, Engine};
 use chrono::Duration;
 use dotenv::dotenv;
-use nostr::{
-    key::{Keys, PublicKey, SecretKey},
-    nips::nip44,
-};
+use nostr::key::Keys;
 use sha2::{Digest, Sha256};
-use std::{collections::HashMap, env, error::Error, sync::Arc};
+use std::{collections::HashMap, env, sync::Arc};
 use tokio::sync::Mutex;
 
 use crate::AppState;
@@ -94,29 +91,3 @@ pub fn get_test_server_public_key() -> String {
     keys.public_key().to_hex()
 }
 
-pub fn decrypt_body(
-    secret_key: &str,
-    public_key: &str,
-    ciphertext: String,
-) -> Result<String, Box<dyn Error>> {
-    let secret_key = SecretKey::parse(secret_key)?;
-    let public_key = PublicKey::from_hex(public_key)?;
-    let plaintext = nip44::decrypt(&secret_key, &public_key, ciphertext)?;
-    Ok(plaintext)
-}
-
-pub fn encrypt_body(
-    secret_key: &str,
-    public_key: &str,
-    plaintext: String,
-) -> Result<String, Box<dyn Error>> {
-    let keys = Keys::parse(secret_key)?;
-    let public_key = PublicKey::from_hex(public_key)?;
-    let ciphertext = nip44::encrypt(
-        keys.secret_key(),
-        &public_key,
-        plaintext,
-        nip44::Version::V2,
-    )?;
-    Ok(ciphertext)
-}

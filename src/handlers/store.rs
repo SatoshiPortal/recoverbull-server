@@ -4,8 +4,9 @@ use serde_json::{json, Value};
 
 use crate::database::establish_connection;
 use crate::models::{EncryptedRequest, Secret, StoreSecret};
+use crate::nip44::decrypt_body;
 use crate::utils::{
-    decrypt_body, generate_secret_id, get_secret_key_from_dotenv, is_256bits_hex_hash, is_base64,
+    generate_secret_id, get_secret_key_from_dotenv, is_256bits_hex_hash, is_base64,
 };
 use crate::AppState;
 

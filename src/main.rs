@@ -3,6 +3,7 @@ mod handlers;
 mod models;
 mod router;
 mod schema;
+mod nip44;
 #[cfg(test)]
 mod tests;
 mod utils;

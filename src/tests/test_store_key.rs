@@ -2,9 +2,7 @@ use axum::http::StatusCode;
 use nostr::key::Keys;
 
 use crate::{
-    models::{EncryptedRequest, StoreSecret},
-    tests::{BASE64_ENCRYPTED_SECRET, CLIENT_SECRET_KEY, SHA256_111111, SHA256_222222},
-    utils::{encrypt_body, get_test_server_public_key},
+    models::{EncryptedRequest, StoreSecret}, nip44::encrypt_body, tests::{BASE64_ENCRYPTED_SECRET, CLIENT_SECRET_KEY, SHA256_111111, SHA256_222222}, utils::get_test_server_public_key
 };
 
 #[tokio::test]

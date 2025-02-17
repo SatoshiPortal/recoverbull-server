@@ -4,6 +4,7 @@ mod models;
 mod router;
 mod schema;
 mod nip44;
+mod app_state;
 #[cfg(test)]
 mod tests;
 mod utils;
@@ -24,7 +25,7 @@ struct AppState {
 
 #[tokio::main]
 async fn main() {
-    let app_state = crate::utils::init();
+    let app_state = crate::app_state::init();
 
     crate::database::init_db(app_state.clone());
 

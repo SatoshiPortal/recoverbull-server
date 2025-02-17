@@ -3,7 +3,7 @@ use diesel::{RunQueryDsl, SqliteConnection};
 
 #[cfg(test)]
 pub async fn new_test_server() -> (TestServer, crate::AppState) {
-    let app_state = crate::utils::init();
+    let app_state = crate::app_state::init();
 
     crate::database::init_db(app_state.clone());
 

@@ -1,8 +1,8 @@
-pub mod test_fetch_key;
+pub mod test_fetch;
 pub mod test_info;
 mod test_schnorr;
 pub mod test_server;
-pub mod test_store_key;
+pub mod test_store;
 pub mod test_trash;
 
 static SHA256_111111: &str = "bcb15f821479b4d5772bd0ca866c00ad5f926e3580720659cc80d39c9d09802a";

@@ -44,4 +44,3 @@ pub fn get_test_server_public_key() -> String {
     let keys = Keys::parse(&secret_key_from_dotenv).unwrap();
     keys.public_key().to_hex()
 }
-

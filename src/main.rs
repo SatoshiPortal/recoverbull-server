@@ -1,10 +1,11 @@
+mod app_state;
 mod database;
 mod handlers;
 mod models;
+mod nip44;
 mod router;
 mod schema;
-mod nip44;
-mod app_state;
+mod schnorr;
 #[cfg(test)]
 mod tests;
 mod utils;

@@ -3,7 +3,10 @@ use dotenv::dotenv;
 use std::{collections::HashMap, env, sync::Arc};
 use tokio::sync::Mutex;
 
-use crate::{utils::{get_secret_key_from_dotenv, get_test_server_public_key}, AppState};
+use crate::{
+    utils::{get_secret_key_from_dotenv, get_test_server_public_key},
+    AppState,
+};
 
 pub fn init() -> AppState {
     dotenv().ok();

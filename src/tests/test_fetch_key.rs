@@ -1,11 +1,12 @@
 use crate::{
     models::{EncryptedRequest, EncryptedResponse, FetchSecret, Secret, StoreSecret}, nip44::{decrypt_body, encrypt_body}, tests::{
-        BASE64_ENCRYPTED_SECRET, CLIENT_SECRET_KEY, NOT_PASSWORD_HASH, SHA256_111111,
-        SHA256_222222, SHA256_CONCAT_111111_222222,
+        test_schnorr::verify, BASE64_ENCRYPTED_SECRET, CLIENT_SECRET_KEY, NOT_PASSWORD_HASH, SHA256_111111, SHA256_222222, SHA256_CONCAT_111111_222222
     }, utils::get_test_server_public_key
 };
 use axum::http::StatusCode;
+use base64::{prelude::BASE64_STANDARD, Engine};
 use nostr::key::Keys;
+use sha2::{Digest, Sha256};
 
 #[tokio::test]
 async fn test_fetch_success() {
@@ -173,4 +174,58 @@ async fn test_fetch_failure_too_many_attempts() {
         .await;
 
     assert_eq!(response.status_code(), StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn test_fetch_signature() {
+    let (server, _) = crate::tests::test_server::new_test_server().await;
+    let client_keys = Keys::parse(CLIENT_SECRET_KEY).unwrap();
+    let client_secret_key = client_keys.secret_key().to_secret_hex();
+    let server_public_key = get_test_server_public_key();
+
+    let body = serde_json::to_string(&StoreSecret {
+        identifier: SHA256_111111.to_string(),
+        authentication_key: SHA256_222222.to_string(),
+        encrypted_secret: BASE64_ENCRYPTED_SECRET.to_string(),
+    })
+    .unwrap();
+
+    let encrypted_body: String =
+        encrypt_body(&client_secret_key, &server_public_key, body).unwrap();
+
+    server
+        .post("/store")
+        .json(&EncryptedRequest {
+            public_key: client_keys.public_key().to_hex(),
+            encrypted_body,
+        })
+        .expect_success()
+        .await;
+
+    let body = serde_json::to_string(&FetchSecret {
+        identifier: SHA256_111111.to_string(),
+        authentication_key: SHA256_222222.to_string(),
+    })
+    .unwrap();
+
+    let encrypted_body = encrypt_body(&client_secret_key, &server_public_key, body).unwrap();
+
+    let response = server
+        .post("/fetch")
+        .json(&EncryptedRequest {
+            public_key: client_keys.public_key().to_hex(),
+            encrypted_body,
+        })
+        .expect_success()
+        .await;
+
+    assert_eq!(response.status_code(), StatusCode::OK);
+
+    let encrypted_response:String = response.json::<EncryptedResponse>().encrypted_response;
+    let encrypted_response_signature:String = response.json::<EncryptedResponse>().signature;
+    let encrypted_response_bytes = BASE64_STANDARD.decode(encrypted_response.clone()).unwrap();
+    let hash_encryped_response: [u8; 32] = Sha256::digest(&encrypted_response_bytes).into();
+
+    let is_valid = verify(&hex::decode(server_public_key).unwrap(), hash_encryped_response, &hex::decode(encrypted_response_signature).unwrap()).unwrap();
+    assert_eq!(is_valid, true);
 }

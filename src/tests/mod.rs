@@ -1,5 +1,6 @@
 pub mod test_fetch_key;
 pub mod test_info;
+mod test_schnorr;
 pub mod test_server;
 pub mod test_store_key;
 

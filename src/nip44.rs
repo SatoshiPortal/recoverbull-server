@@ -1,11 +1,8 @@
-
 use nostr::{
     key::{Keys, PublicKey, SecretKey},
     nips::nip44,
 };
 use std::error::Error;
-
-
 
 pub fn decrypt_body(
     secret_key: &str,

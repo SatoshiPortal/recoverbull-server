@@ -10,6 +10,7 @@ pub struct EncryptedRequest {
 #[derive(Serialize, Deserialize)]
 pub struct EncryptedResponse {
     pub encrypted_response: String,
+    pub signature: String,
 }
 
 #[derive(Serialize, Deserialize)]

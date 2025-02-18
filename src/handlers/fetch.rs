@@ -1,14 +1,14 @@
 use axum::extract::State;
 use axum::{http::StatusCode, Json};
+use base64::{prelude::BASE64_STANDARD, Engine};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 use crate::database::{establish_connection, read_secret_by_id};
 use crate::models::{EncryptedRequest, EncryptedResponse, FetchSecret};
 use crate::nip44::{decrypt_body, encrypt_body};
-use crate::utils::{
-    generate_secret_id, get_secret_key_from_dotenv, is_256bits_hex_hash,
-};
-use crate::AppState;
+use crate::utils::{generate_secret_id, get_secret_key_from_dotenv, is_256bits_hex_hash};
+use crate::{schnorr, AppState};
 
 pub async fn fetch_secret(
     State(state): State<AppState>,
@@ -75,9 +75,16 @@ pub async fn fetch_secret(
                 let response = serde_json::to_string(&key).unwrap();
                 let encrypted_response =
                     encrypt_body(&server_secret_key, &client_public_key, response).unwrap();
+                let encrypted_response_bytes = BASE64_STANDARD.decode(encrypted_response.clone()).unwrap();
+                let hash_encryped_response: [u8; 32] = Sha256::digest(&encrypted_response_bytes).into();
+                let signature = schnorr::sign(&hex::decode(server_secret_key).unwrap(), hash_encryped_response).unwrap();
+                let signature = hex::encode(signature);
                 (
                     StatusCode::OK,
-                    Json(json!(&EncryptedResponse { encrypted_response })),
+                    Json(json!(&EncryptedResponse {
+                        encrypted_response,
+                        signature,
+                    })),
                 )
             }
 

@@ -1,7 +1,7 @@
 use crate::{
-    models::{EncryptedRequest, EncryptedResponse, FetchSecret, Secret, StoreSecret}, nip44::{decrypt_body, encrypt_body}, tests::{
-        test_schnorr::verify, BASE64_ENCRYPTED_SECRET, CLIENT_SECRET_KEY, NOT_PASSWORD_HASH, SHA256_111111, SHA256_222222, SHA256_CONCAT_111111_222222
-    }, utils::get_test_server_public_key
+    env::get_test_server_public_key, models::{EncryptedRequest, EncryptedResponse, FetchSecret, Secret, StoreSecret}, nip44::{decrypt_body, encrypt_body}, schnorr::verify, tests::{
+         BASE64_ENCRYPTED_SECRET, CLIENT_SECRET_KEY, NOT_PASSWORD_HASH, SHA256_111111, SHA256_222222, SHA256_CONCAT_111111_222222
+    }
 };
 use axum::http::StatusCode;
 use base64::{prelude::BASE64_STANDARD, Engine};
@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 async fn test_fetch_success() {
     let (server, _) = crate::tests::test_server::new_test_server().await;
     let client_keys = Keys::parse(CLIENT_SECRET_KEY).unwrap();
-    let client_secret_key = client_keys.secret_key().to_secret_hex();
+    let client_secret_key = client_keys.secret_key().to_secret_bytes();
     let server_public_key = get_test_server_public_key();
 
     let body = serde_json::to_string(&StoreSecret {
@@ -65,7 +65,7 @@ async fn test_fetch_success() {
 async fn test_fetch_key_failure_invalid_hash_for_format_identifier() {
     let (server, _) = crate::tests::test_server::new_test_server().await;
     let client_keys = Keys::parse(CLIENT_SECRET_KEY).unwrap();
-    let client_secret_key = client_keys.secret_key().to_secret_hex();
+    let client_secret_key = client_keys.secret_key().to_secret_bytes();
     let server_public_key = get_test_server_public_key();
 
     let body = serde_json::to_string(&FetchSecret {
@@ -92,7 +92,7 @@ async fn test_fetch_key_failure_invalid_hash_for_format_identifier() {
 async fn test_fetch_failure_invalid_hash_format_for_authentication_key() {
     let (server, _) = crate::tests::test_server::new_test_server().await;
     let client_keys = Keys::parse(CLIENT_SECRET_KEY).unwrap();
-    let client_secret_key = client_keys.secret_key().to_secret_hex();
+    let client_secret_key = client_keys.secret_key().to_secret_bytes();
     let server_public_key = get_test_server_public_key();
 
     let body = serde_json::to_string(&FetchSecret {
@@ -119,7 +119,7 @@ async fn test_fetch_failure_invalid_hash_format_for_authentication_key() {
 async fn test_fetch_failure_too_many_attempts() {
     let (server, _) = crate::tests::test_server::new_test_server().await;
     let client_keys = Keys::parse(CLIENT_SECRET_KEY).unwrap();
-    let client_secret_key = client_keys.secret_key().to_secret_hex();
+    let client_secret_key = client_keys.secret_key().to_secret_bytes();
     let server_public_key = get_test_server_public_key();
 
     let store = serde_json::to_string(&StoreSecret {
@@ -180,7 +180,7 @@ async fn test_fetch_failure_too_many_attempts() {
 async fn test_fetch_signature() {
     let (server, _) = crate::tests::test_server::new_test_server().await;
     let client_keys = Keys::parse(CLIENT_SECRET_KEY).unwrap();
-    let client_secret_key = client_keys.secret_key().to_secret_hex();
+    let client_secret_key = client_keys.secret_key().to_secret_bytes();
     let server_public_key = get_test_server_public_key();
 
     let body = serde_json::to_string(&StoreSecret {
@@ -226,6 +226,6 @@ async fn test_fetch_signature() {
     let encrypted_response_bytes = BASE64_STANDARD.decode(encrypted_response.clone()).unwrap();
     let hash_encryped_response: [u8; 32] = Sha256::digest(&encrypted_response_bytes).into();
 
-    let is_valid = verify(&hex::decode(server_public_key).unwrap(), hash_encryped_response, &hex::decode(encrypted_response_signature).unwrap()).unwrap();
+    let is_valid = verify(&server_public_key, hash_encryped_response, &hex::decode(encrypted_response_signature).unwrap()).unwrap();
     assert_eq!(is_valid, true);
 }

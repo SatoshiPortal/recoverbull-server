@@ -1,22 +1,6 @@
 use nostr::secp256k1::{Keypair, Secp256k1};
-use std::error::Error;
-use nostr::secp256k1::{schnorr::Signature, Message, XOnlyPublicKey};
 
-#[cfg(test)] // used for unit tests
-pub fn verify(
-    public_key: &[u8],
-    message: [u8; 32],
-    signature: &[u8]
-) -> Result<bool, Box<dyn Error>> {
-    let secp = Secp256k1::new();
-    let msg = Message::from_digest(message);
-
-    let xonly_pubkey = XOnlyPublicKey::from_slice(public_key)?;
-    let signature = Signature::from_slice(signature)?;
-
-    Ok(secp.verify_schnorr(&signature, &msg, &xonly_pubkey).is_ok())
-}
-
+use crate::schnorr;
 
 #[tokio::test]
 async fn test_sign() {
@@ -33,6 +17,6 @@ async fn test_sign() {
     let keys = Keypair::from_seckey_slice(&secp,&secret).unwrap();
     let public_key = keys.x_only_public_key().0.serialize();
 
-    let is_valid = verify(&public_key, message, &expected_signature).unwrap();
+    let is_valid = schnorr::verify(&public_key, message, &expected_signature).unwrap();
     assert!(is_valid);
 }

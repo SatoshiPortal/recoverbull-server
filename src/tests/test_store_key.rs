@@ -5,7 +5,7 @@ use crate::{
     models::{EncryptedRequest, StoreSecret},
     nip44::encrypt_body,
     tests::{BASE64_ENCRYPTED_SECRET, CLIENT_SECRET_KEY, SHA256_111111, SHA256_222222},
-    utils::get_test_server_public_key,
+    env::get_test_server_public_key,
 };
 
 #[tokio::test]
@@ -13,7 +13,7 @@ async fn test_success_created() {
     let (server, _) = crate::tests::test_server::new_test_server().await;
 
     let client_keys = Keys::parse(CLIENT_SECRET_KEY).unwrap();
-    let client_secret_key = client_keys.secret_key().to_secret_hex();
+    let client_secret_key = client_keys.secret_key().to_secret_bytes();
     let server_public_key = get_test_server_public_key();
 
     let body = serde_json::to_string(&StoreSecret {
@@ -42,7 +42,7 @@ async fn test_success_created() {
 async fn test_failure_identifier_not_64_letters() {
     let (server, _) = crate::tests::test_server::new_test_server().await;
     let client_keys = Keys::parse(CLIENT_SECRET_KEY).unwrap();
-    let client_secret_key = client_keys.secret_key().to_secret_hex();
+    let client_secret_key = client_keys.secret_key().to_secret_bytes();
     let server_public_key = get_test_server_public_key();
 
     let body = serde_json::to_string(&StoreSecret {
@@ -71,7 +71,7 @@ async fn test_failure_identifier_not_64_letters() {
 async fn test_failure_encrypted_empty_secret() {
     let (server, _) = crate::tests::test_server::new_test_server().await;
     let client_keys = Keys::parse(CLIENT_SECRET_KEY).unwrap();
-    let client_secret_key = client_keys.secret_key().to_secret_hex();
+    let client_secret_key = client_keys.secret_key().to_secret_bytes();
     let server_public_key = get_test_server_public_key();
 
     let body = serde_json::to_string(&StoreSecret {
@@ -100,7 +100,7 @@ async fn test_failure_encrypted_empty_secret() {
 async fn test_failure_encrypted_secret_invalid_base64() {
     let (server, _) = crate::tests::test_server::new_test_server().await;
     let client_keys = Keys::parse(CLIENT_SECRET_KEY).unwrap();
-    let client_secret_key = client_keys.secret_key().to_secret_hex();
+    let client_secret_key = client_keys.secret_key().to_secret_bytes();
     let server_public_key = get_test_server_public_key();
 
     let body = serde_json::to_string(&StoreSecret {

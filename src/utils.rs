@@ -1,7 +1,4 @@
-use std::env;
-
 use base64::{prelude::BASE64_STANDARD, Engine};
-use nostr::key::Keys;
 use sha2::{Digest, Sha256};
 
 fn is_hex(input: &str) -> bool {
@@ -33,14 +30,4 @@ pub fn generate_secret_id(identifier: &str, authentication_key: &str) -> String 
 
     let secret_id = hasher.finalize();
     hex::encode(secret_id)
-}
-
-pub fn get_secret_key_from_dotenv() -> String {
-    env::var("SECRET_KEY").expect("SECRET_KEY must be set")
-}
-
-pub fn get_test_server_public_key() -> String {
-    let secret_key_from_dotenv = get_secret_key_from_dotenv();
-    let keys = Keys::parse(&secret_key_from_dotenv).unwrap();
-    keys.public_key().to_hex()
 }

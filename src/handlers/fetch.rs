@@ -7,14 +7,23 @@ use sha2::{Digest, Sha256};
 use crate::database::{establish_connection, read_secret_by_id};
 use crate::models::{EncryptedRequest, EncryptedResponse, FetchSecret};
 use crate::nip44::{decrypt_body, encrypt_body};
-use crate::utils::{generate_secret_id, get_secret_key_from_dotenv, is_256bits_hex_hash};
+use crate::utils::{generate_secret_id, is_256bits_hex_hash};
+use crate::env::get_secret_key_from_dotenv;
 use crate::{schnorr, AppState};
 
 pub async fn fetch_secret(
     State(state): State<AppState>,
     Json(encryptedrequest): Json<EncryptedRequest>,
 ) -> (StatusCode, Json<Value>) {
-    let client_public_key = encryptedrequest.public_key.clone();
+    let client_public_key = match hex::decode(encryptedrequest.public_key.clone()){
+        Ok(value)=> value,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "public_key should be hex encoded"})),
+            );
+        }
+    };
     let encrypted_body = encryptedrequest.encrypted_body.clone();
     let server_secret_key = get_secret_key_from_dotenv();
 
@@ -77,7 +86,7 @@ pub async fn fetch_secret(
                     encrypt_body(&server_secret_key, &client_public_key, response).unwrap();
                 let encrypted_response_bytes = BASE64_STANDARD.decode(encrypted_response.clone()).unwrap();
                 let hash_encryped_response: [u8; 32] = Sha256::digest(&encrypted_response_bytes).into();
-                let signature = schnorr::sign(&hex::decode(server_secret_key).unwrap(), hash_encryped_response).unwrap();
+                let signature = schnorr::sign(&server_secret_key, hash_encryped_response).unwrap();
                 let signature = hex::encode(signature);
                 (
                     StatusCode::OK,

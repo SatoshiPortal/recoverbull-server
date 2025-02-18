@@ -1,4 +1,4 @@
-mod app_state;
+mod env;
 mod database;
 mod handlers;
 mod models;
@@ -26,7 +26,7 @@ struct AppState {
 
 #[tokio::main]
 async fn main() {
-    let app_state = crate::app_state::init();
+    let app_state = crate::env::init();
 
     crate::database::init_db(app_state.clone());
 

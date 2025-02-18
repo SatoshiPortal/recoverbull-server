@@ -1,6 +1,7 @@
 use std::error::Error;
 
 use nostr::secp256k1::{schnorr::Signature, Keypair, Message, Secp256k1, XOnlyPublicKey};
+use sha2::{Digest, Sha256};
 
 pub fn sign(secret_key: &[u8],message: [u8; 32]) -> Result<[u8; 64], Box<dyn Error>> {
     let secp = Secp256k1::new();
@@ -9,6 +10,12 @@ pub fn sign(secret_key: &[u8],message: [u8; 32]) -> Result<[u8; 64], Box<dyn Err
 
     let signature = secp.sign_schnorr(&msg, &keypair);
     Ok(signature.serialize())
+}
+
+
+pub fn sha256_and_sign(secret_key: &[u8],payload: &[u8]) -> Result<[u8; 64], Box<dyn Error>> {
+    let hash_payload: [u8; 32] = Sha256::digest(&payload).into();
+    return sign(secret_key, hash_payload);
 }
 
 #[allow(dead_code)] // used for unit tests

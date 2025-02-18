@@ -1,5 +1,5 @@
 use crate::{
-    env::get_test_server_public_key, models::{EncryptedRequest, EncryptedResponse, FetchSecret, Secret, StoreSecret}, nip44::{decrypt_body, encrypt_body}, schnorr::verify, tests::{
+    env::get_test_server_public_key, models::{EncryptedRequest, FetchSecret, Payload, Secret, SignedEncryptedResponse, StoreSecret}, nip44::{decrypt_body, encrypt_body}, schnorr::verify, tests::{
          BASE64_ENCRYPTED_SECRET, CLIENT_SECRET_KEY, NOT_PASSWORD_HASH, SHA256_111111, SHA256_222222, SHA256_CONCAT_111111_222222
     }
 };
@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 async fn test_fetch_success() {
     let (server, _) = crate::tests::test_server::new_test_server().await;
     let client_keys = Keys::parse(CLIENT_SECRET_KEY).unwrap();
-    let client_secret_key = client_keys.secret_key().to_secret_bytes();
+    let client_secret_key: [u8; 32] = client_keys.secret_key().to_secret_bytes();
     let server_public_key = get_test_server_public_key();
 
     let body = serde_json::to_string(&StoreSecret {
@@ -53,10 +53,11 @@ async fn test_fetch_success() {
 
     assert_eq!(response.status_code(), StatusCode::OK);
 
-    let encrypted_response: String = response.json::<EncryptedResponse>().encrypted_response;
+    let encrypted_response: String = response.json::<SignedEncryptedResponse>().encrypted_response;
     let body = decrypt_body(&client_secret_key, &server_public_key, encrypted_response).unwrap();
-    let secret: Secret = serde_json::from_str(&body).unwrap();
-
+    let payload: Payload = serde_json::from_str(&body).unwrap();
+    let secret: Secret = serde_json::from_str(&payload.data).unwrap();
+    
     assert_eq!(secret.id, SHA256_CONCAT_111111_222222);
     assert_eq!(secret.encrypted_secret, BASE64_ENCRYPTED_SECRET);
 }
@@ -221,8 +222,8 @@ async fn test_fetch_signature() {
 
     assert_eq!(response.status_code(), StatusCode::OK);
 
-    let encrypted_response:String = response.json::<EncryptedResponse>().encrypted_response;
-    let encrypted_response_signature:String = response.json::<EncryptedResponse>().signature;
+    let encrypted_response:String = response.json::<SignedEncryptedResponse>().encrypted_response;
+    let encrypted_response_signature:String = response.json::<SignedEncryptedResponse>().signature;
     let encrypted_response_bytes = BASE64_STANDARD.decode(encrypted_response.clone()).unwrap();
     let hash_encryped_response: [u8; 32] = Sha256::digest(&encrypted_response_bytes).into();
 

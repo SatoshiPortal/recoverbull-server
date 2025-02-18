@@ -8,14 +8,25 @@ pub struct EncryptedRequest {
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct EncryptedResponse {
+pub struct SignedEncryptedResponse {
     pub encrypted_response: String,
     pub signature: String,
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct InfoResponse {
+pub struct SignedResponse {
+    pub response: String,
+    pub signature: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct Payload{
     pub timestamp: i64,
+    pub data: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct Info {
     pub cooldown: i64,
     pub secret_max_length: usize,
     pub canary: String,

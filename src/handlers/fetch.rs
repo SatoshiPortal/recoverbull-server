@@ -1,11 +1,11 @@
 use axum::extract::State;
 use axum::{http::StatusCode, Json};
 use base64::{prelude::BASE64_STANDARD, Engine};
+use chrono::Utc;
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 
 use crate::database::{establish_connection, read_secret_by_id};
-use crate::models::{EncryptedRequest, EncryptedResponse, FetchSecret};
+use crate::models::{Payload, EncryptedRequest, FetchSecret, SignedEncryptedResponse};
 use crate::nip44::{decrypt_body, encrypt_body};
 use crate::utils::{generate_secret_id, is_256bits_hex_hash};
 use crate::env::get_secret_key_from_dotenv;
@@ -81,18 +81,21 @@ pub async fn fetch_secret(
         let result = read_secret_by_id(&mut connection, &key_id);
         match result {
             Some(key) => {
-                let response = serde_json::to_string(&key).unwrap();
+                let payload = serde_json::to_string(&Payload{
+                    timestamp: Utc::now().timestamp(),
+                    data: serde_json::to_string(&key).unwrap(),
+                }).unwrap();
+
                 let encrypted_response =
-                    encrypt_body(&server_secret_key, &client_public_key, response).unwrap();
-                let encrypted_response_bytes = BASE64_STANDARD.decode(encrypted_response.clone()).unwrap();
-                let hash_encryped_response: [u8; 32] = Sha256::digest(&encrypted_response_bytes).into();
-                let signature = schnorr::sign(&server_secret_key, hash_encryped_response).unwrap();
-                let signature = hex::encode(signature);
+                    encrypt_body(&server_secret_key, &client_public_key, payload).unwrap();
+                let encrypted_data_bytes = BASE64_STANDARD.decode(encrypted_response.clone()).unwrap();
+                
+                let signature = schnorr::sha256_and_sign(&server_secret_key, &encrypted_data_bytes).unwrap();
                 (
                     StatusCode::OK,
-                    Json(json!(&EncryptedResponse {
+                    Json(json!(&SignedEncryptedResponse {
                         encrypted_response,
-                        signature,
+                        signature: hex::encode(signature),
                     })),
                 )
             }

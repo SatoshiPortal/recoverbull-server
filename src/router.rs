@@ -1,11 +1,9 @@
 use axum::{
-    routing::{get, post},
-    Router,
+    extract::State, routing::{get, post}, Json, Router
 };
 
 use crate::{
-    handlers::{fetch, info, store},
-    AppState,
+    handlers::{fetch, info, store}, models::EncryptedRequest, AppState
 };
 
 pub fn new(app_state: AppState) -> Router {
@@ -18,7 +16,19 @@ pub fn new(app_state: AppState) -> Router {
                 .allow_methods(tower_http::cors::Any)
                 .allow_headers(tower_http::cors::Any),
         )
-        .route("/fetch", post(fetch::fetch_secret))
+        .route("/fetch", post(|state: State<AppState>, json: Json<EncryptedRequest>| {
+            fetch::fetch_secret(state, json, false)
+        }))
+        .with_state(app_state.clone())
+        .layer(
+            tower_http::cors::CorsLayer::new()
+                .allow_origin(tower_http::cors::Any)
+                .allow_methods(tower_http::cors::Any)
+                .allow_headers(tower_http::cors::Any),
+        )
+        .route("/trash", post(|state: State<AppState>, json: Json<EncryptedRequest>| {
+            fetch::fetch_secret(state, json, true)
+        }))
         .with_state(app_state.clone())
         .layer(
             tower_http::cors::CorsLayer::new()

@@ -4,7 +4,7 @@ use base64::{prelude::BASE64_STANDARD, Engine};
 use chrono::Utc;
 use serde_json::{json, Value};
 
-use crate::database::{establish_connection, read_secret_by_id};
+use crate::database::{establish_connection, read_secret_by_id, trash};
 use crate::models::{Payload, EncryptedRequest, FetchSecret, SignedEncryptedResponse};
 use crate::nip44::{decrypt_body, encrypt_body};
 use crate::utils::{generate_secret_id, is_256bits_hex_hash};
@@ -14,6 +14,7 @@ use crate::{schnorr, AppState};
 pub async fn fetch_secret(
     State(state): State<AppState>,
     Json(encryptedrequest): Json<EncryptedRequest>,
+    is_trashing_secret: bool,
 ) -> (StatusCode, Json<Value>) {
     let client_public_key = match hex::decode(encryptedrequest.public_key.clone()){
         Ok(value)=> value,
@@ -81,6 +82,12 @@ pub async fn fetch_secret(
         let result = read_secret_by_id(&mut connection, &key_id);
         match result {
             Some(key) => {
+                if is_trashing_secret {
+                    trash(&mut connection, &key_id);
+                }
+                let code = if is_trashing_secret {StatusCode::ACCEPTED} else {StatusCode::OK};
+
+
                 let payload = serde_json::to_string(&Payload{
                     timestamp: Utc::now().timestamp(),
                     data: serde_json::to_string(&key).unwrap(),
@@ -89,10 +96,10 @@ pub async fn fetch_secret(
                 let encrypted_response =
                     encrypt_body(&server_secret_key, &client_public_key, payload).unwrap();
                 let encrypted_data_bytes = BASE64_STANDARD.decode(encrypted_response.clone()).unwrap();
-                
+
                 let signature = schnorr::sha256_and_sign(&server_secret_key, &encrypted_data_bytes).unwrap();
                 (
-                    StatusCode::OK,
+                    code,
                     Json(json!(&SignedEncryptedResponse {
                         encrypted_response,
                         signature: hex::encode(signature),

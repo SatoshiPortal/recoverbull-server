@@ -5,7 +5,7 @@ use chrono::Utc;
 use serde_json::{json, Value};
 
 use crate::database::{establish_connection, read_secret_by_id, trash};
-use crate::models::{Payload, EncryptedRequest, FetchSecret, SignedEncryptedResponse};
+use crate::models::{Payload, EncryptedRequest, FetchSecret, SignedResponse};
 use crate::nip44::{decrypt_body, encrypt_body};
 use crate::utils::{generate_secret_id, is_256bits_hex_hash};
 use crate::env::get_secret_key_from_dotenv;
@@ -100,8 +100,8 @@ pub async fn fetch_secret(
                 let signature = schnorr::sha256_and_sign(&server_secret_key, &encrypted_data_bytes).unwrap();
                 (
                     code,
-                    Json(json!(&SignedEncryptedResponse {
-                        encrypted_response,
+                    Json(json!(&SignedResponse {
+                        response: encrypted_response,
                         signature: hex::encode(signature),
                     })),
                 )

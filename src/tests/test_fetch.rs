@@ -1,5 +1,5 @@
 use crate::{
-    env::get_test_server_public_key, models::{EncryptedRequest, FetchSecret, Payload, Secret, SignedEncryptedResponse, StoreSecret}, nip44::{decrypt_body, encrypt_body}, schnorr::verify, tests::{
+    env::get_test_server_public_key, models::{EncryptedRequest, FetchSecret, Payload, Secret, SignedResponse, StoreSecret}, nip44::{decrypt_body, encrypt_body}, schnorr::verify, tests::{
          BASE64_ENCRYPTED_SECRET, CLIENT_SECRET_KEY, NOT_PASSWORD_HASH, SHA256_111111, SHA256_222222, SHA256_CONCAT_111111_222222
     }
 };
@@ -53,7 +53,7 @@ async fn test_fetch_success() {
 
     assert_eq!(response.status_code(), StatusCode::OK);
 
-    let encrypted_response: String = response.json::<SignedEncryptedResponse>().encrypted_response;
+    let encrypted_response: String = response.json::<SignedResponse>().response;
     let body = decrypt_body(&client_secret_key, &server_public_key, encrypted_response).unwrap();
     let payload: Payload = serde_json::from_str(&body).unwrap();
     let secret: Secret = serde_json::from_str(&payload.data).unwrap();
@@ -222,8 +222,8 @@ async fn test_fetch_signature() {
 
     assert_eq!(response.status_code(), StatusCode::OK);
 
-    let encrypted_response:String = response.json::<SignedEncryptedResponse>().encrypted_response;
-    let encrypted_response_signature:String = response.json::<SignedEncryptedResponse>().signature;
+    let encrypted_response:String = response.json::<SignedResponse>().response;
+    let encrypted_response_signature:String = response.json::<SignedResponse>().signature;
     let encrypted_response_bytes = BASE64_STANDARD.decode(encrypted_response.clone()).unwrap();
     let hash_encryped_response: [u8; 32] = Sha256::digest(&encrypted_response_bytes).into();
 

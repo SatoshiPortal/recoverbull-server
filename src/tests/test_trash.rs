@@ -1,5 +1,5 @@
 use crate::{
-    env::get_test_server_public_key, models::{EncryptedRequest, FetchSecret, SignedEncryptedResponse, StoreSecret}, nip44::encrypt_body, schnorr::verify, tests::{
+    env::get_test_server_public_key, models::{EncryptedRequest, FetchSecret, SignedResponse, StoreSecret}, nip44::encrypt_body, schnorr::verify, tests::{
          BASE64_ENCRYPTED_SECRET, CLIENT_SECRET_KEY, SHA256_111111, SHA256_222222
     }
 };
@@ -53,8 +53,8 @@ async fn test_trash_success_signature_refetch() {
 
     assert_eq!(response.status_code(), StatusCode::ACCEPTED);
 
-    let encrypted_response:String = response.json::<SignedEncryptedResponse>().encrypted_response;
-    let encrypted_response_signature:String = response.json::<SignedEncryptedResponse>().signature;
+    let encrypted_response:String = response.json::<SignedResponse>().response;
+    let encrypted_response_signature:String = response.json::<SignedResponse>().signature;
     let encrypted_response_bytes = BASE64_STANDARD.decode(encrypted_response.clone()).unwrap();
     let hash_encryped_response: [u8; 32] = Sha256::digest(&encrypted_response_bytes).into();
 

@@ -1,6 +1,5 @@
 use axum::extract::State;
 use axum::{http::StatusCode, Json};
-use base64::{prelude::BASE64_STANDARD, Engine};
 use chrono::Utc;
 use serde_json::{json, Value};
 
@@ -85,19 +84,16 @@ pub async fn fetch_secret(
                 if is_trashing_secret {
                     trash(&mut connection, &key_id);
                 }
-                let code = if is_trashing_secret {StatusCode::ACCEPTED} else {StatusCode::OK};
-
+                let code = if is_trashing_secret {StatusCode::ACCEPTED} else {StatusCode::OK};            
 
                 let payload = serde_json::to_string(&Payload{
                     timestamp: Utc::now().timestamp(),
                     data: serde_json::to_string(&key).unwrap(),
                 }).unwrap();
 
-                let encrypted_response =
-                    encrypt_body(&server_secret_key, &client_public_key, payload).unwrap();
-                let encrypted_data_bytes = BASE64_STANDARD.decode(encrypted_response.clone()).unwrap();
+                let encrypted_response = encrypt_body(&server_secret_key, &client_public_key, payload).unwrap();
 
-                let signature = schnorr::sha256_and_sign(&server_secret_key, &encrypted_data_bytes).unwrap();
+                let signature = schnorr::sha256_and_sign(&server_secret_key, &encrypted_response.as_bytes()).unwrap();
                 (
                     code,
                     Json(json!(&SignedResponse {

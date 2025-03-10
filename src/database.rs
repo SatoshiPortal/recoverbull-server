@@ -20,6 +20,9 @@ pub fn init_db(state: AppState) {
     sql_query(create_table_query)
         .execute(&mut connection)
         .expect("Error creating table");
+    
+    // enable WAL mode to allow replication with litestream
+    sql_query("PRAGMA journal_mode = WAL;").execute(&mut connection).expect("Failed to enable WAL mode");
 }
 
 pub fn establish_connection(database_url: String) -> SqliteConnection {

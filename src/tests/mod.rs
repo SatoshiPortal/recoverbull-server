@@ -1,6 +1,5 @@
 pub mod test_fetch;
 pub mod test_info;
-mod test_schnorr;
 pub mod test_server;
 pub mod test_store;
 pub mod test_trash;
@@ -11,4 +10,3 @@ static SHA256_CONCAT_111111_222222: &str =
     "dd1d9109d8404436efc6d86bf1eb9f292f884d935b0ba0d22eb44ce8421ded19";
 static NOT_PASSWORD_HASH: &str = "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb";
 static BASE64_ENCRYPTED_SECRET: &str = "4a1dl1T8cxcP2pnvxwYWDwm/I68vVd9oWMY0nTOmBSNbonEN/mfBjkPWkSNlxjWacsS2lRVzoGUQ4guZArKf415dLvbObReqWNtzmA4vaB9/feJapmgWAssVI9EbhJFf";
-static CLIENT_SECRET_KEY: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";

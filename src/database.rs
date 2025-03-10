@@ -53,8 +53,7 @@ pub fn read_secret_by_id(connection: &mut SqliteConnection, secret_id: &str) -> 
 }
 
 pub fn trash(connection: &mut SqliteConnection, secret_id: &str) -> bool {
-    match diesel::delete(secret.filter(id.eq(secret_id))).execute(connection)
-    {
+    match diesel::delete(secret.filter(id.eq(secret_id))).execute(connection) {
         Ok(deleted_count) if deleted_count > 0 => true,
         Ok(_) => false,
         Err(_) => false,

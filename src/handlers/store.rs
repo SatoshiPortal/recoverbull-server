@@ -3,55 +3,14 @@ use axum::{http::StatusCode, Json};
 use serde_json::{json, Value};
 
 use crate::database::establish_connection;
-use crate::env::get_secret_key_from_dotenv;
-use crate::models::{EncryptedRequest, Secret, StoreSecret};
-use crate::nip44::decrypt_body;
-use crate::utils::{
-    generate_secret_id, is_256bits_hex_hash, is_base64,
-};
+use crate::models::{Secret, StoreSecret};
+use crate::utils::{generate_secret_id, is_256bits_hex_hash, is_base64};
 use crate::AppState;
 
 pub async fn store_secret(
     State(state): State<AppState>,
-    Json(encryptedrequest): Json<EncryptedRequest>,
+    Json(request): Json<StoreSecret>,
 ) -> (StatusCode, Json<Option<Value>>) {
-    let client_public_key = match hex::decode(encryptedrequest.public_key.clone()){
-        Ok(value)=> value,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(Some(
-                    json!({"error": "public_key should be hex encoded"}),
-                )),
-            );
-        }
-    };
-
-    let server_secret_key = get_secret_key_from_dotenv();
-    let encrypted_body = encryptedrequest.encrypted_body.clone();
-
-    let body: String = match decrypt_body(&server_secret_key, &client_public_key, encrypted_body) {
-        Ok(value) => value,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(Some(
-                    json!({"error": "not able to decrypt the encrypted_body"}),
-                )),
-            );
-        }
-    };
-
-    let request: StoreSecret = match serde_json::from_str(&body) {
-        Ok(value) => value,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(Some(json!({"error": "the decrypted body is invalid"}))),
-            );
-        }
-    };
-
     let authentication_key = &request.authentication_key;
     let encrypted_secret = &request.encrypted_secret;
     let identifier = &request.identifier;

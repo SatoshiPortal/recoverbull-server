@@ -1,11 +1,10 @@
-mod env;
 mod database;
+mod env;
 mod handlers;
 mod models;
-mod nip44;
 mod router;
 mod schema;
-mod schnorr;
+
 #[cfg(test)]
 mod tests;
 mod utils;

@@ -75,7 +75,6 @@ echo "SERVER_ADDRESS=0.0.0.0:3000" >> .env && \
 echo "REQUEST_COOLDOWN=720" >> .env && \
 echo "SECRET_MAX_LENGTH=128" >> .env && \
 echo "CANARY='🐦'" >> .env && \
-echo "SECRET_KEY='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'" >> .env && \
 echo "MIGRATIONS_DIR=$(pwd)/migrations" >> .env
 ```
 > `SECRET_MAX_LENGTH=128` represents the size of a 96 octets encrypted secret encoded using base64
@@ -96,29 +95,23 @@ cargo run
 ### Usage
 
 ```sh
-# Decrypted Store
-# {
-#         "identifier": "bcb15f821479b4d5772bd0ca866c00ad5f926e3580720659cc80d39c9d09802a", sha256(111111)
-#         "authentication_key": "4cc8f4d609b717356701c57a03e737e5ac8fe885da8c7163d3de47e01849c635", sha256(222222)
-#         "encrypted_secret": "4a1dl1T8cxcP2pnvxwYWDwm/I68vVd9oWMY0nTOmBSNbonEN/mfBjkPWkSNlxjWacsS2lRVzoGUQ4guZArKf415dLvbObReqWNtzmA4vaB9/feJapmgWAssVI9EbhJFf",
-# }
+# Info
+curl -X GET http://localhost:3000/info
 
 # Store
 curl -i -X POST http://localhost:3000/store \
 -H "Content-Type: application/json" \
--d '{"public_key":"68680737c76dabb801cb2204f57dbe4e4579e4f710cd67dc1b4227592c81e9b5","encrypted_body":"AkSEBOdaL+dv6R53u/dhUqLjOiAjTMSxmfc0Olha5JNtjTnT8Wh53s7rQtstISIdzpJYGiEfSWQ26dzWZoJXLyJE7xx2CQomoz4u31XENVLXo68P/EDF9BkbsZup5cQDN4SA0vdYr88qOnwzbf3jJp/3yiPYhOJDAMct15J3R8MhYKlBnZJ20czrG3lfXLgDN/9YbV/pmBMrsUvzC8Vz7cfLb0fLpSUW60RJFUasUEHeN0kPOTcNt6gBlsMQx230vzmyDDJUCtve+cpaqw8X5rniG5FKTC8M5YXAvmeltK3taqh0FVps21tvRcgn0W5rKt3qc/y+502ktuMnXmq4ZMk7v5AEfQrCTtxLh16x9AnxEkSE2qPU8efAvl8IUGG8Sd9hsO10hO1tZaONF/ZkASGCQs/TSzEhPS101ktzJ/uDsq+adLoKJboc2CWYxFngziJvcERhmrJrrA2GS9RkeoWVboQMdRHg3kHfCS6hp/bfea83PEhjXfHAL0XVLL4RUItB"}'
-
-# Decrypted Fetch
-# {
-#         "identifier": "bcb15f821479b4d5772bd0ca866c00ad5f926e3580720659cc80d39c9d09802a",
-#         "authentication_key": "4cc8f4d609b717356701c57a03e737e5ac8fe885da8c7163d3de47e01849c635",
-# }
+-d '{"identifier":"bcb15f821479b4d5772bd0ca866c00ad5f926e3580720659cc80d39c9d09802a","authentication_key":"4cc8f4d609b717356701c57a03e737e5ac8fe885da8c7163d3de47e01849c635", "encrypted_secret": "4a1dl1T8cxcP2pnvxwYWDwm/I68vVd9oWMY0nTOmBSNbonEN/mfBjkPWkSNlxjWacsS2lRVzoGUQ4guZArKf415dLvbObReqWNtzmA4vaB9/feJapmgWAssVI9EbhJFf"}'
 
 # Fetch
 curl -i -X POST http://localhost:3000/fetch \
 -H "Content-Type: application/json" \
--d '{"public_key":"68680737c76dabb801cb2204f57dbe4e4579e4f710cd67dc1b4227592c81e9b5","encrypted_body":"AnyDwJEOhwBFS2nYxt6o2baA4hAUV4ji5vuPAGfGF4AM//jd2OeE/pcWqhy4U0hwAY45HTpkr/aj5idP9zvHeq23E5aK+tHCEirK86sywuequ//7EkNDUVDEOdzmr824KF38mGMEejymyhUe4gtrVFfzATT1+BI9YVeZ9FDWSzTxisBSf4WyhNrhbxUlADqv4Ie2ptgl/oqNLUXkaMsstzZA4ls1kpd1dlu+hyjnSkSaUM1WjroZIQyj3voPQcrmM3wlDemUJF+fb+G4syT2W+tEruankJD89VAd/5nlGg9AdpNOrbD0CZjy6gqSu43xOo9puU9R1aOQmTp2uitbm6gVhQ=="}'
-# id is the sha256 of my_backup_key
+-d '{"identifier":"bcb15f821479b4d5772bd0ca866c00ad5f926e3580720659cc80d39c9d09802a","authentication_key":"4cc8f4d609b717356701c57a03e737e5ac8fe885da8c7163d3de47e01849c635"}'
+
+# Trash
+curl -i -X POST http://localhost:3000/trash \
+-H "Content-Type: application/json" \
+-d '{"identifier":"bcb15f821479b4d5772bd0ca866c00ad5f926e3580720659cc80d39c9d09802a","authentication_key":"4cc8f4d609b717356701c57a03e737e5ac8fe885da8c7163d3de47e01849c635"}'
 ```
 
 ## Tests

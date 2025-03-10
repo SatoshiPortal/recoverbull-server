@@ -2,24 +2,6 @@ use diesel::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
-pub struct EncryptedRequest {
-    pub public_key: String,
-    pub encrypted_body: String,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct SignedResponse {
-    pub response: String,
-    pub signature: String,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct Payload{
-    pub timestamp: i64,
-    pub data: String,
-}
-
-#[derive(Serialize, Deserialize)]
 pub struct Info {
     pub cooldown: i64,
     pub secret_max_length: usize,

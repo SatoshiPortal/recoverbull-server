@@ -74,8 +74,8 @@ echo "TEST_DATABASE_URL=test_db.sqlite3" >> .env && \
 echo "SERVER_ADDRESS=0.0.0.0:3000" >> .env && \
 echo "SECRET_MAX_LENGTH=128" >> .env && \
 echo "CANARY='🐦'" >> .env && \
-echo "RATE_LIMIT_COOLDOWN=720" >> .env && \
-echo "RATE_LIMIT_MAX_FAILED_ATTEMPTS=2" >> .env && \
+echo "RATE_LIMIT_COOLDOWN=1440" >> .env && \
+echo "RATE_LIMIT_MAX_FAILED_ATTEMPTS=3" >> .env && \
 echo "MIGRATIONS_DIR=$(pwd)/migrations" >> .env
 ```
 > `SECRET_MAX_LENGTH=128` represents the size of a 96 octets encrypted secret encoded using base64

@@ -29,3 +29,17 @@ pub struct Secret {
     pub created_at: String,
     pub encrypted_secret: String,
 }
+
+#[derive(Clone)]
+pub struct RateLimitInfo {
+    pub last_request: chrono::DateTime<chrono::Utc>,
+    pub attempts: u8,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ResponseFailedAttempt{
+    pub error: String,
+    pub requested_at:  chrono::DateTime<chrono::Utc>,
+    pub cooldown: i64,
+    pub attempts: u8,
+}

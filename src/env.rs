@@ -48,7 +48,7 @@ pub fn init() -> AppState {
         server_address: server_addr,
         database_url,
         cooldown: Duration::minutes(cooldown),
-        identifier_access_time: Arc::new(Mutex::new(HashMap::new())),
+        identifier_rate_limit: Arc::new(Mutex::new(HashMap::new())),
         secret_max_length,
         max_failed_attempts,
     }

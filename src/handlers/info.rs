@@ -14,6 +14,7 @@ pub async fn get_info(State(state): State<AppState>) -> (StatusCode, Json<Value>
         cooldown: state.cooldown.num_minutes(),
         secret_max_length: state.secret_max_length,
         canary,
+        max_failed_attempts: state.max_failed_attempts,
     };
 
     (StatusCode::OK, Json(json!(info)))

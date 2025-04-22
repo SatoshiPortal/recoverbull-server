@@ -21,6 +21,7 @@ struct AppState {
     cooldown: TimeDelta,
     identifier_access_time: Arc<Mutex<HashMap<String, DateTime<Utc>>>>,
     secret_max_length: usize,
+    max_failed_attempts: u8,
 }
 
 #[tokio::main]

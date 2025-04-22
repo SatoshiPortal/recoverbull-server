@@ -75,6 +75,7 @@ echo "SERVER_ADDRESS=0.0.0.0:3000" >> .env && \
 echo "REQUEST_COOLDOWN=720" >> .env && \
 echo "SECRET_MAX_LENGTH=128" >> .env && \
 echo "CANARY='🐦'" >> .env && \
+echo "MAX_FAILED_ATTEMPTS=2" >> .env && \
 echo "MIGRATIONS_DIR=$(pwd)/migrations" >> .env
 ```
 > `SECRET_MAX_LENGTH=128` represents the size of a 96 octets encrypted secret encoded using base64

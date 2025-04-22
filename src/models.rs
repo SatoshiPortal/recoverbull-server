@@ -6,6 +6,7 @@ pub struct Info {
     pub cooldown: i64,
     pub secret_max_length: usize,
     pub canary: String,
+    pub max_failed_attempts: u8,
 }
 
 #[derive(Serialize, Deserialize)]

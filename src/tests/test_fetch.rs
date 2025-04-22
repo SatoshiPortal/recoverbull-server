@@ -1,5 +1,5 @@
 use crate::{
-    models::{FetchSecret, Secret, StoreSecret},
+    models::{ResponseFailedAttempt, FetchSecret, Secret, StoreSecret},
     tests::{
         BASE64_ENCRYPTED_SECRET, NOT_PASSWORD_HASH, SHA256_111111, SHA256_222222,
         SHA256_CONCAT_111111_222222,
@@ -62,8 +62,9 @@ async fn test_fetch_failure_invalid_hash_format_for_authentication_key() {
 }
 
 #[tokio::test]
-async fn test_fetch_failure_too_many_attempts() {
-    let (server, _) = crate::tests::test_server::new_test_server().await;
+async fn test_fetch_rate_limit_enforced_and_reset_after_cooldown() {
+    let (server, state) = crate::tests::test_server::new_test_server().await;
+    println!("\n\nThis test takes {} seconds to be executed", state.rate_limit_cooldown.num_seconds());
 
     let store = &StoreSecret {
         identifier: SHA256_111111.to_string(),
@@ -78,19 +79,55 @@ async fn test_fetch_failure_too_many_attempts() {
         authentication_key: NOT_PASSWORD_HASH.to_string(), // this should make the fetchy fail
     };
 
-    // set the cooldown
-    server
-        .post("/fetch")
-        .json(&fetch_wrong_authentication_key)
-        .expect_failure()
-        .await;
+    // trigger rate limit by attempting many fail attempts
+    for i in 0..state.rate_limit_max_failed_attempts {
+        let response = server
+            .post("/fetch")
+            .json(&fetch_wrong_authentication_key)
+            .expect_failure()
+            .await;
+        
+        let failed_attempt = response.json::<ResponseFailedAttempt>();
+        assert_eq!(failed_attempt.attempts, i+1);
+        assert_eq!(response.status_code(), StatusCode::UNAUTHORIZED);
 
-    // trigger the cooldown
+        println!("attempts: {} | code: {}", failed_attempt.attempts, response.status_code());
+    }
+    
+    // trigger the rate_limit_cooldown
     let response = server
         .post("/fetch")
         .json(&fetch_wrong_authentication_key)
         .expect_failure()
         .await;
 
+    let failed_attempt = response.json::<ResponseFailedAttempt>();
+    assert_eq!(failed_attempt.attempts, state.rate_limit_max_failed_attempts);
     assert_eq!(response.status_code(), StatusCode::TOO_MANY_REQUESTS);
+
+    println!("attempts: {} | code: {}", failed_attempt.attempts, response.status_code());
+    
+    let rate_limit_cooldown = state.rate_limit_cooldown.num_seconds() as u64;
+    println!("\rWaiting… {} seconds rate_limit_cooldown", rate_limit_cooldown);
+    std::thread::sleep(std::time::Duration::from_secs(rate_limit_cooldown));
+
+    let response = server
+        .post("/fetch")
+        .json(&FetchSecret {
+            identifier: SHA256_111111.to_string(),
+            authentication_key: SHA256_222222.to_string(),
+        })
+        .expect_success()
+        .await;
+
+    let secret = response.json::<Secret>();
+    
+    println!("code: {} | key: {}", response.status_code(), secret.encrypted_secret);
+
+    assert_eq!(secret.id, SHA256_CONCAT_111111_222222);
+    assert_eq!(secret.encrypted_secret, BASE64_ENCRYPTED_SECRET);
+
+    // ensure the entry is not in the map anymore
+    let identifier_rate_limit = state.identifier_rate_limit.lock().await;
+    assert_eq!(identifier_rate_limit.contains_key(SHA256_111111), false);
 }

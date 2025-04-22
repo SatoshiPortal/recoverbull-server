@@ -8,7 +8,7 @@ async fn test_info_success() {
     let info = response.json::<Info>();
 
     assert_eq!(response.status_code(), StatusCode::OK);
-    assert_eq!(info.cooldown, state.cooldown.num_minutes());
+    assert_eq!(info.rate_limit_cooldown, state.rate_limit_cooldown.num_minutes() as u64);
     assert_eq!(info.secret_max_length, state.secret_max_length);
     assert_eq!(info.canary, "🐦");
 }

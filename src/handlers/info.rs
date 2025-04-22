@@ -11,9 +11,10 @@ pub async fn get_info(State(state): State<AppState>) -> (StatusCode, Json<Value>
     let canary = env::var("CANARY").expect("CANARY must be set");
 
     let info = &Info {
-        cooldown: state.cooldown.num_minutes(),
-        secret_max_length: state.secret_max_length,
         canary,
+        secret_max_length: state.secret_max_length,
+        rate_limit_cooldown: state.rate_limit_cooldown.num_minutes() as u64,
+        rate_limit_max_failed_attempts: state.rate_limit_max_failed_attempts,
     };
 
     (StatusCode::OK, Json(json!(info)))

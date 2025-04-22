@@ -11,16 +11,17 @@ mod utils;
 
 use std::{collections::HashMap, sync::Arc};
 
-use chrono::{DateTime, TimeDelta, Utc};
+use chrono::TimeDelta;
 use tokio::sync::Mutex;
 
 #[derive(Clone)]
 struct AppState {
     server_address: String,
     database_url: String,
-    cooldown: TimeDelta,
-    identifier_access_time: Arc<Mutex<HashMap<String, DateTime<Utc>>>>,
+    rate_limit_cooldown: TimeDelta,
+    identifier_rate_limit: Arc<Mutex<HashMap<String, models::RateLimitInfo>>>,
     secret_max_length: usize,
+    rate_limit_max_failed_attempts: u8,
 }
 
 #[tokio::main]

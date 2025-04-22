@@ -72,9 +72,10 @@ If an attacker can steal informations to a targeted user such as `salt` and have
 echo "DATABASE_URL=production_db.sqlite3" >> .env && \
 echo "TEST_DATABASE_URL=test_db.sqlite3" >> .env && \
 echo "SERVER_ADDRESS=0.0.0.0:3000" >> .env && \
-echo "REQUEST_COOLDOWN=720" >> .env && \
 echo "SECRET_MAX_LENGTH=128" >> .env && \
 echo "CANARY='🐦'" >> .env && \
+echo "RATE_LIMIT_COOLDOWN=1440" >> .env && \
+echo "RATE_LIMIT_MAX_FAILED_ATTEMPTS=3" >> .env && \
 echo "MIGRATIONS_DIR=$(pwd)/migrations" >> .env
 ```
 > `SECRET_MAX_LENGTH=128` represents the size of a 96 octets encrypted secret encoded using base64
@@ -119,7 +120,7 @@ curl -i -X POST http://localhost:3000/trash \
 ### End to End
 Do not run tests in parallel
 ```sh
-cargo test -- --test-threads=1
+cargo test -- --test-threads=1 --nocapture
 ```
 
 ### Coverage

@@ -3,7 +3,7 @@ use axum::{http::StatusCode, Json};
 use serde_json::{json, Value};
 
 use crate::database::{establish_connection, read_secret_by_id, trash};
-use crate::models::FetchSecret;
+use crate::models::{ResponseFailedAttempt, FetchSecret, RateLimitInfo};
 use crate::utils::{generate_secret_id, is_256bits_hex_hash};
 
 use crate::AppState;
@@ -25,20 +25,33 @@ pub async fn fetch_secret(
         );
     }
 
-    let last_request_time = {
-        let key_access_time = state.identifier_access_time.lock().await;
-        key_access_time.get(identifier).cloned()
+    let current_time: chrono::DateTime<chrono::Utc> = chrono::Utc::now();
+    
+    let rate_limit_info = {
+        let identifier_rate_limit = state.identifier_rate_limit.lock().await;
+        identifier_rate_limit.get(identifier).cloned()
     };
 
-    let current_time: chrono::DateTime<chrono::Utc> = chrono::Utc::now();
-    let last_request = last_request_time.as_ref();
-
-    let has_cooled_down = match last_request {
-        Some(x) => current_time.signed_duration_since(x) > state.cooldown,
+    let mut can_attempt = match rate_limit_info.clone() {
+        Some(x) => x.attempts < state.rate_limit_max_failed_attempts,
         None => true,
     };
 
-    if has_cooled_down || last_request.is_none() {
+    // If has too many attempts we verify if the rate_limit_cooldown is elapsed
+    if can_attempt == false {
+        let is_cooldown_over = match rate_limit_info.clone() {
+            Some(x) => current_time.signed_duration_since(x.last_request) > state.rate_limit_cooldown,
+            None => true,
+        };
+        // If the rate_limit_cooldown is over we reset it so the user can attempt
+        if is_cooldown_over {
+            let mut identifier_rate_limit = state.identifier_rate_limit.lock().await;
+            identifier_rate_limit.remove(identifier);
+            can_attempt = true;
+        }
+    } 
+
+    if can_attempt {
         // re-generate the key_id
         let key_id = generate_secret_id(identifier, authentication_key);
 
@@ -62,24 +75,39 @@ pub async fn fetch_secret(
 
             None => {
                 // target brute-force mitigation
-                // set cooldown only if the entry is not found (because it doesn't exist or the user input is invalid)
-                let mut request_times = state.identifier_access_time.lock().await;
-                request_times.insert(identifier.to_string(), current_time);
+                // If the entry is not found:
+                // - The key has been deleted by the user
+                // - The key_id doesn't exists for the provided identifier + authentication_key
+                // We set the rate-limit last_request and attempts for this identifier
+                let mut identifier_rate_limit = state.identifier_rate_limit.lock().await;
+                let rate_limit_info = identifier_rate_limit
+                .entry(identifier.to_string())
+                .and_modify(|info| {
+                    info.last_request = current_time;
+                    info.attempts += 1;
+                })
+                .or_insert(RateLimitInfo {
+                    last_request: current_time,
+                    attempts: 1,
+                });
 
-                let response = json!({
-                    "error": "Invalid identifier/authentication_key",
-                    "requested_at": current_time.to_rfc3339(),
-                    "cooldown": state.cooldown.num_minutes(),
+                let response = json!(ResponseFailedAttempt{
+                    error: "Invalid identifier/authentication_key".to_owned(),
+                    requested_at: rate_limit_info.last_request,
+                    rate_limit_cooldown: state.rate_limit_cooldown.num_minutes(),
+                    attempts: rate_limit_info.attempts,
                 });
 
                 (StatusCode::UNAUTHORIZED, Json(response))
             }
         }
     } else {
+        let rate_limit_info = rate_limit_info.unwrap();
         let response = json!({
             "error": "Too many attempts",
-            "requested_at": last_request_time.unwrap(),
-            "cooldown": state.cooldown.num_minutes(),
+            "requested_at": rate_limit_info.last_request,
+            "rate_limit_cooldown": state.rate_limit_cooldown.num_minutes(),
+            "attempts": rate_limit_info.attempts,
         });
         (StatusCode::TOO_MANY_REQUESTS, Json(response))
     }

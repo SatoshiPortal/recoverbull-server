@@ -33,17 +33,17 @@ pub async fn fetch_secret(
     };
 
     let mut can_attempt = match rate_limit_info.clone() {
-        Some(x) => x.attempts < state.max_failed_attempts,
+        Some(x) => x.attempts < state.rate_limit_max_failed_attempts,
         None => true,
     };
 
-    // If has too many attempts we verify if the rate-limit cooldown is elapsed
+    // If has too many attempts we verify if the rate_limit_cooldown is elapsed
     if can_attempt == false {
         let is_cooldown_over = match rate_limit_info.clone() {
-            Some(x) => current_time.signed_duration_since(x.last_request) > state.cooldown,
+            Some(x) => current_time.signed_duration_since(x.last_request) > state.rate_limit_cooldown,
             None => true,
         };
-        // If the cooldown is over we reset the rate-limit and the user can attempt
+        // If the rate_limit_cooldown is over we reset it so the user can attempt
         if is_cooldown_over {
             let mut identifier_rate_limit = state.identifier_rate_limit.lock().await;
             identifier_rate_limit.remove(identifier);
@@ -94,7 +94,7 @@ pub async fn fetch_secret(
                 let response = json!(ResponseFailedAttempt{
                     error: "Invalid identifier/authentication_key".to_owned(),
                     requested_at: rate_limit_info.last_request,
-                    cooldown: state.cooldown.num_minutes(),
+                    rate_limit_cooldown: state.rate_limit_cooldown.num_minutes(),
                     attempts: rate_limit_info.attempts,
                 });
 
@@ -106,7 +106,7 @@ pub async fn fetch_secret(
         let response = json!({
             "error": "Too many attempts",
             "requested_at": rate_limit_info.last_request,
-            "cooldown": state.cooldown.num_minutes(),
+            "rate_limit_cooldown": state.rate_limit_cooldown.num_minutes(),
             "attempts": rate_limit_info.attempts,
         });
         (StatusCode::TOO_MANY_REQUESTS, Json(response))

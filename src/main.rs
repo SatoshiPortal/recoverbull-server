@@ -18,10 +18,10 @@ use tokio::sync::Mutex;
 struct AppState {
     server_address: String,
     database_url: String,
-    cooldown: TimeDelta,
+    rate_limit_cooldown: TimeDelta,
     identifier_rate_limit: Arc<Mutex<HashMap<String, models::RateLimitInfo>>>,
     secret_max_length: usize,
-    max_failed_attempts: u8,
+    rate_limit_max_failed_attempts: u8,
 }
 
 #[tokio::main]

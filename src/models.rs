@@ -3,10 +3,10 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
 pub struct Info {
-    pub cooldown: i64,
     pub secret_max_length: usize,
     pub canary: String,
-    pub max_failed_attempts: u8,
+    pub rate_limit_cooldown: u64,
+    pub rate_limit_max_failed_attempts: u8,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -40,6 +40,6 @@ pub struct RateLimitInfo {
 pub struct ResponseFailedAttempt{
     pub error: String,
     pub requested_at:  chrono::DateTime<chrono::Utc>,
-    pub cooldown: i64,
+    pub rate_limit_cooldown: i64,
     pub attempts: u8,
 }

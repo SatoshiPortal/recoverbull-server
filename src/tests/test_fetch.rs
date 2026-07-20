@@ -130,4 +130,4 @@ async fn test_fetch_rate_limit_enforced_and_reset_after_cooldown() {
     // ensure the entry is not in the map anymore
     let identifier_rate_limit = state.identifier_rate_limit.lock().await;
     assert_eq!(identifier_rate_limit.contains_key(SHA256_111111), false);
-}
+Control + Shift + m

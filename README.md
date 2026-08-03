@@ -51,6 +51,8 @@ The server provides secret storage without relying on traditional credentials sy
 
  5. The user can fetch his `secret` by deciphering `encrypted_secret` using his `encryption_key` as encryption key.
 
+> On success, the response also contains a `failed_attempts` field: the number of failed attempts recorded for this `identifier` since the last successful fetch (or trash). The counter is reset on success, since a successful authentication proves ownership of the secret. A client should warn the user when this number is higher than the user's own mistakes, as it may indicate a brute-force or lockout attempt against his backup.
+
 ### Stats
 
 `GET /stats` returns public brute-force telemetry: the list of identifiers currently rate-limited for failed fetch/trash attempts, with for each entry:
@@ -60,6 +62,11 @@ The server provides secret storage without relying on traditional credentials sy
 - `last_failed_at`: timestamp of the last failed attempt
 
 Identifiers are published hashed, never raw: a client can recognize its own identifier by computing `sha256(identifier)` locally, but nobody can recover a raw identifier from the list (pre-image resistance), which keeps the list useless for griefing or targeted lockout. Entries live in the same in-memory map as the rate-limiter, so they expire with it (cooldown reset or server reboot): nothing is persisted.
+
+Detection semantics a client should implement:
+- **Poll `/stats` proactively** (e.g. at app start): if your identifier hash appears with attempts you did not make, someone is probing your backup.
+- **Treat an unexpected `429` as an alarm**: if you did not make failed attempts, someone else locked your identifier.
+- **`failed_attempts` on a successful fetch is a best-effort signal within the current rate-limit window**: sub-threshold failures (1 or 2) persist until your next success and are always reported; once the max is reached and the cooldown has elapsed, the window resets and the count restarts from zero.
 
 
 

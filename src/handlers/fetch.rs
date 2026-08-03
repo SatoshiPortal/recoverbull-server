@@ -64,13 +64,28 @@ pub async fn fetch_secret(
                     trash(&mut connection, &key_id);
                 }
 
+                // Report the failed attempts recorded for this identifier so
+                // the client can warn the user about a possible brute-force
+                // or lockout attempt, then reset them: a successful
+                // authentication proves ownership of the secret.
+                let failed_attempts = {
+                    let mut identifier_rate_limit = state.identifier_rate_limit.lock().await;
+                    identifier_rate_limit
+                        .remove(identifier)
+                        .map(|info| info.attempts)
+                        .unwrap_or(0)
+                };
+
                 let code = if is_trashing_secret {
                     StatusCode::ACCEPTED
                 } else {
                     StatusCode::OK
                 };
 
-                (code, Json(json!(&key)))
+                let mut response = json!(&key);
+                response["failed_attempts"] = json!(failed_attempts);
+
+                (code, Json(response))
             }
 
             None => {

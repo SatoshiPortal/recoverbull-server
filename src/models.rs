@@ -43,3 +43,12 @@ pub struct ResponseFailedAttempt{
     pub rate_limit_cooldown: i64,
     pub attempts: u8,
 }
+
+#[derive(Serialize, Deserialize)]
+pub struct StatEntry {
+    /// SHA-256 of the raw identifier bytes, so clients can recognize their
+    /// own identifier without exposing it (pre-image resistance).
+    pub id_hash: String,
+    pub attempts: u8,
+    pub last_failed_at: chrono::DateTime<chrono::Utc>,
+}

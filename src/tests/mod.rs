@@ -1,5 +1,6 @@
 pub mod test_fetch;
 pub mod test_info;
+pub mod test_stats;
 pub mod test_server;
 pub mod test_store;
 pub mod test_trash;

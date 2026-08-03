@@ -5,7 +5,7 @@ use axum::{
 };
 
 use crate::{
-    handlers::{fetch, info, store},
+    handlers::{fetch, info, stats, store},
     models::FetchSecret,
     AppState,
 };
@@ -47,6 +47,14 @@ pub fn new(app_state: AppState) -> Router {
                 .allow_headers(tower_http::cors::Any),
         )
         .route("/info", get(info::get_info))
+        .with_state(app_state.clone())
+        .layer(
+            tower_http::cors::CorsLayer::new()
+                .allow_origin(tower_http::cors::Any)
+                .allow_methods(tower_http::cors::Any)
+                .allow_headers(tower_http::cors::Any),
+        )
+        .route("/stats", get(stats::get_stats))
         .with_state(app_state)
         .layer(
             tower_http::cors::CorsLayer::new()

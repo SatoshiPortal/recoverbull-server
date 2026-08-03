@@ -49,7 +49,17 @@ The server provides secret storage without relying on traditional credentials sy
 - Look-up in an in-memory cache `Map<identifier, DateTime?>` to check if this `identifier` has already been requested recently. If not enough time elapsed, the user remains rate-limited. –> Mitigate targeted brute-force.
 - If the user is not rate-limited, the server compute `secret_id` = `hash(identifier + authentication_key)` and fetch the entry in the database. If something is found it returns the `encrypted_secret` else it add the `identifier` to the in-memory cache to the map to limit further attempts.
 
-5. The user can fetch his `secret` by deciphering `encrypted_secret` using his `encryption_key` as encryption key.
+ 5. The user can fetch his `secret` by deciphering `encrypted_secret` using his `encryption_key` as encryption key.
+
+### Stats
+
+`GET /stats` returns public brute-force telemetry: the list of identifiers currently rate-limited for failed fetch/trash attempts, with for each entry:
+
+- `id_hash`: SHA-256 of the raw `identifier` bytes
+- `attempts`: number of failed attempts recorded
+- `last_failed_at`: timestamp of the last failed attempt
+
+Identifiers are published hashed, never raw: a client can recognize its own identifier by computing `sha256(identifier)` locally, but nobody can recover a raw identifier from the list (pre-image resistance), which keeps the list useless for griefing or targeted lockout. Entries live in the same in-memory map as the rate-limiter, so they expire with it (cooldown reset or server reboot): nothing is persisted.
 
 
 
@@ -113,6 +123,9 @@ curl -i -X POST http://localhost:3000/fetch \
 curl -i -X POST http://localhost:3000/trash \
 -H "Content-Type: application/json" \
 -d '{"identifier":"bcb15f821479b4d5772bd0ca866c00ad5f926e3580720659cc80d39c9d09802a","authentication_key":"4cc8f4d609b717356701c57a03e737e5ac8fe885da8c7163d3de47e01849c635"}'
+
+# Stats (brute-force telemetry, identifiers are SHA-256 hashed)
+curl -X GET http://localhost:3000/stats
 ```
 
 ## Tests

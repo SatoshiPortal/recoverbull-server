@@ -46,27 +46,29 @@ The server provides secret storage without relying on traditional credentials sy
 - `authentication_key`
 
 4. The server receive the `fetch secret` request an perform:
-- Look-up in an in-memory cache `Map<identifier, DateTime?>` to check if this `identifier` has already been requested recently. If not enough time elapsed, the user remains rate-limited. –> Mitigate targeted brute-force.
-- If the user is not rate-limited, the server compute `secret_id` = `hash(identifier + authentication_key)` and fetch the entry in the database. If something is found it returns the `encrypted_secret` else it add the `identifier` to the in-memory cache to the map to limit further attempts.
+- Reserve one lookup in an in-memory counter keyed by `sha256(identifier)`. Every `/fetch` and `/trash` lookup counts, whether or not a matching database row exists.
+- If the identifier has reached its lookup budget, return `429` before querying the database. Otherwise compute `secret_id` = `hash(identifier + authentication_key)` and fetch the entry.
+- Never reset the lookup budget after a database hit: because `/store` is public, an attacker can create a matching row for a guessed key, so finding a row does not prove ownership. The budget expires only after the configured cooldown.
 
  5. The user can fetch his `secret` by deciphering `encrypted_secret` using his `encryption_key` as encryption key.
 
-> On success, the response also contains a `failed_attempts` field: the number of failed attempts recorded for this `identifier` since the last successful fetch (or trash). The counter is reset on success, since a successful authentication proves ownership of the secret. A client should warn the user when this number is higher than the user's own mistakes, as it may indicate a brute-force or lockout attempt against his backup.
+> On success, the response also contains a `failed_attempts` field: the number of database misses recorded for this `identifier` during the current cooldown window. A successful lookup does not reset either this telemetry or the separate security budget. A client should warn the user when the value is higher than the user's own mistakes.
 
 ### Stats
 
-`GET /stats` returns public brute-force telemetry: the list of identifiers currently rate-limited for failed fetch/trash attempts, with for each entry:
+`GET /stats` returns public lookup telemetry for the current cooldown window, with for each entry:
 
 - `id_hash`: SHA-256 of the raw `identifier` bytes
-- `attempts`: number of failed attempts recorded
-- `last_failed_at`: timestamp of the last failed attempt
+- `attempts`: total number of `/fetch` and `/trash` lookups, including database hits
+- `failed_attempts`: number of lookups for which no database row existed
+- `last_attempt_at`: timestamp of the last lookup
 
-Identifiers are published hashed, never raw: a client can recognize its own identifier by computing `sha256(identifier)` locally, but nobody can recover a raw identifier from the list (pre-image resistance), which keeps the list useless for griefing or targeted lockout. Entries live in the same in-memory map as the rate-limiter, so they expire with it (cooldown reset or server reboot): nothing is persisted.
+Identifiers are kept and published hashed, never raw: a client can recognize its own identifier by computing `sha256(identifier)` locally, but nobody can recover a raw identifier from the list (pre-image resistance), which keeps the list useless for griefing or targeted lockout. Entries live in the same in-memory map as the rate-limiter, so they expire with it (cooldown or server reboot): nothing is persisted.
 
 Detection semantics a client should implement:
 - **Poll `/stats` proactively** (e.g. at app start): if your identifier hash appears with attempts you did not make, someone is probing your backup.
-- **Treat an unexpected `429` as an alarm**: if you did not make failed attempts, someone else locked your identifier.
-- **`failed_attempts` on a successful fetch is a best-effort signal within the current rate-limit window**: failures older than the cooldown expire (entries are swept and forgotten), so the count reflects the current window and restarts from zero afterwards.
+- **Treat a per-identifier `429` (`"Too many attempts"`, with an `attempts` field) as an alarm**: the separate global overload response (`"Too many lookup requests"`) indicates service-wide pressure instead.
+- **`failed_attempts` on a successful fetch is a best-effort signal within the current rate-limit window**: failures older than the cooldown expire (entries are swept and forgotten), but a success never resets the value early.
 
 
 
@@ -75,7 +77,7 @@ Detection semantics a client should implement:
 A user can store multiple secrets and the server is not able to link any secret to a specific user. Each secret has a random `identifier`. The `secret_id` is built from the hash of the `identifier` and `authentication_key`.
 
 If the `identifier` is found and used by a malicious person, the server is not able to link it to a specific `secret`.
-**To mitigate targeted brute-force on a specific `secret`, the server cache temporarily the `identifier` in-memory. The data does not persist and is cleared on each server reboot. The in-memory cache is exposed only if an attacker take the control of the server and dump the memory.**
+**To mitigate targeted brute-force on a specific `secret`, the server temporarily caches only `sha256(identifier)` in memory. The data does not persist and is cleared on each server reboot.**
 
 The server cannot read users secrets because they are encrypted client-side using the `encryption_key` derived from `password`, the secret encryption mitigate the risk of database leak, attackers would have access to: `secret_id`, `created_at` and `encrypted_secret`.
 
@@ -83,7 +85,7 @@ If an attacker can steal informations to a targeted user such as `salt` and have
 
 ### Recovery lockout (known design tension)
 
-The rate-limit counter is keyed on `identifier` and checked **before** credentials are verified: the server cannot distinguish the legitimate owner from an attacker before the database lookup. An attacker holding a victim's Backup File can therefore keep that identifier locked out (a few failed attempts per cooldown window), delaying — or with discipline, preventing — the victim's recovery. Any scheme that lets the owner through before verification also lets the attacker through: there is no server-only fix.
+The rate-limit counter is keyed on `sha256(identifier)` and checked **before** credentials are verified: the server cannot distinguish the legitimate owner from an attacker before the database lookup. Every lookup counts, including successful ones, because a public `/store` caller can plant a row for a guessed key. An attacker holding a victim's Backup File can therefore consume that identifier's lookup budget and keep it locked out, delaying — or with discipline, preventing — the victim's recovery. Other identifiers retain independent budgets.
 
 Mitigations available today:
 - **Detection**: clients should poll `/stats` — an identifier under attack shows attempts the user did not make, and an unexpected `429` is itself an alarm. A user who still has wallet access should rotate keys immediately.
@@ -96,31 +98,53 @@ Protocol roadmap: escalating backoff (delay without permanent denial), client pr
 
 ### Tor onion service (the supported deployment)
 
-The server is designed to be reached exclusively through a **Tor onion service**: it protects the transport confidentiality of the `authentication_key` and the IP anonymity of clients. **Never expose it directly on a public interface** — the server refuses to stay silent about it and prints a startup warning when `SERVER_ADDRESS` is not loopback.
+The server is designed to be reached exclusively through a **Tor onion service**: it protects the transport confidentiality of the `authentication_key` and the IP anonymity of clients. **Never expose it directly on a public interface** — the server refuses to stay silent about it and prints a startup warning when `SERVER_ADDRESS` is not loopback. Production deployments must put a reverse proxy between Tor and Axum because Axum's route timeout starts after HTTP headers have been read.
 
-1. Keep the server on loopback: `SERVER_ADDRESS=127.0.0.1:3000`
-2. Configure the onion service in `torrc`:
+1. Keep Axum on a private loopback port: `SERVER_ADDRESS=127.0.0.1:3001`
+2. Configure nginx on `127.0.0.1:3000` with strict header/body timeouts and connection limits:
+
+```nginx
+limit_conn_zone $binary_remote_addr zone=recoverbull_connections:10m;
+
+server {
+    listen 127.0.0.1:3000;
+    client_max_body_size 1k;
+    client_header_timeout 10s;
+    client_body_timeout 10s;
+    send_timeout 35s;
+    limit_conn recoverbull_connections 100;
+
+    location / {
+        proxy_pass http://127.0.0.1:3001;
+        proxy_connect_timeout 2s;
+        proxy_read_timeout 35s;
+    }
+}
+```
+
+All Tor connections reach nginx from loopback, so this connection limit is intentionally global.
+
+3. Configure the onion service in `torrc` to reach nginx:
 
 ```
 HiddenServiceDir /var/lib/tor/recoverbull/
 HiddenServicePort 80 127.0.0.1:3000
 ```
 
-3. Reload Tor and read the onion hostname:
+4. Reload nginx and Tor, then read the onion hostname:
 
 ```sh
+sudo systemctl reload nginx
 sudo systemctl reload tor
 sudo cat /var/lib/tor/recoverbull/hostname
 ```
-
-A reverse proxy (e.g. nginx) may sit between Tor and the app for global request-rate limiting and timeouts. Note that behind an onion service **all connections arrive from 127.0.0.1**, so per-IP rules are useless: use a single global bucket.
 
 ### dotenv
 
 ```sh
 echo "DATABASE_URL=production_db.sqlite3" >> .env && \
 echo "TEST_DATABASE_URL=test_db.sqlite3" >> .env && \
-echo "SERVER_ADDRESS=127.0.0.1:3000" >> .env && \
+echo "SERVER_ADDRESS=127.0.0.1:3001" >> .env && \
 echo "SECRET_MAX_LENGTH=128" >> .env && \
 echo "CANARY='🐦'" >> .env && \
 echo "RATE_LIMIT_COOLDOWN=1440" >> .env && \
@@ -131,9 +155,27 @@ echo "MIGRATIONS_DIR=$(pwd)/migrations" >> .env
 Optional, with defaults shown — a global token bucket dampening unauthenticated `/store` writes (per-IP is useless behind an onion service):
 
 ```sh
-echo "STORE_RATE_LIMIT_BURST=20" >> .env && \
-echo "STORE_RATE_LIMIT_REFILL_PER_SECOND=1" >> .env
+echo "STORE_RATE_LIMIT_BURST=10" >> .env && \
+echo "STORE_RATE_LIMIT_REFILL_PER_SECOND=2" >> .env && \
+echo "LOOKUP_RATE_LIMIT_BURST=100" >> .env && \
+echo "LOOKUP_RATE_LIMIT_REFILL_PER_SECOND=5" >> .env && \
+echo "RATE_LIMIT_MAX_IDENTIFIERS=100000" >> .env && \
+echo "DATABASE_MAX_CONCURRENCY=16" >> .env
 ```
+This configuration admits two `/store` requests per second (172,800 per day)
+in steady state. After startup, or after five seconds without a `/store`
+request, the bucket holds an initial burst of ten requests, so the first day
+can admit at most 172,810 requests. Every admitted request consumes a token,
+including an idempotent duplicate that does not create a new row. If every
+request has a new identifier and a maximum-size secret, SQLite grows by about
+43 to 86 MB/day, depending on page and index overhead.
+`RATE_LIMIT_MAX_FAILED_ATTEMPTS` is the legacy configuration name for the
+per-identifier lookup budget; database hits consume it as well as misses.
+The lookup bucket is a separate global safety limit for `/fetch` and `/trash`.
+The identifier cap bounds memory without evicting active security entries;
+new identifiers receive `503` while the cap is full. SQLite work is limited to
+16 concurrent blocking operations, and requests waiting more than one second
+for a slot receive `503` without consuming their per-identifier attempt.
 > `SECRET_MAX_LENGTH=128` represents the size of a 96 octets encrypted secret encoded using base64
 > 96 octets =  `nonce` (16 octets) | `ciphertext` (32 octets) | `hmac` (32 octets) + 16 octets padding to round up to 32 octets blocks
 
@@ -142,6 +184,15 @@ echo "STORE_RATE_LIMIT_REFILL_PER_SECOND=1" >> .env
 ```sh
 diesel migration run
 ```
+
+### Storage quota
+
+Put the SQLite database, WAL and Litestream state on a dedicated volume with a
+filesystem or project quota. Keep the directory private (`0700`, process umask
+`0077`), alert before 70%, 85% and 95% usage, and reserve enough headroom for
+WAL checkpoints and replication. Do not automatically delete recovery secrets:
+when the quota is reached, new stores must fail closed until the operator adds
+capacity or applies an explicit retention policy.
 
 ### Run the app
 

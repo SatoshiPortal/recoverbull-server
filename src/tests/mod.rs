@@ -1,3 +1,4 @@
+pub mod test_audit_claims;
 pub mod test_concurrency;
 pub mod test_env;
 pub mod test_fetch;

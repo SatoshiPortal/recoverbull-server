@@ -98,19 +98,18 @@ pub async fn fetch_secret(
             // Log discipline: the diesel error carries the SQLite message
             // only — never log identifiers, keys or request bodies.
             tracing::error!(error = %e, "database error on fetch");
-            let should_remove = {
+            {
                 let mut identifier_rate_limit = state.identifier_rate_limit.lock().await;
-                match identifier_rate_limit.get_mut(identifier) {
+                let should_remove = match identifier_rate_limit.get_mut(identifier) {
                     Some(info) => {
                         info.attempts = info.attempts.saturating_sub(1);
                         info.attempts == 0
                     }
                     None => false,
+                };
+                if should_remove {
+                    identifier_rate_limit.remove(identifier);
                 }
-            };
-            if should_remove {
-                let mut identifier_rate_limit = state.identifier_rate_limit.lock().await;
-                identifier_rate_limit.remove(identifier);
             }
 
             (

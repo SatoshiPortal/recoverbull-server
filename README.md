@@ -127,6 +127,13 @@ echo "RATE_LIMIT_COOLDOWN=1440" >> .env && \
 echo "RATE_LIMIT_MAX_FAILED_ATTEMPTS=3" >> .env && \
 echo "MIGRATIONS_DIR=$(pwd)/migrations" >> .env
 ```
+
+Optional, with defaults shown — a global token bucket dampening unauthenticated `/store` writes (per-IP is useless behind an onion service):
+
+```sh
+echo "STORE_RATE_LIMIT_BURST=20" >> .env && \
+echo "STORE_RATE_LIMIT_REFILL_PER_SECOND=1" >> .env
+```
 > `SECRET_MAX_LENGTH=128` represents the size of a 96 octets encrypted secret encoded using base64
 > 96 octets =  `nonce` (16 octets) | `ciphertext` (32 octets) | `hmac` (32 octets) + 16 octets padding to round up to 32 octets blocks
 

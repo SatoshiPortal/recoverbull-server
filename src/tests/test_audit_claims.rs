@@ -12,7 +12,6 @@ use crate::{
     tests::{BASE64_ENCRYPTED_SECRET, NOT_PASSWORD_HASH, SHA256_111111, SHA256_222222},
 };
 use axum::http::StatusCode;
-use diesel::RunQueryDsl;
 
 /// F1 (CRITICAL): /store was an unthrottled authentication_key oracle —
 /// FIXED. /store is now idempotent: a fresh secret_id and an existing one
@@ -90,11 +89,11 @@ async fn test_audit_f2_attacker_failures_deny_legitimate_owner() {
     );
 }
 
-/// F3 (MED): database errors were reported as "Invalid
-/// identifier/authentication_key" (401) and consumed rate-limit attempts —
-/// FIXED. Database errors now return 500 and refund the attempt. The
-/// regression test lives in test_db_errors.rs
-/// (test_database_error_returns_500_without_consuming_attempts).
+// F3 (MED): database errors were reported as "Invalid
+// identifier/authentication_key" (401) and consumed rate-limit attempts —
+// FIXED. Database errors now return 500 and refund the attempt. The
+// regression test lives in test_db_errors.rs
+// (test_database_error_returns_500_without_consuming_attempts).
 
 /// F9 (LOW): /store accepted unlimited writes — FIXED. Unauthenticated
 /// writes are now dampened by a global token bucket (per-IP is useless

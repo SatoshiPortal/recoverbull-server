@@ -13,8 +13,10 @@ pub async fn fetch_secret(
     Json(request): Json<FetchSecret>,
     is_trashing_secret: bool,
 ) -> (StatusCode, Json<Value>) {
-    let identifier = &request.identifier;
-    let authentication_key = &request.authentication_key;
+    // canonicalize hex inputs: "AB…" and "ab…" are the same logical value
+    // and must map to the same record and the same rate-limit entry
+    let identifier = &request.identifier.to_lowercase();
+    let authentication_key = &request.authentication_key.to_lowercase();
 
     if !is_256bits_hex_hash(identifier) || !is_256bits_hex_hash(authentication_key) {
         return (

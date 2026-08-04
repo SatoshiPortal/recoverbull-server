@@ -133,40 +133,28 @@ async fn test_audit_f11_no_cors_headers() {
     );
 }
 
-/// F12 (LOW): hex inputs are accepted case-insensitively but hashed
-/// without canonicalization, so the same logical credentials produce two
-/// distinct records.
+/// F12 (LOW): hex inputs were accepted case-insensitively but hashed
+/// without canonicalization, producing duplicate records — FIXED. Hex
+/// inputs are canonicalized to lowercase before validation and hashing.
 #[tokio::test]
-async fn test_audit_f12_hex_case_creates_duplicate_records() {
+async fn test_audit_f12_hex_case_is_canonicalized() {
     let (server, _) = crate::tests::test_server::new_test_server().await;
 
-    let lowercase = &StoreSecret {
-        identifier: SHA256_111111.to_string(),
-        authentication_key: SHA256_222222.to_string(),
-        encrypted_secret: BASE64_ENCRYPTED_SECRET.to_string(),
-    };
-    let response = server.post("/store").json(lowercase).await;
-    assert_eq!(response.status_code(), StatusCode::CREATED);
-
-    // the same logical credentials, uppercased: accepted as a NEW record
-    let uppercase = &StoreSecret {
+    // store with UPPERCASE credentials
+    let store = &StoreSecret {
         identifier: SHA256_111111.to_uppercase(),
         authentication_key: SHA256_222222.to_uppercase(),
         encrypted_secret: BASE64_ENCRYPTED_SECRET.to_string(),
     };
-    let response = server.post("/store").json(uppercase).await;
-    assert_eq!(
-        response.status_code(),
-        StatusCode::CREATED,
-        "CURRENT BEHAVIOR: case variants are stored as distinct records"
-    );
+    let response = server.post("/store").json(store).await;
+    assert_eq!(response.status_code(), StatusCode::CREATED);
 
-    // and each case variant is independently fetchable
+    // fetch with lowercase: the same logical record must be found
     let response = server
         .post("/fetch")
         .json(&FetchSecret {
-            identifier: SHA256_111111.to_uppercase(),
-            authentication_key: SHA256_222222.to_uppercase(),
+            identifier: SHA256_111111.to_string(),
+            authentication_key: SHA256_222222.to_string(),
         })
         .await;
     assert_eq!(response.status_code(), StatusCode::OK);

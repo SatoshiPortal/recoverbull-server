@@ -11,9 +11,11 @@ pub async fn store_secret(
     State(state): State<AppState>,
     Json(request): Json<StoreSecret>,
 ) -> (StatusCode, Json<Option<Value>>) {
-    let authentication_key = &request.authentication_key;
+    // canonicalize hex inputs: "AB…" and "ab…" are the same logical value
+    // and must map to the same record and the same rate-limit entry
+    let authentication_key = &request.authentication_key.to_lowercase();
     let encrypted_secret = &request.encrypted_secret;
-    let identifier = &request.identifier;
+    let identifier = &request.identifier.to_lowercase();
 
     if !is_256bits_hex_hash(identifier) || !is_256bits_hex_hash(authentication_key) {
         return (

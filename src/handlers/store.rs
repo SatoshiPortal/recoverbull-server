@@ -70,7 +70,13 @@ pub async fn store_secret(
     .expect("database task panicked");
 
     match is_stored {
-        true => (StatusCode::CREATED, Json(None)),
-        false => (StatusCode::INTERNAL_SERVER_ERROR, Json(None)),
+        true => {
+            tracing::info!("secret stored");
+            (StatusCode::CREATED, Json(None))
+        }
+        false => {
+            tracing::error!("database error on store");
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(None))
+        }
     }
 }

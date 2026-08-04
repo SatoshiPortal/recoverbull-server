@@ -59,6 +59,7 @@ pub async fn fetch_secret(
     };
 
     if !can_attempt {
+        tracing::warn!("rate-limit lockout");
         let response = json!({
             "error": "Too many attempts",
             "requested_at": last_request,
@@ -90,10 +91,13 @@ pub async fn fetch_secret(
     .expect("database task panicked");
 
     match result {
-        Err(_) => {
+        Err(e) => {
             // A database error is not a wrong credential: respond 500 and
             // refund the attempt reserved above so transient database
             // trouble cannot burn a user's rate-limit attempts.
+            // Log discipline: the diesel error carries the SQLite message
+            // only — never log identifiers, keys or request bodies.
+            tracing::error!(error = %e, "database error on fetch");
             let should_remove = {
                 let mut identifier_rate_limit = state.identifier_rate_limit.lock().await;
                 match identifier_rate_limit.get_mut(identifier) {
@@ -135,6 +139,8 @@ pub async fn fetch_secret(
                 StatusCode::OK
             };
 
+            tracing::info!(failed_attempts, is_trash = is_trashing_secret, "secret released");
+
             let mut response = json!(&key);
             response["failed_attempts"] = json!(failed_attempts);
 
@@ -146,6 +152,7 @@ pub async fn fetch_secret(
             // If the entry is not found:
             // - The key has been deleted by the user
             // - The key_id doesn't exists for the provided identifier + authentication_key
+            tracing::info!(attempt_number, "failed fetch attempt");
             let response = json!(ResponseFailedAttempt {
                 error: "Invalid identifier/authentication_key".to_owned(),
                 requested_at: last_request,

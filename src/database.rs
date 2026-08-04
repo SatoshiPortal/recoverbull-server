@@ -36,18 +36,16 @@ pub fn establish_connection(database_url: String) -> SqliteConnection {
     connection
 }
 
-pub fn write(connection: &mut SqliteConnection, new_secret: &Secret) -> Option<bool> {
-    match diesel::insert_into(crate::schema::secret::table)
+pub fn write(connection: &mut SqliteConnection, new_secret: &Secret) -> bool {
+    // ON CONFLICT DO NOTHING: storing is idempotent. The response must not
+    // reveal whether the secret_id already exists, otherwise /store becomes
+    // an unthrottled authentication_key oracle (a 403 would confirm a
+    // correct guess without ever touching the fetch rate-limit).
+    diesel::insert_into(crate::schema::secret::table)
         .values(new_secret)
+        .on_conflict_do_nothing()
         .execute(connection)
-    {
-        Ok(_) => Some(true),
-        Err(diesel::result::Error::DatabaseError(
-            diesel::result::DatabaseErrorKind::UniqueViolation,
-            _,
-        )) => None, // Duplicate
-        Err(_) => Some(false),
-    }
+        .is_ok()
 }
 
 pub fn read_secret_by_id(connection: &mut SqliteConnection, secret_id: &str) -> Option<Secret> {

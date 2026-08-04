@@ -61,8 +61,7 @@ pub async fn store_secret(
     let is_stored = crate::database::write(&mut connection, &key);
 
     match is_stored {
-        Some(true) => (StatusCode::CREATED, Json(None)),
-        Some(false) => (StatusCode::BAD_REQUEST, Json(None)),
-        None => (StatusCode::FORBIDDEN, Json(None)), // duplicate
+        true => (StatusCode::CREATED, Json(None)),
+        false => (StatusCode::INTERNAL_SERVER_ERROR, Json(None)),
     }
 }

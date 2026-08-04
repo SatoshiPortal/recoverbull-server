@@ -14,26 +14,24 @@ use crate::{
 use axum::http::StatusCode;
 use diesel::RunQueryDsl;
 
-/// F1 (CRITICAL): /store is an unthrottled authentication_key oracle.
-/// A fresh secret_id returns 201 while an existing one returns 403, which
-/// reveals whether SHA256(identifier || authentication_key) is in the
-/// database — with no rate limit, and without ever engaging the fetch
-/// rate-limiter.
+/// F1 (CRITICAL): /store was an unthrottled authentication_key oracle —
+/// FIXED. /store is now idempotent: a fresh secret_id and an existing one
+/// both return 201, and a duplicate never overwrites. The regression test
+/// lives in test_store.rs (test_duplicate_store_is_indistinguishable_and_does_not_overwrite).
+/// This test keeps guarding that wrong guesses are not throttled either
+/// (no new oracle may be introduced).
 #[tokio::test]
-async fn test_audit_f1_store_duplicate_reveals_authentication_key() {
+async fn test_audit_f1_store_gives_no_existence_signal() {
     let (server, _) = crate::tests::test_server::new_test_server().await;
 
-    // the victim stores a record
     let store = &StoreSecret {
         identifier: SHA256_111111.to_string(),
         authentication_key: SHA256_222222.to_string(),
         encrypted_secret: BASE64_ENCRYPTED_SECRET.to_string(),
     };
-    let response = server.post("/store").json(store).await;
-    assert_eq!(response.status_code(), StatusCode::CREATED);
+    let first = server.post("/store").json(store).await;
 
-    // an attacker holding the identifier submits distinct wrong-key
-    // guesses: all accepted, never throttled
+    // distinct wrong-key guesses: accepted, never throttled
     for i in 0..10u32 {
         let guess = &StoreSecret {
             identifier: SHA256_111111.to_string(),
@@ -41,32 +39,13 @@ async fn test_audit_f1_store_duplicate_reveals_authentication_key() {
             encrypted_secret: BASE64_ENCRYPTED_SECRET.to_string(),
         };
         let response = server.post("/store").json(guess).await;
-        assert_eq!(
-            response.status_code(),
-            StatusCode::CREATED,
-            "a wrong guess must not be throttled for the oracle to work"
-        );
+        assert_eq!(response.status_code(), StatusCode::CREATED);
     }
 
-    // the correct authentication_key submitted as a "store": 403 fires
-    // the oracle — the attacker now knows the key is correct
-    let response = server.post("/store").json(store).await;
-    assert_eq!(
-        response.status_code(),
-        StatusCode::FORBIDDEN,
-        "CURRENT VULNERABLE BEHAVIOR: duplicate reveals row existence"
-    );
-
-    // and none of this ever touched the fetch rate-limiter: the victim's
-    // own fetch still succeeds with zero attempts consumed
-    let response = server
-        .post("/fetch")
-        .json(&FetchSecret {
-            identifier: SHA256_111111.to_string(),
-            authentication_key: SHA256_222222.to_string(),
-        })
-        .await;
-    assert_eq!(response.status_code(), StatusCode::OK);
+    // the correct key submitted as a "store": indistinguishable from a
+    // fresh store — the oracle is closed
+    let second = server.post("/store").json(store).await;
+    assert_eq!(second.status_code(), first.status_code());
 }
 
 /// F2 (HIGH): the attempts counter is keyed on the identifier alone and

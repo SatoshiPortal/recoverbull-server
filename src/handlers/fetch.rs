@@ -69,9 +69,24 @@ pub async fn fetch_secret(
     // re-generate the key_id
     let key_id = generate_secret_id(identifier, authentication_key);
 
-    // look in db for this key_id (outside the rate-limit lock)
-    let mut connection: diesel::SqliteConnection = establish_connection(state.database_url);
-    let result = read_secret_by_id(&mut connection, &key_id);
+    // look in db for this key_id, outside the rate-limit lock and on a
+    // blocking thread: diesel is synchronous and must not stall the async
+    // workers. The trash happens in the same blocking task on success.
+    let database_url = state.database_url.clone();
+    let key_id_for_db = key_id.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let mut connection = establish_connection(database_url);
+        let result = read_secret_by_id(&mut connection, &key_id_for_db);
+        if let Ok(Some(_)) = &result {
+            if is_trashing_secret {
+                trash(&mut connection, &key_id_for_db);
+            }
+        }
+        result
+    })
+    .await
+    .expect("database task panicked");
+
     match result {
         Err(_) => {
             // A database error is not a wrong credential: respond 500 and
@@ -99,10 +114,6 @@ pub async fn fetch_secret(
         }
 
         Ok(Some(key)) => {
-            if is_trashing_secret {
-                trash(&mut connection, &key_id);
-            }
-
             // Report the failed attempts recorded for this identifier so the
             // client can warn the user about a possible brute-force or lockout
             // attempt, then reset them: a successful authentication proves

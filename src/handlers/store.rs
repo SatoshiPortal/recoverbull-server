@@ -57,8 +57,15 @@ pub async fn store_secret(
         encrypted_secret: encrypted_secret.clone(),
     };
 
-    let mut connection = establish_connection(state.database_url);
-    let is_stored = crate::database::write(&mut connection, &key);
+    // diesel is synchronous: run the write on a blocking thread so it
+    // cannot stall the async workers
+    let database_url = state.database_url.clone();
+    let is_stored = tokio::task::spawn_blocking(move || {
+        let mut connection = establish_connection(database_url);
+        crate::database::write(&mut connection, &key)
+    })
+    .await
+    .expect("database task panicked");
 
     match is_stored {
         true => (StatusCode::CREATED, Json(None)),

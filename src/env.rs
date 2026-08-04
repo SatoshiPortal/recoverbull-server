@@ -1,5 +1,5 @@
 use chrono::Duration;
-use dotenv::dotenv;
+use dotenvy::dotenv;
 use std::{collections::HashMap, env, sync::Arc};
 use tokio::sync::Mutex;
 

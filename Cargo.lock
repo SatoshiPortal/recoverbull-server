@@ -1525,7 +1525,9 @@ dependencies = [
  "bitflags",
  "bytes",
  "http 1.1.0",
+ "http-body",
  "pin-project-lite",
+ "tokio",
  "tower-layer",
  "tower-service",
 ]

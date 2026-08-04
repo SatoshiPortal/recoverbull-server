@@ -11,7 +11,7 @@ tokio = { version = "1.40", features = ["full"] }
 serde = { version = "1.0.210", features = ["derive"] }
 diesel = { version = "2.3", features = ["sqlite"] }
 chrono = { version = "0.4.38", features = ["serde"] }
-tower-http = { version = "0.6.1", features = ["cors"] }
+tower-http = { version = "0.6.1", features = ["timeout"] }
 serde_json = "1.0"
 hex = "0.4.3"
 base64 = "0.22.1"

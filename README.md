@@ -81,6 +81,16 @@ The server cannot read users secrets because they are encrypted client-side usin
 
 If an attacker can steal informations to a targeted user such as `salt` and have access to a database leak or `encrypted_secret`, the encryption of the `encrypted_secret` will be as weak as the user `password`.
 
+### Recovery lockout (known design tension)
+
+The rate-limit counter is keyed on `identifier` and checked **before** credentials are verified: the server cannot distinguish the legitimate owner from an attacker before the database lookup. An attacker holding a victim's Backup File can therefore keep that identifier locked out (a few failed attempts per cooldown window), delaying — or with discipline, preventing — the victim's recovery. Any scheme that lets the owner through before verification also lets the attacker through: there is no server-only fix.
+
+Mitigations available today:
+- **Detection**: clients should poll `/stats` — an identifier under attack shows attempts the user did not make, and an unexpected `429` is itself an alarm. A user who still has wallet access should rotate keys immediately.
+- **Redundancy** (client-side): an exported copy of the Backup Key, social recovery, or a second independent Key Server makes the lockout of a single server non-fatal.
+
+Protocol roadmap: escalating backoff (delay without permanent denial), client proof-of-work (cost per guess instead of a hard cap), or multi-server storage.
+
 
 ## Deployment
 

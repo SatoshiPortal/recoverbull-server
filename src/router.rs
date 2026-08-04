@@ -14,6 +14,11 @@ use crate::{
 // not browsers. Allowing any origin would let any web page conscript its
 // visitors' browsers into calling this API.
 pub fn new(app_state: AppState) -> Router {
+    // Bound the total request duration, including body reads: a client
+    // dribbling its request byte by byte (slow-loris) sees it expire.
+    // Header reads happen before the service and remain a proxy concern.
+    let timeout = tower_http::timeout::TimeoutLayer::new(std::time::Duration::from_secs(30));
+
     Router::new()
         .route("/store", post(store::store_secret))
         .with_state(app_state.clone())
@@ -35,4 +40,5 @@ pub fn new(app_state: AppState) -> Router {
         .with_state(app_state.clone())
         .route("/stats", get(stats::get_stats))
         .with_state(app_state)
+        .layer(timeout)
 }

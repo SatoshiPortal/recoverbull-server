@@ -22,6 +22,8 @@ jobs:
           CANARY: 🐦
           RATE_LIMIT_COOLDOWN: 1
           RATE_LIMIT_MAX_FAILED_ATTEMPTS: 3
+          STORE_RATE_LIMIT_BURST: 10000
+          STORE_RATE_LIMIT_REFILL_PER_SECOND: 10000
 
   audit:
     runs-on: ubuntu-latest

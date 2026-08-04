@@ -87,6 +87,23 @@ pub fn init() -> AppState {
         std::process::exit(1);
     }
 
+    // Global write damper (optional, with defaults). Behind an onion
+    // service per-IP limiting is useless, so the bucket is global.
+    let store_rate_limit_burst = env::var("STORE_RATE_LIMIT_BURST")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(20.0);
+    let store_rate_limit_refill = env::var("STORE_RATE_LIMIT_REFILL_PER_SECOND")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(1.0);
+    if store_rate_limit_burst <= 0.0 || store_rate_limit_refill < 0.0 {
+        println!(
+            "Error: STORE_RATE_LIMIT_BURST must be > 0 and STORE_RATE_LIMIT_REFILL_PER_SECOND must be >= 0"
+        );
+        std::process::exit(1);
+    }
+
     AppState {
         server_address: server_addr,
         database_url,
@@ -94,5 +111,9 @@ pub fn init() -> AppState {
         identifier_rate_limit: Arc::new(Mutex::new(HashMap::new())),
         secret_max_length,
         rate_limit_max_failed_attempts,
+        store_token_bucket: Arc::new(Mutex::new(crate::rate_limit::TokenBucket::new(
+            store_rate_limit_burst,
+            store_rate_limit_refill,
+        ))),
     }
 }

@@ -96,19 +96,38 @@ async fn test_audit_f2_attacker_failures_deny_legitimate_owner() {
 /// regression test lives in test_db_errors.rs
 /// (test_database_error_returns_500_without_consuming_attempts).
 
-/// F9 (LOW): /store accepts unlimited writes — no rate limit, no quota.
+/// F9 (LOW): /store accepted unlimited writes — FIXED. Unauthenticated
+/// writes are now dampened by a global token bucket (per-IP is useless
+/// behind an onion service). This test uses a tiny bucket with no refill
+/// for determinism.
 #[tokio::test]
-async fn test_audit_f9_store_accepts_unlimited_writes() {
-    let (server, _) = crate::tests::test_server::new_test_server().await;
+async fn test_audit_f9_store_writes_are_token_bucketed() {
+    let mut app_state = crate::env::init();
+    app_state.store_token_bucket = std::sync::Arc::new(tokio::sync::Mutex::new(
+        crate::rate_limit::TokenBucket::new(3.0, 0.0),
+    ));
+    crate::database::init_db(app_state.clone());
+    let app = crate::router::new(app_state.clone());
+    let mut connection = crate::database::establish_connection(app_state.clone().database_url);
+    crate::tests::test_server::clear_table_secret(&mut connection).await;
+    let server = axum_test::TestServer::new(app).unwrap();
 
-    for i in 0..20u32 {
+    for i in 0..5u32 {
         let store = &StoreSecret {
             identifier: format!("{:064x}", i + 1),
             authentication_key: format!("{:064x}", i + 1),
             encrypted_secret: "dGVzdA==".to_string(),
         };
         let response = server.post("/store").json(store).await;
-        assert_eq!(response.status_code(), StatusCode::CREATED);
+        if i < 3 {
+            assert_eq!(response.status_code(), StatusCode::CREATED);
+        } else {
+            assert_eq!(
+                response.status_code(),
+                StatusCode::TOO_MANY_REQUESTS,
+                "writes beyond the bucket capacity must be rejected"
+            );
+        }
     }
 }
 

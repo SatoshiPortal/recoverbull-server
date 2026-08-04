@@ -53,6 +53,21 @@ pub async fn store_secret(
         );
     }
 
+    // Global write damper: unauthenticated writes are token-bucketed so a
+    // flood cannot fill the database at full speed.
+    {
+        let mut bucket = state.store_token_bucket.lock().await;
+        if !bucket.try_consume() {
+            tracing::warn!("store rate-limit exceeded");
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(Some(json!({
+                    "error": "Too many store requests, retry later",
+                }))),
+            );
+        }
+    }
+
     let key = Secret {
         id: generate_secret_id(identifier, authentication_key),
         created_at: chrono::Utc::now().to_rfc3339(),

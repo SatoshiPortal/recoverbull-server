@@ -90,43 +90,11 @@ async fn test_audit_f2_attacker_failures_deny_legitimate_owner() {
     );
 }
 
-/// F3 (MED): database errors are reported as "Invalid
-/// identifier/authentication_key" (401) and consume rate-limit attempts,
-/// so transient database trouble burns the user's recovery attempts.
-#[tokio::test]
-async fn test_audit_f3_database_error_reported_as_invalid_credentials() {
-    let (server, state) = crate::tests::test_server::new_test_server().await;
-
-    // force every subsequent query to fail (init_db recreates the table
-    // on the next test via IF NOT EXISTS)
-    let mut connection = crate::database::establish_connection(state.clone().database_url);
-    diesel::sql_query("DROP TABLE secret")
-        .execute(&mut connection)
-        .expect("failed to drop table");
-
-    let fetch = &FetchSecret {
-        identifier: SHA256_111111.to_string(),
-        authentication_key: SHA256_222222.to_string(),
-    };
-
-    // each database error is misreported as wrong credentials and
-    // consumes an attempt...
-    for expected_attempts in 1..=state.rate_limit_max_failed_attempts {
-        let response = server.post("/fetch").json(fetch).await;
-        assert_eq!(
-            response.status_code(),
-            StatusCode::UNAUTHORIZED,
-            "CURRENT VULNERABLE BEHAVIOR: database error reported as 401"
-        );
-        let body: serde_json::Value = response.json();
-        assert_eq!(body["attempts"], expected_attempts);
-        assert_eq!(body["error"], "Invalid identifier/authentication_key");
-    }
-
-    // ...until the user is locked out by database failures alone
-    let response = server.post("/fetch").json(fetch).await;
-    assert_eq!(response.status_code(), StatusCode::TOO_MANY_REQUESTS);
-}
+/// F3 (MED): database errors were reported as "Invalid
+/// identifier/authentication_key" (401) and consumed rate-limit attempts —
+/// FIXED. Database errors now return 500 and refund the attempt. The
+/// regression test lives in test_db_errors.rs
+/// (test_database_error_returns_500_without_consuming_attempts).
 
 /// F9 (LOW): /store accepts unlimited writes — no rate limit, no quota.
 #[tokio::test]

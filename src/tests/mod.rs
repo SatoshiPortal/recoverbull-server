@@ -1,5 +1,6 @@
 pub mod test_audit_claims;
 pub mod test_concurrency;
+pub mod test_db_errors;
 pub mod test_env;
 pub mod test_fetch;
 pub mod test_info;

@@ -48,16 +48,17 @@ pub fn write(connection: &mut SqliteConnection, new_secret: &Secret) -> bool {
         .is_ok()
 }
 
-pub fn read_secret_by_id(connection: &mut SqliteConnection, secret_id: &str) -> Option<Secret> {
-    match secret
+pub fn read_secret_by_id(
+    connection: &mut SqliteConnection,
+    secret_id: &str,
+) -> Result<Option<Secret>, diesel::result::Error> {
+    // Err (SQLITE_BUSY, I/O error, ...) must stay distinguishable from
+    // Ok(None): a database failure is not a wrong credential and must never
+    // consume a rate-limit attempt.
+    secret
         .filter(id.eq(secret_id))
         .first::<Secret>(connection)
         .optional()
-    {
-        Ok(Some(found_secret)) => Some(found_secret),
-        Ok(None) => None,
-        Err(_) => None,
-    }
 }
 
 pub fn trash(connection: &mut SqliteConnection, secret_id: &str) -> bool {

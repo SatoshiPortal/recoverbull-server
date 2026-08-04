@@ -73,7 +73,32 @@ pub async fn fetch_secret(
     let mut connection: diesel::SqliteConnection = establish_connection(state.database_url);
     let result = read_secret_by_id(&mut connection, &key_id);
     match result {
-        Some(key) => {
+        Err(_) => {
+            // A database error is not a wrong credential: respond 500 and
+            // refund the attempt reserved above so transient database
+            // trouble cannot burn a user's rate-limit attempts.
+            let should_remove = {
+                let mut identifier_rate_limit = state.identifier_rate_limit.lock().await;
+                match identifier_rate_limit.get_mut(identifier) {
+                    Some(info) => {
+                        info.attempts = info.attempts.saturating_sub(1);
+                        info.attempts == 0
+                    }
+                    None => false,
+                }
+            };
+            if should_remove {
+                let mut identifier_rate_limit = state.identifier_rate_limit.lock().await;
+                identifier_rate_limit.remove(identifier);
+            }
+
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "Internal server error"})),
+            )
+        }
+
+        Ok(Some(key)) => {
             if is_trashing_secret {
                 trash(&mut connection, &key_id);
             }
@@ -103,7 +128,7 @@ pub async fn fetch_secret(
             (code, Json(response))
         }
 
-        None => {
+        Ok(None) => {
             // target brute-force mitigation
             // If the entry is not found:
             // - The key has been deleted by the user

@@ -26,7 +26,14 @@ pub fn init_db(state: AppState) {
 }
 
 pub fn establish_connection(database_url: String) -> SqliteConnection {
-    SqliteConnection::establish(&database_url).expect("Error connecting to database")
+    let mut connection =
+        SqliteConnection::establish(&database_url).expect("Error connecting to database");
+    // busy_timeout is per-connection: without it, concurrent writers in WAL
+    // mode fail immediately with SQLITE_BUSY instead of waiting.
+    sql_query("PRAGMA busy_timeout = 5000;")
+        .execute(&mut connection)
+        .expect("Failed to set busy_timeout");
+    connection
 }
 
 pub fn write(connection: &mut SqliteConnection, new_secret: &Secret) -> Option<bool> {

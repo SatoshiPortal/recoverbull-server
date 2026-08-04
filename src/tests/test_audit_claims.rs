@@ -112,10 +112,11 @@ async fn test_audit_f9_store_accepts_unlimited_writes() {
     }
 }
 
-/// F11 (LOW): wildcard CORS on every endpoint — any web page can issue
-/// and read responses from a visitor's browser.
+/// F11 (LOW): wildcard CORS on every endpoint — FIXED. The CORS layers
+/// were removed entirely (clients are native apps over Tor, not browsers).
+/// This test guards that no CORS header ever comes back.
 #[tokio::test]
-async fn test_audit_f11_cors_allows_any_origin() {
+async fn test_audit_f11_no_cors_headers() {
     let (server, _) = crate::tests::test_server::new_test_server().await;
 
     let response = server
@@ -124,10 +125,11 @@ async fn test_audit_f11_cors_allows_any_origin() {
         .add_header("Access-Control-Request-Method", "POST")
         .await;
 
-    assert_eq!(
-        response.header("access-control-allow-origin"),
-        "*",
-        "CURRENT BEHAVIOR: any origin may call the API from a browser"
+    assert!(
+        response
+            .maybe_header("access-control-allow-origin")
+            .is_none(),
+        "no CORS header must be present"
     );
 }
 

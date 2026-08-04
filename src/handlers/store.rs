@@ -7,6 +7,8 @@ use crate::models::{Secret, StoreSecret};
 use crate::utils::{generate_secret_id, is_256bits_hex_hash, is_base64};
 use crate::AppState;
 
+const DATABASE_PERMIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
 pub async fn store_secret(
     State(state): State<AppState>,
     Json(request): Json<StoreSecret>,
@@ -74,15 +76,39 @@ pub async fn store_secret(
         encrypted_secret: encrypted_secret.clone(),
     };
 
+    let database_permit = match tokio::time::timeout(
+        DATABASE_PERMIT_TIMEOUT,
+        state.database_semaphore.clone().acquire_owned(),
+    )
+    .await
+    {
+        Ok(Ok(permit)) => permit,
+        Ok(Err(_)) | Err(_) => {
+            tracing::warn!("database concurrency limit exceeded");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(Some(json!({"error": "Database busy, retry later"}))),
+            );
+        }
+    };
+
     // diesel is synchronous: run the write on a blocking thread so it
     // cannot stall the async workers
     let database_url = state.database_url.clone();
-    let is_stored = tokio::task::spawn_blocking(move || {
+    let task = tokio::task::spawn_blocking(move || {
+        let _database_permit = database_permit;
         let mut connection = establish_connection(database_url);
         crate::database::write(&mut connection, &key)
     })
-    .await
-    .expect("database task panicked");
+    .await;
+
+    let is_stored = match task {
+        Ok(is_stored) => is_stored,
+        Err(error) => {
+            tracing::error!(error = %error, "database task panicked");
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(None));
+        }
+    };
 
     match is_stored {
         true => {

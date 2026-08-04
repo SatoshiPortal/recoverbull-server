@@ -1,6 +1,7 @@
 use crate::{
     models::FetchSecret,
     tests::{SHA256_111111, SHA256_222222},
+    utils::identifier_hash,
 };
 use axum::http::StatusCode;
 use diesel::RunQueryDsl;
@@ -37,5 +38,5 @@ async fn test_database_error_returns_500_without_consuming_attempts() {
 
     // No rate-limit entry may remain: attempts were refunded.
     let identifier_rate_limit = state.identifier_rate_limit.lock().await;
-    assert!(!identifier_rate_limit.contains_key(SHA256_111111));
+    assert!(!identifier_rate_limit.contains_key(&identifier_hash(SHA256_111111).unwrap()));
 }

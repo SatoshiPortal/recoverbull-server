@@ -126,3 +126,29 @@ async fn test_rate_limit_holds_under_concurrency() {
         N - state.rate_limit_max_failed_attempts as usize
     );
 }
+
+/// Reading and deleting must be one atomic operation. Otherwise concurrent
+/// `/trash` requests can both read and release the same secret.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_concurrent_trash_releases_secret_once() {
+    let (addr, _) = spawn_server().await;
+
+    let store_body = format!(
+        "{{\"identifier\":\"{}\",\"authentication_key\":\"{}\",\"encrypted_secret\":\"dGVzdA==\"}}",
+        crate::tests::SHA256_111111,
+        crate::tests::SHA256_222222
+    );
+    assert_eq!(raw_post(addr, "/store", store_body).await, 201);
+
+    let trash_body = format!(
+        "{{\"identifier\":\"{}\",\"authentication_key\":\"{}\"}}",
+        crate::tests::SHA256_111111,
+        crate::tests::SHA256_222222
+    );
+    let first = tokio::spawn(raw_post(addr, "/trash", trash_body.clone()));
+    let second = tokio::spawn(raw_post(addr, "/trash", trash_body));
+    let mut statuses = vec![first.await.unwrap(), second.await.unwrap()];
+    statuses.sort_unstable();
+
+    assert_eq!(statuses, vec![202, 401]);
+}

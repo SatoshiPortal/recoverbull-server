@@ -33,7 +33,10 @@ pub struct Secret {
 #[derive(Clone)]
 pub struct RateLimitInfo {
     pub last_request: chrono::DateTime<chrono::Utc>,
+    /// All secret lookups count, including matches: an unauthenticated
+    /// caller can create its own matching row through `/store`.
     pub attempts: u8,
+    pub failed_attempts: u8,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -49,6 +52,8 @@ pub struct StatEntry {
     /// SHA-256 of the raw identifier bytes, so clients can recognize their
     /// own identifier without exposing it (pre-image resistance).
     pub id_hash: String,
+    /// Total `/fetch` and `/trash` lookups in the current cooldown window.
     pub attempts: u8,
-    pub last_failed_at: chrono::DateTime<chrono::Utc>,
+    pub failed_attempts: u8,
+    pub last_attempt_at: chrono::DateTime<chrono::Utc>,
 }

@@ -100,3 +100,20 @@ async fn test_failure_encrypted_secret_invalid_base64() {
 
     assert_eq!(response.status_code(), StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn test_store_rejects_oversized_json_before_deserialization() {
+    let (server, _) = crate::tests::test_server::new_test_server().await;
+
+    let response = server
+        .post("/store")
+        .json(&StoreSecret {
+            identifier: SHA256_111111.to_string(),
+            authentication_key: SHA256_222222.to_string(),
+            encrypted_secret: "A".repeat(2_000),
+        })
+        .expect_failure()
+        .await;
+
+    assert_eq!(response.status_code(), StatusCode::PAYLOAD_TOO_LARGE);
+}

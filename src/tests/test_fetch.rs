@@ -4,6 +4,7 @@ use crate::{
         BASE64_ENCRYPTED_SECRET, NOT_PASSWORD_HASH, SHA256_111111, SHA256_222222,
         SHA256_CONCAT_111111_222222,
     },
+    utils::identifier_hash,
 };
 use axum::http::StatusCode;
 
@@ -127,7 +128,12 @@ async fn test_fetch_rate_limit_enforced_and_reset_after_cooldown() {
     assert_eq!(secret.id, SHA256_CONCAT_111111_222222);
     assert_eq!(secret.encrypted_secret, BASE64_ENCRYPTED_SECRET);
 
-    // ensure the entry is not in the map anymore
+    // A successful lookup consumes the first attempt of the new window and
+    // must not clear the security counter.
     let identifier_rate_limit = state.identifier_rate_limit.lock().await;
-    assert_eq!(identifier_rate_limit.contains_key(SHA256_111111), false);
+    let info = identifier_rate_limit
+        .get(&identifier_hash(SHA256_111111).unwrap())
+        .unwrap();
+    assert_eq!(info.attempts, 1);
+    assert_eq!(info.failed_attempts, 0);
 }

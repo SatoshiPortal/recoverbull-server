@@ -26,6 +26,10 @@ pub fn sha256_hex(data: &[u8]) -> String {
     hex::encode(hasher.finalize())
 }
 
+pub fn identifier_hash(identifier: &str) -> Option<String> {
+    hex::decode(identifier).ok().map(|raw| sha256_hex(&raw))
+}
+
 pub fn generate_secret_id(identifier: &str, authentication_key: &str) -> String {
     let mut identifier_and_authentication_key = Vec::new();
     identifier_and_authentication_key.extend_from_slice(identifier.as_bytes());

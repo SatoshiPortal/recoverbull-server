@@ -1,5 +1,5 @@
 use axum::{
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     routing::{get, post},
     Json, Router,
 };
@@ -40,5 +40,8 @@ pub fn new(app_state: AppState) -> Router {
         .with_state(app_state.clone())
         .route("/stats", get(stats::get_stats))
         .with_state(app_state)
+        // Legitimate JSON requests are below 320 bytes. Keep modest headroom
+        // while rejecting oversized bodies before deserialization.
+        .layer(DefaultBodyLimit::max(1024))
         .layer(timeout)
 }

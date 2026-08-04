@@ -47,6 +47,61 @@ async fn test_audit_f1_store_gives_no_existence_signal() {
     assert_eq!(second.status_code(), first.status_code());
 }
 
+/// F1 follow-up: a caller must not bypass the fetch budget by planting a row
+/// for each guessed key. A planted row makes the lookup return 200, but every
+/// lookup still consumes the identifier's shared attempt budget.
+#[tokio::test]
+async fn test_audit_f1_planted_rows_cannot_reset_fetch_rate_limit() {
+    let (server, state) = crate::tests::test_server::new_test_server().await;
+
+    server
+        .post("/store")
+        .json(&StoreSecret {
+            identifier: SHA256_111111.to_string(),
+            authentication_key: SHA256_222222.to_string(),
+            encrypted_secret: BASE64_ENCRYPTED_SECRET.to_string(),
+        })
+        .expect_success()
+        .await;
+
+    for i in 0..state.rate_limit_max_failed_attempts {
+        let guessed_key = format!("{:064x}", i + 1);
+        let marker = "dGVzdA==";
+
+        server
+            .post("/store")
+            .json(&StoreSecret {
+                identifier: SHA256_111111.to_string(),
+                authentication_key: guessed_key.clone(),
+                encrypted_secret: marker.to_string(),
+            })
+            .expect_success()
+            .await;
+
+        let response = server
+            .post("/fetch")
+            .json(&FetchSecret {
+                identifier: SHA256_111111.to_string(),
+                authentication_key: guessed_key,
+            })
+            .expect_success()
+            .await;
+        assert_eq!(
+            response.json::<serde_json::Value>()["encrypted_secret"],
+            marker
+        );
+    }
+
+    let response = server
+        .post("/fetch")
+        .json(&FetchSecret {
+            identifier: SHA256_111111.to_string(),
+            authentication_key: SHA256_222222.to_string(),
+        })
+        .await;
+    assert_eq!(response.status_code(), StatusCode::TOO_MANY_REQUESTS);
+}
+
 /// F2 (HIGH): the attempts counter is keyed on the identifier alone and
 /// checked before credentials are verified, so an attacker who knows the
 /// victim's identifier can lock the legitimate owner out of recovery.
@@ -128,6 +183,34 @@ async fn test_audit_f9_store_writes_are_token_bucketed() {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn test_lookup_flood_is_globally_token_bucketed() {
+    let mut state = crate::env::init();
+    state.lookup_token_bucket = std::sync::Arc::new(tokio::sync::Mutex::new(
+        crate::rate_limit::TokenBucket::new(1.0, 0.0),
+    ));
+    crate::database::init_db(state.clone());
+    let server = axum_test::TestServer::new(crate::router::new(state)).unwrap();
+
+    let first = server
+        .post("/fetch")
+        .json(&FetchSecret {
+            identifier: SHA256_111111.to_string(),
+            authentication_key: NOT_PASSWORD_HASH.to_string(),
+        })
+        .await;
+    assert_eq!(first.status_code(), StatusCode::UNAUTHORIZED);
+
+    let second = server
+        .post("/fetch")
+        .json(&FetchSecret {
+            identifier: SHA256_222222.to_string(),
+            authentication_key: NOT_PASSWORD_HASH.to_string(),
+        })
+        .await;
+    assert_eq!(second.status_code(), StatusCode::TOO_MANY_REQUESTS);
 }
 
 /// F11 (LOW): wildcard CORS on every endpoint — FIXED. The CORS layers

@@ -9,7 +9,7 @@ pub struct TokenBucket {
     tokens: f64,
     capacity: f64,
     refill_per_second: f64,
-    last_refill: chrono::DateTime<chrono::Utc>,
+    last_refill: std::time::Instant,
 }
 
 impl TokenBucket {
@@ -18,16 +18,15 @@ impl TokenBucket {
             tokens: capacity,
             capacity,
             refill_per_second,
-            last_refill: chrono::Utc::now(),
+            last_refill: std::time::Instant::now(),
         }
     }
 
     /// Refills the tokens elapsed since the last call, then tries to
     /// consume one. Returns false when the bucket is empty.
     pub fn try_consume(&mut self) -> bool {
-        let now = chrono::Utc::now();
-        let elapsed =
-            now.signed_duration_since(self.last_refill).num_milliseconds() as f64 / 1000.0;
+        let now = std::time::Instant::now();
+        let elapsed = now.duration_since(self.last_refill).as_secs_f64();
         self.tokens = (self.tokens + elapsed * self.refill_per_second).min(self.capacity);
         self.last_refill = now;
         if self.tokens >= 1.0 {
@@ -42,7 +41,7 @@ impl TokenBucket {
 /// How often the sweeper removes expired rate-limit entries.
 const SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(600);
 
-/// Removes the rate-limit entries whose last request is older than the
+/// Removes the hashed rate-limit entries whose last request is older than the
 /// cooldown. Entries are only meaningful within the cooldown window; keeping
 /// them longer would grow memory unboundedly and retain identifiers for no
 /// security benefit (the whitepaper asks identifiers to be wiped daily).

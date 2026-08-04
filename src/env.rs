@@ -1,9 +1,27 @@
 use chrono::Duration;
 use dotenvy::dotenv;
-use std::{collections::HashMap, env, sync::Arc};
-use tokio::sync::Mutex;
+use std::{collections::HashMap, env, fmt::Display, str::FromStr, sync::Arc};
+use tokio::sync::{Mutex, Semaphore};
 
 use crate::AppState;
+
+fn optional_env<T>(name: &str, default: T) -> T
+where
+    T: FromStr,
+    T::Err: Display,
+{
+    match env::var(name) {
+        Ok(value) => value.parse().unwrap_or_else(|error| {
+            eprintln!("Error: {name} has an invalid value: {error}");
+            std::process::exit(1);
+        }),
+        Err(env::VarError::NotPresent) => default,
+        Err(error) => {
+            eprintln!("Error: cannot read {name}: {error}");
+            std::process::exit(1);
+        }
+    }
+}
 
 /// Validates the security-critical configuration values.
 ///
@@ -89,17 +107,41 @@ pub fn init() -> AppState {
 
     // Global write damper (optional, with defaults). Behind an onion
     // service per-IP limiting is useless, so the bucket is global.
-    let store_rate_limit_burst = env::var("STORE_RATE_LIMIT_BURST")
-        .ok()
-        .and_then(|v| v.parse::<f64>().ok())
-        .unwrap_or(20.0);
-    let store_rate_limit_refill = env::var("STORE_RATE_LIMIT_REFILL_PER_SECOND")
-        .ok()
-        .and_then(|v| v.parse::<f64>().ok())
-        .unwrap_or(1.0);
-    if store_rate_limit_burst <= 0.0 || store_rate_limit_refill < 0.0 {
+    let store_rate_limit_burst: f64 = optional_env("STORE_RATE_LIMIT_BURST", 10.0);
+    let store_rate_limit_refill: f64 =
+        optional_env("STORE_RATE_LIMIT_REFILL_PER_SECOND", 2.0);
+    if !store_rate_limit_burst.is_finite()
+        || !store_rate_limit_refill.is_finite()
+        || store_rate_limit_burst <= 0.0
+        || store_rate_limit_refill < 0.0
+    {
         println!(
-            "Error: STORE_RATE_LIMIT_BURST must be > 0 and STORE_RATE_LIMIT_REFILL_PER_SECOND must be >= 0"
+            "Error: STORE_RATE_LIMIT_BURST must be finite and > 0, and STORE_RATE_LIMIT_REFILL_PER_SECOND must be finite and >= 0"
+        );
+        std::process::exit(1);
+    }
+
+    // A second global bucket bounds identifier spraying and database reads.
+    // It is deliberately independent from the per-identifier security budget.
+    let lookup_rate_limit_burst: f64 = optional_env("LOOKUP_RATE_LIMIT_BURST", 100.0);
+    let lookup_rate_limit_refill: f64 =
+        optional_env("LOOKUP_RATE_LIMIT_REFILL_PER_SECOND", 5.0);
+    if !lookup_rate_limit_burst.is_finite()
+        || !lookup_rate_limit_refill.is_finite()
+        || lookup_rate_limit_burst <= 0.0
+        || lookup_rate_limit_refill < 0.0
+    {
+        println!(
+            "Error: LOOKUP_RATE_LIMIT_BURST must be finite and > 0, and LOOKUP_RATE_LIMIT_REFILL_PER_SECOND must be finite and >= 0"
+        );
+        std::process::exit(1);
+    }
+
+    let rate_limit_max_identifiers = optional_env("RATE_LIMIT_MAX_IDENTIFIERS", 100_000usize);
+    let database_max_concurrency = optional_env("DATABASE_MAX_CONCURRENCY", 16usize);
+    if rate_limit_max_identifiers == 0 || database_max_concurrency == 0 {
+        println!(
+            "Error: RATE_LIMIT_MAX_IDENTIFIERS and DATABASE_MAX_CONCURRENCY must be greater than 0"
         );
         std::process::exit(1);
     }
@@ -115,5 +157,11 @@ pub fn init() -> AppState {
             store_rate_limit_burst,
             store_rate_limit_refill,
         ))),
+        lookup_token_bucket: Arc::new(Mutex::new(crate::rate_limit::TokenBucket::new(
+            lookup_rate_limit_burst,
+            lookup_rate_limit_refill,
+        ))),
+        rate_limit_max_identifiers,
+        database_semaphore: Arc::new(Semaphore::new(database_max_concurrency)),
     }
 }

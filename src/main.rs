@@ -13,7 +13,7 @@ mod utils;
 use std::{collections::HashMap, sync::Arc};
 
 use chrono::TimeDelta;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
 
 #[derive(Clone)]
 struct AppState {
@@ -24,6 +24,9 @@ struct AppState {
     secret_max_length: usize,
     rate_limit_max_failed_attempts: u8,
     store_token_bucket: Arc<Mutex<rate_limit::TokenBucket>>,
+    lookup_token_bucket: Arc<Mutex<rate_limit::TokenBucket>>,
+    rate_limit_max_identifiers: usize,
+    database_semaphore: Arc<Semaphore>,
 }
 
 #[tokio::main]

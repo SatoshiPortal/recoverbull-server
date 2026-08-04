@@ -61,10 +61,21 @@ pub fn read_secret_by_id(
         .optional()
 }
 
-pub fn trash(connection: &mut SqliteConnection, secret_id: &str) -> bool {
-    match diesel::delete(secret.filter(id.eq(secret_id))).execute(connection) {
-        Ok(deleted_count) if deleted_count > 0 => true,
-        Ok(_) => false,
-        Err(_) => false,
-    }
+pub fn read_and_trash_secret_by_id(
+    connection: &mut SqliteConnection,
+    secret_id: &str,
+) -> Result<Option<Secret>, diesel::result::Error> {
+    connection.immediate_transaction(|connection| {
+        let stored_secret = read_secret_by_id(connection, secret_id)?;
+        let Some(stored_secret) = stored_secret else {
+            return Ok(None);
+        };
+
+        let deleted = diesel::delete(secret.filter(id.eq(secret_id))).execute(connection)?;
+        if deleted != 1 {
+            return Err(diesel::result::Error::NotFound);
+        }
+
+        Ok(Some(stored_secret))
+    })
 }

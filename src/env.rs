@@ -5,6 +5,40 @@ use tokio::sync::Mutex;
 
 use crate::AppState;
 
+/// Validates the security-critical configuration values.
+///
+/// A non-positive rate-limit cooldown would silently disable rate-limiting
+/// entirely (the cooldown check would always be elapsed), and a zero
+/// max_failed_attempts or secret_max_length makes the service unusable.
+/// The server must refuse to start rather than run degraded.
+pub fn validate_config(
+    rate_limit_cooldown: i64,
+    secret_max_length: usize,
+    rate_limit_max_failed_attempts: u8,
+) -> Result<(), String> {
+    if rate_limit_cooldown <= 0 {
+        return Err(format!(
+            "RATE_LIMIT_COOLDOWN must be greater than 0, got {}",
+            rate_limit_cooldown
+        ));
+    }
+    // chrono::TimeDelta panics on out-of-range values; keep the cooldown
+    // within a sane range (at most one year in minutes).
+    if rate_limit_cooldown > 525_600 {
+        return Err(format!(
+            "RATE_LIMIT_COOLDOWN must be at most 525600 minutes (1 year), got {}",
+            rate_limit_cooldown
+        ));
+    }
+    if secret_max_length == 0 {
+        return Err("SECRET_MAX_LENGTH must be greater than 0".to_string());
+    }
+    if rate_limit_max_failed_attempts == 0 {
+        return Err("RATE_LIMIT_MAX_FAILED_ATTEMPTS must be at least 1".to_string());
+    }
+    Ok(())
+}
+
 pub fn init() -> AppState {
     dotenv().ok();
 
@@ -43,6 +77,15 @@ pub fn init() -> AppState {
             std::process::exit(1);
         }
     };
+
+    if let Err(e) = validate_config(
+        rate_limit_cooldown,
+        secret_max_length,
+        rate_limit_max_failed_attempts,
+    ) {
+        println!("Error: {}", e);
+        std::process::exit(1);
+    }
 
     AppState {
         server_address: server_addr,

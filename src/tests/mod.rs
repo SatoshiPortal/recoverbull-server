@@ -1,3 +1,4 @@
+pub mod test_env;
 pub mod test_fetch;
 pub mod test_info;
 pub mod test_stats;

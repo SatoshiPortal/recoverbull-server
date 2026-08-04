@@ -2,6 +2,7 @@ mod database;
 mod env;
 mod handlers;
 mod models;
+mod rate_limit;
 mod router;
 mod schema;
 
@@ -29,6 +30,8 @@ async fn main() {
     let app_state = crate::env::init();
 
     crate::database::init_db(app_state.clone());
+
+    crate::rate_limit::spawn_sweeper(app_state.clone());
 
     let app = router::new(app_state.clone());
 

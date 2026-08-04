@@ -66,7 +66,7 @@ Identifiers are published hashed, never raw: a client can recognize its own iden
 Detection semantics a client should implement:
 - **Poll `/stats` proactively** (e.g. at app start): if your identifier hash appears with attempts you did not make, someone is probing your backup.
 - **Treat an unexpected `429` as an alarm**: if you did not make failed attempts, someone else locked your identifier.
-- **`failed_attempts` on a successful fetch is a best-effort signal within the current rate-limit window**: sub-threshold failures (1 or 2) persist until your next success and are always reported; once the max is reached and the cooldown has elapsed, the window resets and the count restarts from zero.
+- **`failed_attempts` on a successful fetch is a best-effort signal within the current rate-limit window**: failures older than the cooldown expire (entries are swept and forgotten), so the count reflects the current window and restarts from zero afterwards.
 
 
 

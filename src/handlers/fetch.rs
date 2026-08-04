@@ -33,11 +33,9 @@ pub async fn fetch_secret(
     let (can_attempt, attempt_number, last_request) = {
         let mut identifier_rate_limit = state.identifier_rate_limit.lock().await;
 
-        // a maxed-out entry is reset once the cooldown has elapsed
+        // entries expire once the cooldown has elapsed
         if identifier_rate_limit.get(identifier).is_some_and(|info| {
-            info.attempts >= state.rate_limit_max_failed_attempts
-                && current_time.signed_duration_since(info.last_request)
-                    > state.rate_limit_cooldown
+            current_time.signed_duration_since(info.last_request) > state.rate_limit_cooldown
         }) {
             identifier_rate_limit.remove(identifier);
         }

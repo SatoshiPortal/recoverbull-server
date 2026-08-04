@@ -29,6 +29,16 @@ struct AppState {
 async fn main() {
     let app_state = crate::env::init();
 
+    if !app_state.server_address.starts_with("127.0.0.1")
+        && !app_state.server_address.starts_with("localhost")
+        && !app_state.server_address.starts_with("[::1]")
+    {
+        eprintln!(
+            "WARNING: SERVER_ADDRESS ({}) is not loopback. This server is designed to run behind a Tor onion service or a TLS-terminating proxy; never expose it directly on a public interface.",
+            app_state.server_address
+        );
+    }
+
     crate::database::init_db(app_state.clone());
 
     crate::rate_limit::spawn_sweeper(app_state.clone());

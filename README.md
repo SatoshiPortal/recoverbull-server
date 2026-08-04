@@ -83,12 +83,34 @@ If an attacker can steal informations to a targeted user such as `salt` and have
 
 
 ## Deployment
+
+### Tor onion service (the supported deployment)
+
+The server is designed to be reached exclusively through a **Tor onion service**: it protects the transport confidentiality of the `authentication_key` and the IP anonymity of clients. **Never expose it directly on a public interface** — the server refuses to stay silent about it and prints a startup warning when `SERVER_ADDRESS` is not loopback.
+
+1. Keep the server on loopback: `SERVER_ADDRESS=127.0.0.1:3000`
+2. Configure the onion service in `torrc`:
+
+```
+HiddenServiceDir /var/lib/tor/recoverbull/
+HiddenServicePort 80 127.0.0.1:3000
+```
+
+3. Reload Tor and read the onion hostname:
+
+```sh
+sudo systemctl reload tor
+sudo cat /var/lib/tor/recoverbull/hostname
+```
+
+A reverse proxy (e.g. nginx) may sit between Tor and the app for global request-rate limiting and timeouts. Note that behind an onion service **all connections arrive from 127.0.0.1**, so per-IP rules are useless: use a single global bucket.
+
 ### dotenv
 
 ```sh
 echo "DATABASE_URL=production_db.sqlite3" >> .env && \
 echo "TEST_DATABASE_URL=test_db.sqlite3" >> .env && \
-echo "SERVER_ADDRESS=0.0.0.0:3000" >> .env && \
+echo "SERVER_ADDRESS=127.0.0.1:3000" >> .env && \
 echo "SECRET_MAX_LENGTH=128" >> .env && \
 echo "CANARY='🐦'" >> .env && \
 echo "RATE_LIMIT_COOLDOWN=1440" >> .env && \

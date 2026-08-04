@@ -72,3 +72,57 @@ async fn test_concurrent_store_writes_succeed() {
         other
     );
 }
+
+/// Regression test: the rate-limit check used to be non-atomic (read the
+/// counter, release the lock, look up the database, then increment), so
+/// concurrent requests could all pass the check before anyone incremented
+/// (measured: 8 password guesses consumed instead of 3 with 100 concurrent
+/// requests). The check-and-increment is now atomic under the same lock, so
+/// exactly `max_failed_attempts` guesses are consumed, no matter the
+/// concurrency.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn test_rate_limit_holds_under_concurrency() {
+    let (addr, state) = spawn_server().await;
+
+    let store_body = format!(
+        "{{\"identifier\":\"{}\",\"authentication_key\":\"{}\",\"encrypted_secret\":\"dGVzdA==\"}}",
+        crate::tests::SHA256_111111,
+        crate::tests::SHA256_222222
+    );
+    assert_eq!(raw_post(addr, "/store", store_body).await, 201);
+
+    const N: usize = 100;
+    let fetch_body = format!(
+        "{{\"identifier\":\"{}\",\"authentication_key\":\"{}\"}}",
+        crate::tests::SHA256_111111,
+        crate::tests::NOT_PASSWORD_HASH
+    );
+
+    let mut handles = Vec::new();
+    for _ in 0..N {
+        let body = fetch_body.clone();
+        handles.push(tokio::spawn(async move { raw_post(addr, "/fetch", body).await }));
+    }
+
+    let mut unauthorized = 0usize; // 401: a password guess was consumed
+    let mut too_many = 0usize; // 429: rejected by the rate limiter
+    let mut other = 0usize;
+    for h in handles {
+        match h.await.unwrap() {
+            401 => unauthorized += 1,
+            429 => too_many += 1,
+            _ => other += 1,
+        }
+    }
+
+    assert_eq!(other, 0, "unexpected status codes");
+    assert_eq!(
+        unauthorized,
+        state.rate_limit_max_failed_attempts as usize,
+        "rate limit bypassed: more guesses consumed than allowed"
+    );
+    assert_eq!(
+        too_many,
+        N - state.rate_limit_max_failed_attempts as usize
+    );
+}

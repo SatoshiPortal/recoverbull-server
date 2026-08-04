@@ -26,104 +26,98 @@ pub async fn fetch_secret(
     }
 
     let current_time: chrono::DateTime<chrono::Utc> = chrono::Utc::now();
-    
-    let rate_limit_info = {
-        let identifier_rate_limit = state.identifier_rate_limit.lock().await;
-        identifier_rate_limit.get(identifier).cloned()
-    };
 
-    let mut can_attempt = match rate_limit_info.clone() {
-        Some(x) => x.attempts < state.rate_limit_max_failed_attempts,
-        None => true,
-    };
+    // The rate-limit check and the attempt reservation are atomic: the entry
+    // is checked and incremented under the same lock, so concurrent requests
+    // cannot all pass the check before anyone increments.
+    let (can_attempt, attempt_number, last_request) = {
+        let mut identifier_rate_limit = state.identifier_rate_limit.lock().await;
 
-    // If has too many attempts we verify if the rate_limit_cooldown is elapsed
-    if can_attempt == false {
-        let is_cooldown_over = match rate_limit_info.clone() {
-            Some(x) => current_time.signed_duration_since(x.last_request) > state.rate_limit_cooldown,
-            None => true,
-        };
-        // If the rate_limit_cooldown is over we reset it so the user can attempt
-        if is_cooldown_over {
-            let mut identifier_rate_limit = state.identifier_rate_limit.lock().await;
+        // a maxed-out entry is reset once the cooldown has elapsed
+        if identifier_rate_limit.get(identifier).is_some_and(|info| {
+            info.attempts >= state.rate_limit_max_failed_attempts
+                && current_time.signed_duration_since(info.last_request)
+                    > state.rate_limit_cooldown
+        }) {
             identifier_rate_limit.remove(identifier);
-            can_attempt = true;
         }
-    } 
 
-    if can_attempt {
-        // re-generate the key_id
-        let key_id = generate_secret_id(identifier, authentication_key);
+        let info = identifier_rate_limit
+            .entry(identifier.to_string())
+            .or_insert(RateLimitInfo {
+                last_request: current_time,
+                attempts: 0,
+            });
 
-        // look in db for this key_id
-        let mut connection: diesel::SqliteConnection = establish_connection(state.database_url);
-        let result = read_secret_by_id(&mut connection, &key_id);
-        match result {
-            Some(key) => {
-                if is_trashing_secret {
-                    trash(&mut connection, &key_id);
-                }
-
-                // Report the failed attempts recorded for this identifier so
-                // the client can warn the user about a possible brute-force
-                // or lockout attempt, then reset them: a successful
-                // authentication proves ownership of the secret.
-                let failed_attempts = {
-                    let mut identifier_rate_limit = state.identifier_rate_limit.lock().await;
-                    identifier_rate_limit
-                        .remove(identifier)
-                        .map(|info| info.attempts)
-                        .unwrap_or(0)
-                };
-
-                let code = if is_trashing_secret {
-                    StatusCode::ACCEPTED
-                } else {
-                    StatusCode::OK
-                };
-
-                let mut response = json!(&key);
-                response["failed_attempts"] = json!(failed_attempts);
-
-                (code, Json(response))
-            }
-
-            None => {
-                // target brute-force mitigation
-                // If the entry is not found:
-                // - The key has been deleted by the user
-                // - The key_id doesn't exists for the provided identifier + authentication_key
-                // We set the rate-limit last_request and attempts for this identifier
-                let mut identifier_rate_limit = state.identifier_rate_limit.lock().await;
-                let rate_limit_info = identifier_rate_limit
-                .entry(identifier.to_string())
-                .and_modify(|info| {
-                    info.last_request = current_time;
-                    info.attempts += 1;
-                })
-                .or_insert(RateLimitInfo {
-                    last_request: current_time,
-                    attempts: 1,
-                });
-
-                let response = json!(ResponseFailedAttempt{
-                    error: "Invalid identifier/authentication_key".to_owned(),
-                    requested_at: rate_limit_info.last_request,
-                    rate_limit_cooldown: state.rate_limit_cooldown.num_minutes(),
-                    attempts: rate_limit_info.attempts,
-                });
-
-                (StatusCode::UNAUTHORIZED, Json(response))
-            }
+        if info.attempts >= state.rate_limit_max_failed_attempts {
+            (false, info.attempts, info.last_request)
+        } else {
+            info.attempts += 1;
+            info.last_request = current_time;
+            (true, info.attempts, info.last_request)
         }
-    } else {
-        let rate_limit_info = rate_limit_info.unwrap();
+    };
+
+    if !can_attempt {
         let response = json!({
             "error": "Too many attempts",
-            "requested_at": rate_limit_info.last_request,
+            "requested_at": last_request,
             "rate_limit_cooldown": state.rate_limit_cooldown.num_minutes(),
-            "attempts": rate_limit_info.attempts,
+            "attempts": attempt_number,
         });
-        (StatusCode::TOO_MANY_REQUESTS, Json(response))
+        return (StatusCode::TOO_MANY_REQUESTS, Json(response));
+    }
+
+    // re-generate the key_id
+    let key_id = generate_secret_id(identifier, authentication_key);
+
+    // look in db for this key_id (outside the rate-limit lock)
+    let mut connection: diesel::SqliteConnection = establish_connection(state.database_url);
+    let result = read_secret_by_id(&mut connection, &key_id);
+    match result {
+        Some(key) => {
+            if is_trashing_secret {
+                trash(&mut connection, &key_id);
+            }
+
+            // Report the failed attempts recorded for this identifier so the
+            // client can warn the user about a possible brute-force or lockout
+            // attempt, then reset them: a successful authentication proves
+            // ownership of the secret. The attempt reserved above for this
+            // successful request is discounted.
+            let failed_attempts = {
+                let mut identifier_rate_limit = state.identifier_rate_limit.lock().await;
+                identifier_rate_limit
+                    .remove(identifier)
+                    .map(|info| info.attempts.saturating_sub(1))
+                    .unwrap_or(0)
+            };
+
+            let code = if is_trashing_secret {
+                StatusCode::ACCEPTED
+            } else {
+                StatusCode::OK
+            };
+
+            let mut response = json!(&key);
+            response["failed_attempts"] = json!(failed_attempts);
+
+            (code, Json(response))
+        }
+
+        None => {
+            // target brute-force mitigation
+            // If the entry is not found:
+            // - The key has been deleted by the user
+            // - The key_id doesn't exists for the provided identifier + authentication_key
+            let response = json!(ResponseFailedAttempt {
+                error: "Invalid identifier/authentication_key".to_owned(),
+                requested_at: last_request,
+                rate_limit_cooldown: state.rate_limit_cooldown.num_minutes(),
+                attempts: attempt_number,
+            });
+
+            (StatusCode::UNAUTHORIZED, Json(response))
+        }
     }
 }

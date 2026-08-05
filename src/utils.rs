@@ -7,7 +7,7 @@ fn is_hex(input: &str) -> bool {
 }
 
 pub fn is_base64(input: &str) -> bool {
-    if input.len() % 4 != 0 {
+    if !input.len().is_multiple_of(4) {
         return false;
     }
     BASE64_STANDARD.decode(input).is_ok()

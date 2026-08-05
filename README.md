@@ -10,7 +10,7 @@ The server provides secret storage without relying on traditional credentials sy
 - `authentication_key` A deterministic hash derived from `password` used server-side to compute an internal `secret_id`.
 - `encryption_key` A deterministic hash derived from `password` used client-side to **encrypt** the `secret` **before** storage on the server.
 - `identifier` random secure octets (e.g., in a local file), required to retrieve the `encrypted_secret`.
-- `secret_id` = `hash(identifier + authentication_key)` Unique record key in the server’s database.
+- `secret_id` = `hash(identifier + authentication_key)` Unique record key in the server’s database. Concretely: **SHA-256 over the concatenation of the two lowercase hex *strings*** (128 ASCII bytes) — not over the decoded raw bytes. This differs from the `/attempts` `id_hash`, which hashes the raw identifier bytes; client implementations must not mix the two.
 - `encrypted_secret` = `encrypt(private_key: encryption_key, payload: secret)` The ciphertext of the secret using `encryption_key`.
 
 ### Store
@@ -71,6 +71,15 @@ The server provides secret storage without relying on traditional credentials sy
 > - `failed_attempts` counts only lookups for which no database row existed.
 > - `previous_attempt_at` is the admitted attempt immediately preceding this request (`null` when this request opened the window), and `resets_at` is when the budget expires.
 > - A successful lookup never resets the counters; they expire only after the configured cooldown.
+
+#### Timestamp precision by response
+
+Timestamp precision follows the knowledge gradient — the more a caller must already know, the more precise the timestamps it receives:
+
+- **Successful `/fetch` and `/trash` (`attempt_status`)**: exact, second-precision timestamps. Reachable by anyone holding the `identifier` (a hit can always be manufactured by planting a row through `/store`), so exact precision here widens no audience.
+- **Failed lookup (`401`)**: `requested_at` is the time of the caller's own request — it reveals nothing about anyone else.
+- **Lockout (`429`)**: `requested_at` is the **exact** time of the last *admitted* attempt, which may be the victim's. Anyone holding the `identifier` can read it once the budget is exhausted. This is accepted: the same caller already gets hour precision from the public snapshot, and the exact value is what a client needs to compute its retry time.
+- **Public `/attempts` snapshot**: hour-truncated timestamps, because the audience is everyone — exact timestamps would ease correlation without requiring any knowledge of the `identifier`.
 
 ### Attempts
 
@@ -179,12 +188,18 @@ server {
 
 All Tor connections reach nginx from loopback, so these connection and request limits are intentionally global. The backend already serves `/attempts` precompressed: nginx caches that exact body instead of recompressing per request. `limit_rate` caps per-connection throughput; multiplied by the connection limit it bounds aggregate snapshot egress. The proxy is also what lets slow clients take their time: with default `proxy_buffering`, nginx drains Axum quickly (within its 30s route timeout) and feeds the client at its own pace.
 
+> **Conditional requests behind nginx**: when serving `/attempts` from `proxy_cache`, nginx answers with the cached `200` body without evaluating the client's `If-None-Match` — the bodyless `304` path only benefits clients reaching Axum directly. Clients behind nginx therefore re-download the snapshot body whenever nginx's cache entry has expired (30s) and the content changed. This is an egress tradeoff, not a correctness issue: clients must still compare the received `ETag` to detect change, and aggregate egress stays bounded by `limit_conn` × `limit_rate`.
+
 3. Configure the onion service in `torrc` to reach nginx, with Tor's built-in DoS defenses enabled (they cover connection floods; body downloads remain an nginx concern):
 
 ```
 HiddenServiceDir /var/lib/tor/recoverbull/
 HiddenServicePort 80 127.0.0.1:3000
 HiddenServiceEnableIntroDoSDefense 1
+# Tor 0.4.8+: proof-of-work defense, makes opening many new rendezvous
+# circuits expensive under load. Neither defense covers body downloads
+# over established circuits — that remains an nginx concern (above).
+HiddenServicePoWDefensesEnabled 1
 ```
 
 4. Reload nginx and Tor, then read the onion hostname:
@@ -207,6 +222,26 @@ echo "RATE_LIMIT_COOLDOWN=1440" >> .env && \
 echo "RATE_LIMIT_MAX_FAILED_ATTEMPTS=3" >> .env && \
 echo "MIGRATIONS_DIR=$(pwd)/migrations" >> .env
 ```
+
+The file holds the database path and the canary: keep it readable by the
+service account only (`chmod 600 .env`, same `0700` directory discipline as
+the database volume).
+
+`CANARY` is the warrant canary served by `/info`. When it is provided by
+this file (the common case), it is **re-read from the file on every `/info`
+request**, following the whitepaper's warrant-canary workflow without a
+restart:
+
+- **Edit the value** → the new value is served immediately.
+- **Remove the `CANARY` line** → an **empty** canary is served: this is the
+  compromise signal clients watch for, and it is never masked by a fallback.
+- **File missing or unreadable** (ops error) → the startup value is served,
+  so a deploy mishap does not raise a false alarm.
+
+When `CANARY` is instead provided by the process environment (e.g. systemd
+`Environment=`), the environment is authoritative: file edits are ignored,
+and signaling requires a restart with a changed value. The server refuses to
+start without a canary.
 
 Optional, with defaults shown — a global token bucket dampening unauthenticated `/store` writes (per-IP is useless behind an onion service):
 
@@ -240,6 +275,10 @@ The identifier cap bounds memory without evicting active security entries;
 new identifiers receive `503` while the cap is full. SQLite work is limited to
 16 concurrent blocking operations, and requests waiting more than one second
 for a slot receive `503` without consuming their per-identifier attempt.
+Both capacities are range-checked at startup: `RATE_LIMIT_MAX_IDENTIFIERS`
+must be in `[1, 10000000]` and `DATABASE_MAX_CONCURRENCY` in `[1, 1024]` —
+a zero or an absurdly large value would silently disable the protection, so
+the server refuses to start instead.
 > `SECRET_MAX_LENGTH=128` represents the size of a 96 octets encrypted secret encoded using base64
 > 96 octets =  `nonce` (16 octets) | `ciphertext` (32 octets) | `hmac` (32 octets) + 16 octets padding to round up to 32 octets blocks
 

@@ -2,10 +2,8 @@ use axum::extract::State;
 use axum::{http::StatusCode, Json};
 use serde_json::{json, Value};
 
-use crate::database::{
-    establish_connection, read_and_trash_secret_by_id, read_secret_by_id,
-};
-use crate::models::{ResponseFailedAttempt, FetchSecret, RateLimitInfo};
+use crate::database::{establish_connection, read_and_trash_secret_by_id, read_secret_by_id};
+use crate::models::{AttemptStatus, FetchSecret, RateLimitInfo, ResponseFailedAttempt};
 use crate::utils::{generate_secret_id, identifier_hash, is_256bits_hex_hash};
 
 use crate::AppState;
@@ -71,17 +69,19 @@ pub async fn fetch_secret(
         let mut identifier_rate_limit = state.identifier_rate_limit.lock().await;
 
         // entries expire once the cooldown has elapsed
-        if identifier_rate_limit.get(&identifier_hash).is_some_and(|info| {
-            current_time.signed_duration_since(info.last_request) > state.rate_limit_cooldown
-        }) {
+        if identifier_rate_limit
+            .get(&identifier_hash)
+            .is_some_and(|info| {
+                current_time.signed_duration_since(info.last_request) > state.rate_limit_cooldown
+            })
+        {
             identifier_rate_limit.remove(&identifier_hash);
         }
 
         let is_new_identifier = !identifier_rate_limit.contains_key(&identifier_hash);
         if is_new_identifier && identifier_rate_limit.len() >= state.rate_limit_max_identifiers {
             identifier_rate_limit.retain(|_, info| {
-                current_time.signed_duration_since(info.last_request)
-                    <= state.rate_limit_cooldown
+                current_time.signed_duration_since(info.last_request) <= state.rate_limit_cooldown
             });
         }
 
@@ -91,22 +91,34 @@ pub async fn fetch_secret(
             let info = identifier_rate_limit
                 .entry(identifier_hash.clone())
                 .or_insert(RateLimitInfo {
+                    window_started_at: current_time,
                     last_request: current_time,
                     attempts: 0,
                     failed_attempts: 0,
                 });
 
             if info.attempts >= state.rate_limit_max_failed_attempts {
-                Some((false, info.attempts, info.last_request))
+                Some(Err((info.attempts, info.last_request)))
             } else {
+                let previous_attempt_at = (info.attempts > 0).then_some(info.last_request);
                 info.attempts += 1;
                 info.last_request = current_time;
-                Some((true, info.attempts, info.last_request))
+                let attempt_status = AttemptStatus {
+                    total_attempts: info.attempts,
+                    failed_attempts: info.failed_attempts,
+                    remaining_attempts: state
+                        .rate_limit_max_failed_attempts
+                        .saturating_sub(info.attempts),
+                    window_started_at: info.window_started_at,
+                    previous_attempt_at,
+                    resets_at: info.last_request + state.rate_limit_cooldown,
+                };
+                Some(Ok((attempt_status, info.last_request)))
             }
         }
     };
 
-    let Some((can_attempt, attempt_number, last_request)) = reservation else {
+    let Some(reservation) = reservation else {
         tracing::warn!("identifier rate-limit capacity exhausted");
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -114,16 +126,20 @@ pub async fn fetch_secret(
         );
     };
 
-    if !can_attempt {
-        tracing::warn!("rate-limit lockout");
-        let response = json!({
-            "error": "Too many attempts",
-            "requested_at": last_request,
-            "rate_limit_cooldown": state.rate_limit_cooldown.num_minutes(),
-            "attempts": attempt_number,
-        });
-        return (StatusCode::TOO_MANY_REQUESTS, Json(response));
-    }
+    let (attempt_status, last_request) = match reservation {
+        Ok(admitted) => admitted,
+        Err((attempts, last_request)) => {
+            tracing::warn!("rate-limit lockout");
+            let response = json!({
+                "error": "Too many attempts",
+                "requested_at": last_request,
+                "rate_limit_cooldown": state.rate_limit_cooldown.num_minutes(),
+                "attempts": attempts,
+            });
+            return (StatusCode::TOO_MANY_REQUESTS, Json(response));
+        }
+    };
+    let attempt_number = attempt_status.total_attempts;
 
     let database_permit = match tokio::time::timeout(
         DATABASE_PERMIT_TIMEOUT,
@@ -194,25 +210,24 @@ pub async fn fetch_secret(
             // A database hit does not prove ownership: an unauthenticated
             // caller may have planted the row through `/store`. Therefore a
             // successful lookup must not reset or discount the security
-            // counter. We still report actual misses as telemetry.
-            let failed_attempts = {
-                let identifier_rate_limit = state.identifier_rate_limit.lock().await;
-                identifier_rate_limit
-                    .get(&identifier_hash)
-                    .map(|info| info.failed_attempts)
-                    .unwrap_or(0)
-            };
-
+            // counter. The attempt counters captured at reservation time are
+            // reported so the client can detect lookups it did not make —
+            // including hits on planted rows, which never count as failures.
             let code = if is_trashing_secret {
                 StatusCode::ACCEPTED
             } else {
                 StatusCode::OK
             };
 
-            tracing::info!(failed_attempts, is_trash = is_trashing_secret, "secret released");
+            tracing::info!(
+                attempts = attempt_status.total_attempts,
+                failed_attempts = attempt_status.failed_attempts,
+                is_trash = is_trashing_secret,
+                "secret released"
+            );
 
             let mut response = json!(&key);
-            response["failed_attempts"] = json!(failed_attempts);
+            response["attempt_status"] = json!(attempt_status);
 
             (code, Json(response))
         }

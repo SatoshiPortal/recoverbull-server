@@ -52,7 +52,25 @@ The server provides secret storage without relying on traditional credentials sy
 
  5. The user can fetch his `secret` by deciphering `encrypted_secret` using his `encryption_key` as encryption key.
 
-> On success, the response also contains a `failed_attempts` field: the number of database misses recorded for this `identifier` during the current cooldown window. A successful lookup does not reset either this telemetry or the separate security budget. A client should warn the user when the value is higher than the user's own mistakes.
+> On success, the response also contains an `attempt_status` object: the attempt counters recorded for this `identifier` during the current cooldown window.
+>
+> ```json
+> {
+>   "attempt_status": {
+>     "total_attempts": 3,
+>     "failed_attempts": 1,
+>     "remaining_attempts": 0,
+>     "window_started_at": "2026-08-05T12:17:41Z",
+>     "previous_attempt_at": "2026-08-05T14:37:22Z",
+>     "resets_at": "2026-08-06T15:04:13Z"
+>   }
+> }
+> ```
+>
+> - `total_attempts` includes the request carrying the response and counts database hits as well as misses: a hit does not prove ownership, because a public `/store` caller can plant a matching row. A client should warn the user when the total is higher than the user's own operations.
+> - `failed_attempts` counts only lookups for which no database row existed.
+> - `previous_attempt_at` is the admitted attempt immediately preceding this request (`null` when this request opened the window), and `resets_at` is when the budget expires.
+> - A successful lookup never resets the counters; they expire only after the configured cooldown.
 
 ### Stats
 

@@ -17,6 +17,7 @@ async fn test_sweep_removes_only_expired_entries() {
         identifier_rate_limit.insert(
             identifier_hash(SHA256_111111).unwrap(),
             RateLimitInfo {
+                window_started_at: expired_at,
                 last_request: expired_at,
                 attempts: 2,
                 failed_attempts: 2,
@@ -25,6 +26,7 @@ async fn test_sweep_removes_only_expired_entries() {
         identifier_rate_limit.insert(
             identifier_hash(SHA256_222222).unwrap(),
             RateLimitInfo {
+                window_started_at: now,
                 last_request: now,
                 attempts: 1,
                 failed_attempts: 1,
@@ -52,12 +54,13 @@ async fn test_fetch_expires_sub_threshold_entry_after_cooldown() {
     // an expired entry below the max attempts threshold
     {
         let mut identifier_rate_limit = state.identifier_rate_limit.lock().await;
+        let window_started_at =
+            chrono::Utc::now() - state.rate_limit_cooldown - chrono::Duration::minutes(1);
         identifier_rate_limit.insert(
             identifier_hash(SHA256_111111).unwrap(),
             RateLimitInfo {
-                last_request: chrono::Utc::now()
-                    - state.rate_limit_cooldown
-                    - chrono::Duration::minutes(1),
+                window_started_at,
+                last_request: window_started_at,
                 attempts: 2,
                 failed_attempts: 2,
             },

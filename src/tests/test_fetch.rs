@@ -1,5 +1,5 @@
 use crate::{
-    models::{ResponseFailedAttempt, FetchSecret, Secret, StoreSecret},
+    models::{FetchSecret, ResponseFailedAttempt, Secret, StoreSecret},
     tests::{
         BASE64_ENCRYPTED_SECRET, NOT_PASSWORD_HASH, SHA256_111111, SHA256_222222,
         SHA256_CONCAT_111111_222222,
@@ -35,6 +35,74 @@ async fn test_fetch_success() {
 }
 
 #[tokio::test]
+async fn test_fetch_success_reports_exact_attempt_status() {
+    let (server, state) = crate::tests::test_server::new_test_server().await;
+
+    let store = &StoreSecret {
+        identifier: SHA256_111111.to_string(),
+        authentication_key: SHA256_222222.to_string(),
+        encrypted_secret: BASE64_ENCRYPTED_SECRET.to_string(),
+    };
+    server.post("/store").json(&store).expect_success().await;
+
+    let fetch = &FetchSecret {
+        identifier: SHA256_111111.to_string(),
+        authentication_key: SHA256_222222.to_string(),
+    };
+
+    // first lookup ever: no previous attempt, full budget remaining
+    let before_first = chrono::Utc::now();
+    let response = server.post("/fetch").json(&fetch).expect_success().await;
+    let status = &response.json::<serde_json::Value>()["attempt_status"];
+    assert_eq!(status["total_attempts"], 1);
+    assert_eq!(status["failed_attempts"], 0);
+    assert_eq!(
+        status["remaining_attempts"],
+        state.rate_limit_max_failed_attempts - 1
+    );
+    assert!(status["previous_attempt_at"].is_null());
+
+    let window_started_at = status["window_started_at"]
+        .as_str()
+        .unwrap()
+        .parse::<chrono::DateTime<chrono::Utc>>()
+        .unwrap();
+    assert!(window_started_at >= before_first);
+
+    // the window resets one cooldown after the most recent admitted attempt
+    let resets_at = status["resets_at"]
+        .as_str()
+        .unwrap()
+        .parse::<chrono::DateTime<chrono::Utc>>()
+        .unwrap();
+    assert_eq!(
+        resets_at - window_started_at,
+        state.rate_limit_cooldown,
+        "first window: resets_at is one cooldown after the first attempt"
+    );
+
+    // second lookup: the previous attempt is the first one, exactly
+    let response = server.post("/fetch").json(&fetch).expect_success().await;
+    let status = &response.json::<serde_json::Value>()["attempt_status"];
+    assert_eq!(status["total_attempts"], 2);
+    let previous_attempt_at = status["previous_attempt_at"]
+        .as_str()
+        .unwrap()
+        .parse::<chrono::DateTime<chrono::Utc>>()
+        .unwrap();
+    assert_eq!(previous_attempt_at, window_started_at);
+    assert_eq!(
+        status["window_started_at"]
+            .as_str()
+            .unwrap()
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .unwrap(),
+        window_started_at,
+        "the window start never moves within a window"
+    );
+}
+
+#[tokio::test]
 async fn test_fetch_key_failure_invalid_hash_for_format_identifier() {
     let (server, _) = crate::tests::test_server::new_test_server().await;
 
@@ -65,7 +133,10 @@ async fn test_fetch_failure_invalid_hash_format_for_authentication_key() {
 #[tokio::test]
 async fn test_fetch_rate_limit_enforced_and_reset_after_cooldown() {
     let (server, state) = crate::tests::test_server::new_test_server().await;
-    println!("\n\nThis test takes {} seconds to be executed", state.rate_limit_cooldown.num_seconds());
+    println!(
+        "\n\nThis test takes {} seconds to be executed",
+        state.rate_limit_cooldown.num_seconds()
+    );
 
     let store = &StoreSecret {
         identifier: SHA256_111111.to_string(),
@@ -87,14 +158,18 @@ async fn test_fetch_rate_limit_enforced_and_reset_after_cooldown() {
             .json(&fetch_wrong_authentication_key)
             .expect_failure()
             .await;
-        
+
         let failed_attempt = response.json::<ResponseFailedAttempt>();
-        assert_eq!(failed_attempt.attempts, i+1);
+        assert_eq!(failed_attempt.attempts, i + 1);
         assert_eq!(response.status_code(), StatusCode::UNAUTHORIZED);
 
-        println!("attempts: {} | code: {}", failed_attempt.attempts, response.status_code());
+        println!(
+            "attempts: {} | code: {}",
+            failed_attempt.attempts,
+            response.status_code()
+        );
     }
-    
+
     // trigger the rate_limit_cooldown
     let response = server
         .post("/fetch")
@@ -103,13 +178,23 @@ async fn test_fetch_rate_limit_enforced_and_reset_after_cooldown() {
         .await;
 
     let failed_attempt = response.json::<ResponseFailedAttempt>();
-    assert_eq!(failed_attempt.attempts, state.rate_limit_max_failed_attempts);
+    assert_eq!(
+        failed_attempt.attempts,
+        state.rate_limit_max_failed_attempts
+    );
     assert_eq!(response.status_code(), StatusCode::TOO_MANY_REQUESTS);
 
-    println!("attempts: {} | code: {}", failed_attempt.attempts, response.status_code());
-    
+    println!(
+        "attempts: {} | code: {}",
+        failed_attempt.attempts,
+        response.status_code()
+    );
+
     let rate_limit_cooldown = state.rate_limit_cooldown.num_seconds() as u64;
-    println!("\rWaiting… {} seconds rate_limit_cooldown", rate_limit_cooldown);
+    println!(
+        "\rWaiting… {} seconds rate_limit_cooldown",
+        rate_limit_cooldown
+    );
     std::thread::sleep(std::time::Duration::from_secs(rate_limit_cooldown));
 
     let response = server
@@ -122,8 +207,12 @@ async fn test_fetch_rate_limit_enforced_and_reset_after_cooldown() {
         .await;
 
     let secret = response.json::<Secret>();
-    
-    println!("code: {} | key: {}", response.status_code(), secret.encrypted_secret);
+
+    println!(
+        "code: {} | key: {}",
+        response.status_code(),
+        secret.encrypted_secret
+    );
 
     assert_eq!(secret.id, SHA256_CONCAT_111111_222222);
     assert_eq!(secret.encrypted_secret, BASE64_ENCRYPTED_SECRET);

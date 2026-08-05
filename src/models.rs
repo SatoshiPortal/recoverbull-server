@@ -32,6 +32,8 @@ pub struct Secret {
 
 #[derive(Clone)]
 pub struct RateLimitInfo {
+    /// First admitted attempt of the current window.
+    pub window_started_at: chrono::DateTime<chrono::Utc>,
     pub last_request: chrono::DateTime<chrono::Utc>,
     /// All secret lookups count, including matches: an unauthenticated
     /// caller can create its own matching row through `/store`.
@@ -39,10 +41,25 @@ pub struct RateLimitInfo {
     pub failed_attempts: u8,
 }
 
+/// Attempt counters reported to the caller of a successful `/fetch` or
+/// `/trash`. This is a security signal, not an audit ledger: concurrent
+/// requests may shift the counters by one.
 #[derive(Serialize, Deserialize)]
-pub struct ResponseFailedAttempt{
+pub struct AttemptStatus {
+    /// Total lookups in the current window, including this request.
+    pub total_attempts: u8,
+    pub failed_attempts: u8,
+    pub remaining_attempts: u8,
+    pub window_started_at: chrono::DateTime<chrono::Utc>,
+    /// Admitted attempt immediately preceding this request, if any.
+    pub previous_attempt_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub resets_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ResponseFailedAttempt {
     pub error: String,
-    pub requested_at:  chrono::DateTime<chrono::Utc>,
+    pub requested_at: chrono::DateTime<chrono::Utc>,
     pub rate_limit_cooldown: i64,
     pub attempts: u8,
 }

@@ -108,6 +108,8 @@ Detection semantics a client should implement:
 - **`attempt_status` on a successful fetch is the freshest signal**: it needs no extra request and stays available even when `/attempts` is overloaded. Failures older than the cooldown expire (entries are swept and forgotten), but a success never resets the counters early.
 - **Telemetry is advisory**: the server cannot distinguish an attacker from the user or another of the user's devices, and a compromised server can fabricate or suppress counters. Clients must warn, never act automatically.
 
+`GET /info` complements the snapshot with two static fields: `attempts_collection_started_at` (hour-truncated, same value as the snapshot — a cheap wipe check during the existing connection check) and `max_attempt_identifiers` (the configured map capacity, so a client can compute the snapshot fullness ratio and warn when the service is under pressure). `/info` never exposes a live identifier count: that would make map-filling campaigns cheap to monitor.
+
 
 
 ### Privacy and security goals

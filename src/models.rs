@@ -7,6 +7,13 @@ pub struct Info {
     pub canary: String,
     pub rate_limit_cooldown: u64,
     pub rate_limit_max_failed_attempts: u8,
+    /// Hour-truncated start of the in-memory attempt collection (last server
+    /// boot). Lets clients detect a telemetry wipe during their connection
+    /// check without downloading the `/attempts` snapshot.
+    pub attempts_collection_started_at: chrono::DateTime<chrono::Utc>,
+    /// Configured capacity of the attempt map, so clients can compute the
+    /// snapshot fullness ratio. Never a live count.
+    pub max_attempt_identifiers: usize,
 }
 
 #[derive(Serialize, Deserialize)]

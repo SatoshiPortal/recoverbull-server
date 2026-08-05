@@ -57,14 +57,89 @@ pub fn validate_config(
     Ok(())
 }
 
+/// Upper bound for the in-memory rate-limit map. Each entry costs roughly
+/// 150-180 bytes; the planned worst case is the 100,000 default (~20 MB).
+/// 10 million entries (~2 GB) is already absurd for this service — beyond
+/// that, the operator is better served by a startup error than by a silent
+/// memory-exhaustion kill.
+pub const MAX_RATE_LIMIT_IDENTIFIERS: usize = 10_000_000;
+
+/// Upper bound for concurrent SQLite blocking operations. SQLite serializes
+/// writers anyway and tokio's blocking pool defaults to 512 threads, so
+/// anything beyond 1024 permits cannot be exercised and only hides
+/// misconfiguration.
+pub const MAX_DATABASE_CONCURRENCY: usize = 1024;
+
+/// Validates the resource-capacity configuration values. Zero disables the
+/// protection entirely; absurdly large values disable it silently. The
+/// server must refuse to start rather than run unbounded.
+pub fn validate_capacity(
+    rate_limit_max_identifiers: usize,
+    database_max_concurrency: usize,
+) -> Result<(), String> {
+    if rate_limit_max_identifiers == 0
+        || rate_limit_max_identifiers > MAX_RATE_LIMIT_IDENTIFIERS
+    {
+        return Err(format!(
+            "RATE_LIMIT_MAX_IDENTIFIERS must be between 1 and {}, got {}",
+            MAX_RATE_LIMIT_IDENTIFIERS, rate_limit_max_identifiers
+        ));
+    }
+    if database_max_concurrency == 0 || database_max_concurrency > MAX_DATABASE_CONCURRENCY {
+        return Err(format!(
+            "DATABASE_MAX_CONCURRENCY must be between 1 and {}, got {}",
+            MAX_DATABASE_CONCURRENCY, database_max_concurrency
+        ));
+    }
+    Ok(())
+}
+
+/// Live state of the warrant canary in the dotenv file.
+pub enum CanaryFileState {
+    /// The file holds a CANARY key (possibly an empty value).
+    Value(String),
+    /// The file parses but holds no CANARY key: the operator deliberately
+    /// removed the warrant canary — this IS the compromise signal and must
+    /// not be masked by a fallback.
+    Removed,
+    /// The file is missing or unreadable: an ops error, not a signal.
+    /// Callers fall back to the startup value to avoid a false alarm.
+    Unavailable,
+}
+
+/// Re-reads the canary state from the dotenv file, so an operator can update
+/// or remove the warrant canary by editing the file without restarting the
+/// server (env::var alone would never see the edit: dotenvy loads the file
+/// only at startup).
+pub fn canary_file_state(path: &std::path::Path) -> CanaryFileState {
+    let Ok(iter) = dotenvy::from_path_iter(path) else {
+        return CanaryFileState::Unavailable;
+    };
+    for item in iter {
+        match item {
+            Ok((key, value)) if key == "CANARY" => return CanaryFileState::Value(value),
+            Ok(_) => continue,
+            Err(_) => return CanaryFileState::Unavailable,
+        }
+    }
+    CanaryFileState::Removed
+}
+
 pub fn init() -> AppState {
-    dotenv().ok();
+    // Whether CANARY comes from the process environment must be known before
+    // dotenv loads the file: dotenvy never overrides an existing variable.
+    // An environment-provided canary is authoritative (file edits are
+    // ignored); a file-provided canary follows the file at request time.
+    let canary_from_env = env::var("CANARY").is_ok();
+    // dotenv() returns the path of the file it loaded, which may be in a
+    // parent directory: keep it as the live canary source.
+    let dotenv_path = dotenv().ok();
 
     let server_addr: String = env::var("SERVER_ADDRESS").expect("SERVER_ADDRESS must be set");
     let rate_limit_cooldown =
         env::var("RATE_LIMIT_COOLDOWN").expect("RATE_LIMIT_COOLDOWN must be set");
     let secret_max_length = env::var("SECRET_MAX_LENGTH").expect("SECRET_MAX_LENGTH must be set");
-    env::var("CANARY").expect("CANARY must be set");
+    let canary = env::var("CANARY").expect("CANARY must be set");
     let rate_limit_max_failed_attempts = env::var("RATE_LIMIT_MAX_FAILED_ATTEMPTS")
         .expect("RATE_LIMIT_MAX_FAILED_ATTEMPTS must be set");
 
@@ -139,10 +214,8 @@ pub fn init() -> AppState {
 
     let rate_limit_max_identifiers = optional_env("RATE_LIMIT_MAX_IDENTIFIERS", 100_000usize);
     let database_max_concurrency = optional_env("DATABASE_MAX_CONCURRENCY", 16usize);
-    if rate_limit_max_identifiers == 0 || database_max_concurrency == 0 {
-        println!(
-            "Error: RATE_LIMIT_MAX_IDENTIFIERS and DATABASE_MAX_CONCURRENCY must be greater than 0"
-        );
+    if let Err(e) = validate_capacity(rate_limit_max_identifiers, database_max_concurrency) {
+        println!("Error: {}", e);
         std::process::exit(1);
     }
 
@@ -172,6 +245,9 @@ pub fn init() -> AppState {
     AppState {
         server_address: server_addr,
         database_url,
+        canary,
+        canary_from_env,
+        canary_path: dotenv_path.unwrap_or_else(|| std::path::PathBuf::from(".env")),
         rate_limit_cooldown: Duration::minutes(rate_limit_cooldown as i64),
         identifier_rate_limit: Arc::new(Mutex::new(HashMap::new())),
         secret_max_length,

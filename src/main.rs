@@ -28,6 +28,16 @@ struct AttemptsSnapshotCache {
 struct AppState {
     server_address: String,
     database_url: String,
+    /// Warrant canary captured at startup. Serves as the fallback when the
+    /// dotenv file is unreadable, and as the authoritative value when it
+    /// came from the process environment.
+    canary: String,
+    /// True when CANARY was provided by the process environment (dotenvy
+    /// never overrides it): the file is then ignored at request time.
+    canary_from_env: bool,
+    /// Dotenv file the canary is re-read from, so an operator can update or
+    /// remove it without restarting the server.
+    canary_path: std::path::PathBuf,
     rate_limit_cooldown: TimeDelta,
     identifier_rate_limit: Arc<Mutex<HashMap<String, models::RateLimitInfo>>>,
     secret_max_length: usize,

@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    # New RustSec advisories are published independently of our pushes:
+    # re-audit the pinned Cargo.lock daily so a fresh advisory against an
+    # unchanged dependency tree is still caught.
+    - cron: '17 6 * * *'
 
 jobs:
   test:

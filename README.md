@@ -72,21 +72,41 @@ The server provides secret storage without relying on traditional credentials sy
 > - `previous_attempt_at` is the admitted attempt immediately preceding this request (`null` when this request opened the window), and `resets_at` is when the budget expires.
 > - A successful lookup never resets the counters; they expire only after the configured cooldown.
 
-### Stats
+### Attempts
 
-`GET /stats` returns public lookup telemetry for the current cooldown window, with for each entry:
+`GET /attempts` returns a public telemetry snapshot for the current cooldown windows:
 
-- `id_hash`: SHA-256 of the raw `identifier` bytes
-- `attempts`: total number of `/fetch` and `/trash` lookups, including database hits
-- `failed_attempts`: number of lookups for which no database row existed
-- `last_attempt_at`: timestamp of the last lookup
+```json
+{
+  "version": 1,
+  "collection_started_at": "2026-08-05T09:00:00Z",
+  "entries": [
+    {
+      "id_hash": "7a06e6b2…",
+      "total_attempts": 3,
+      "failed_attempts": 1,
+      "window_started_at": "2026-08-05T12:00:00Z",
+      "last_attempt_at": "2026-08-05T14:00:00Z"
+    }
+  ]
+}
+```
 
-Identifiers are kept and published hashed, never raw: a client can recognize its own identifier by computing `sha256(identifier)` locally, but nobody can recover a raw identifier from the list (pre-image resistance), which keeps the list useless for griefing or targeted lockout. Entries live in the same in-memory map as the rate-limiter, so they expire with it (cooldown or server reboot): nothing is persisted.
+- `id_hash`: SHA-256 of the raw `identifier` **bytes** (not the hex string). A client recognizes its own identifier by hashing it locally; nobody can recover a raw identifier from the list (pre-image resistance), which keeps the list useless for griefing or targeted lockout.
+- `total_attempts`: total number of `/fetch` and `/trash` lookups, including database hits (a hit does not prove ownership: a public `/store` caller can plant a matching row).
+- `failed_attempts`: number of lookups for which no database row existed.
+- `window_started_at` / `last_attempt_at`: hour-truncated timestamps of the current window.
+- `collection_started_at`: hour-truncated start of the in-memory collection (last server boot). When it changes, counters were wiped: clients must reset their baseline.
+
+Identifiers are kept and published hashed, never raw. Entries live in the same in-memory map as the rate-limiter, so they expire with it (cooldown or server reboot): nothing is persisted.
+
+The body is **always gzip-compressed JSON** (`Content-Encoding: gzip`); clients must be gzip-capable. The snapshot is rebuilt at most once per minute and served as immutable shared bytes with a strong `ETag`: send `If-None-Match` to receive a bodyless `304` when nothing changed. `Cache-Control: public, max-age=<remaining seconds>` reflects the real freshness. A dedicated global token bucket (`ATTEMPTS_RATE_LIMIT_*`) bounds cache-bypass traffic; production deployments must additionally cache and rate-limit this route at the reverse proxy (see Deployment).
 
 Detection semantics a client should implement:
-- **Poll `/stats` proactively** (e.g. at app start): if your identifier hash appears with attempts you did not make, someone is probing your backup.
+- **Poll `/attempts` proactively** (e.g. at app start, no more often than the snapshot freshness): if your identifier hash appears with attempts you did not make, someone is probing your backup.
 - **Treat a per-identifier `429` (`"Too many attempts"`, with an `attempts` field) as an alarm**: the separate global overload response (`"Too many lookup requests"`) indicates service-wide pressure instead.
-- **`failed_attempts` on a successful fetch is a best-effort signal within the current rate-limit window**: failures older than the cooldown expire (entries are swept and forgotten), but a success never resets the value early.
+- **`attempt_status` on a successful fetch is the freshest signal**: it needs no extra request and stays available even when `/attempts` is overloaded. Failures older than the cooldown expire (entries are swept and forgotten), but a success never resets the counters early.
+- **Telemetry is advisory**: the server cannot distinguish an attacker from the user or another of the user's devices, and a compromised server can fabricate or suppress counters. Clients must warn, never act automatically.
 
 
 
@@ -106,7 +126,7 @@ If an attacker can steal informations to a targeted user such as `salt` and have
 The rate-limit counter is keyed on `sha256(identifier)` and checked **before** credentials are verified: the server cannot distinguish the legitimate owner from an attacker before the database lookup. Every lookup counts, including successful ones, because a public `/store` caller can plant a row for a guessed key. An attacker holding a victim's Backup File can therefore consume that identifier's lookup budget and keep it locked out, delaying — or with discipline, preventing — the victim's recovery. Other identifiers retain independent budgets.
 
 Mitigations available today:
-- **Detection**: clients should poll `/stats` — an identifier under attack shows attempts the user did not make, and an unexpected `429` is itself an alarm. A user who still has wallet access should rotate keys immediately.
+- **Detection**: clients should poll `/attempts` — an identifier under attack shows attempts the user did not make, and an unexpected `429` is itself an alarm. A user who still has wallet access should rotate keys immediately.
 - **Redundancy** (client-side): an exported copy of the Backup Key, social recovery, or a second independent Key Server makes the lockout of a single server non-fatal.
 
 Protocol roadmap: escalating backoff (delay without permanent denial), client proof-of-work (cost per guess instead of a hard cap), or multi-server storage.
@@ -123,6 +143,8 @@ The server is designed to be reached exclusively through a **Tor onion service**
 
 ```nginx
 limit_conn_zone $binary_remote_addr zone=recoverbull_connections:10m;
+limit_req_zone $binary_remote_addr zone=recoverbull_attempts:10m rate=5r/s;
+proxy_cache_path /var/cache/nginx/recoverbull levels=1:2 keys_zone=recoverbull_cache:10m max_size=100m inactive=2m;
 
 server {
     listen 127.0.0.1:3000;
@@ -132,6 +154,19 @@ server {
     send_timeout 35s;
     limit_conn recoverbull_connections 100;
 
+    # The telemetry snapshot can reach several megabytes: cache the
+    # precompressed body, coalesce concurrent fills and shape egress.
+    location = /attempts {
+        proxy_pass http://127.0.0.1:3001;
+        proxy_connect_timeout 2s;
+        proxy_read_timeout 35s;
+        proxy_cache recoverbull_cache;
+        proxy_cache_lock on;
+        proxy_cache_valid 200 30s;
+        limit_req zone=recoverbull_attempts burst=20 nodelay;
+        limit_rate 512k;
+    }
+
     location / {
         proxy_pass http://127.0.0.1:3001;
         proxy_connect_timeout 2s;
@@ -140,13 +175,14 @@ server {
 }
 ```
 
-All Tor connections reach nginx from loopback, so this connection limit is intentionally global.
+All Tor connections reach nginx from loopback, so these connection and request limits are intentionally global. The backend already serves `/attempts` precompressed: nginx caches that exact body instead of recompressing per request. `limit_rate` caps per-connection throughput; multiplied by the connection limit it bounds aggregate snapshot egress. The proxy is also what lets slow clients take their time: with default `proxy_buffering`, nginx drains Axum quickly (within its 30s route timeout) and feeds the client at its own pace.
 
-3. Configure the onion service in `torrc` to reach nginx:
+3. Configure the onion service in `torrc` to reach nginx, with Tor's built-in DoS defenses enabled (they cover connection floods; body downloads remain an nginx concern):
 
 ```
 HiddenServiceDir /var/lib/tor/recoverbull/
 HiddenServicePort 80 127.0.0.1:3000
+HiddenServiceEnableIntroDoSDefense 1
 ```
 
 4. Reload nginx and Tor, then read the onion hostname:
@@ -177,6 +213,9 @@ echo "STORE_RATE_LIMIT_BURST=10" >> .env && \
 echo "STORE_RATE_LIMIT_REFILL_PER_SECOND=2" >> .env && \
 echo "LOOKUP_RATE_LIMIT_BURST=100" >> .env && \
 echo "LOOKUP_RATE_LIMIT_REFILL_PER_SECOND=5" >> .env && \
+echo "ATTEMPTS_RATE_LIMIT_BURST=20" >> .env && \
+echo "ATTEMPTS_RATE_LIMIT_REFILL_PER_SECOND=2" >> .env && \
+echo "ATTEMPTS_SNAPSHOT_TTL_SECONDS=60" >> .env && \
 echo "RATE_LIMIT_MAX_IDENTIFIERS=100000" >> .env && \
 echo "DATABASE_MAX_CONCURRENCY=16" >> .env
 ```
@@ -189,7 +228,12 @@ request has a new identifier and a maximum-size secret, SQLite grows by about
 43 to 86 MB/day, depending on page and index overhead.
 `RATE_LIMIT_MAX_FAILED_ATTEMPTS` is the legacy configuration name for the
 per-identifier lookup budget; database hits consume it as well as misses.
+The `remaining_attempts` field of `attempt_status` derives from it.
 The lookup bucket is a separate global safety limit for `/fetch` and `/trash`.
+The attempts bucket is a third global limit for `GET /attempts`, sized for
+direct cache-bypass traffic; the reverse-proxy cache absorbs normal reads.
+`ATTEMPTS_SNAPSHOT_TTL_SECONDS` controls how long a snapshot is reused
+before being rebuilt (at most one rebuild per window, single-flight).
 The identifier cap bounds memory without evicting active security entries;
 new identifiers receive `503` while the cap is full. SQLite work is limited to
 16 concurrent blocking operations, and requests waiting more than one second
@@ -239,8 +283,11 @@ curl -i -X POST http://localhost:3000/trash \
 -H "Content-Type: application/json" \
 -d '{"identifier":"bcb15f821479b4d5772bd0ca866c00ad5f926e3580720659cc80d39c9d09802a","authentication_key":"4cc8f4d609b717356701c57a03e737e5ac8fe885da8c7163d3de47e01849c635"}'
 
-# Stats (brute-force telemetry, identifiers are SHA-256 hashed)
-curl -X GET http://localhost:3000/stats
+# Attempts (lookup telemetry snapshot, gzip-compressed, identifiers are SHA-256 hashed)
+curl --compressed -X GET http://localhost:3000/attempts
+
+# Attempts, conditional revalidation (returns 304 when unchanged)
+curl --compressed -X GET http://localhost:3000/attempts -H 'If-None-Match: "<etag>"'
 ```
 
 ## Tests

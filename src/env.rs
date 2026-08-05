@@ -61,10 +61,12 @@ pub fn init() -> AppState {
     dotenv().ok();
 
     let server_addr: String = env::var("SERVER_ADDRESS").expect("SERVER_ADDRESS must be set");
-    let rate_limit_cooldown = env::var("RATE_LIMIT_COOLDOWN").expect("RATE_LIMIT_COOLDOWN must be set");
+    let rate_limit_cooldown =
+        env::var("RATE_LIMIT_COOLDOWN").expect("RATE_LIMIT_COOLDOWN must be set");
     let secret_max_length = env::var("SECRET_MAX_LENGTH").expect("SECRET_MAX_LENGTH must be set");
     env::var("CANARY").expect("CANARY must be set");
-    let rate_limit_max_failed_attempts = env::var("RATE_LIMIT_MAX_FAILED_ATTEMPTS").expect("RATE_LIMIT_MAX_FAILED_ATTEMPTS must be set");
+    let rate_limit_max_failed_attempts = env::var("RATE_LIMIT_MAX_FAILED_ATTEMPTS")
+        .expect("RATE_LIMIT_MAX_FAILED_ATTEMPTS must be set");
 
     let database_url = if cfg!(test) {
         env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set")
@@ -108,8 +110,7 @@ pub fn init() -> AppState {
     // Global write damper (optional, with defaults). Behind an onion
     // service per-IP limiting is useless, so the bucket is global.
     let store_rate_limit_burst: f64 = optional_env("STORE_RATE_LIMIT_BURST", 10.0);
-    let store_rate_limit_refill: f64 =
-        optional_env("STORE_RATE_LIMIT_REFILL_PER_SECOND", 2.0);
+    let store_rate_limit_refill: f64 = optional_env("STORE_RATE_LIMIT_REFILL_PER_SECOND", 2.0);
     if !store_rate_limit_burst.is_finite()
         || !store_rate_limit_refill.is_finite()
         || store_rate_limit_burst <= 0.0
@@ -124,8 +125,7 @@ pub fn init() -> AppState {
     // A second global bucket bounds identifier spraying and database reads.
     // It is deliberately independent from the per-identifier security budget.
     let lookup_rate_limit_burst: f64 = optional_env("LOOKUP_RATE_LIMIT_BURST", 100.0);
-    let lookup_rate_limit_refill: f64 =
-        optional_env("LOOKUP_RATE_LIMIT_REFILL_PER_SECOND", 5.0);
+    let lookup_rate_limit_refill: f64 = optional_env("LOOKUP_RATE_LIMIT_REFILL_PER_SECOND", 5.0);
     if !lookup_rate_limit_burst.is_finite()
         || !lookup_rate_limit_refill.is_finite()
         || lookup_rate_limit_burst <= 0.0
@@ -146,6 +146,29 @@ pub fn init() -> AppState {
         std::process::exit(1);
     }
 
+    // `/attempts` serves a cached snapshot; this third bucket bounds direct
+    // cache-bypass traffic without consuming lookup tokens needed for
+    // recovery. The reverse-proxy cache absorbs the normal read volume.
+    let attempts_rate_limit_burst: f64 = optional_env("ATTEMPTS_RATE_LIMIT_BURST", 20.0);
+    let attempts_rate_limit_refill: f64 =
+        optional_env("ATTEMPTS_RATE_LIMIT_REFILL_PER_SECOND", 2.0);
+    if !attempts_rate_limit_burst.is_finite()
+        || !attempts_rate_limit_refill.is_finite()
+        || attempts_rate_limit_burst <= 0.0
+        || attempts_rate_limit_refill < 0.0
+    {
+        println!(
+            "Error: ATTEMPTS_RATE_LIMIT_BURST must be finite and > 0, and ATTEMPTS_RATE_LIMIT_REFILL_PER_SECOND must be finite and >= 0"
+        );
+        std::process::exit(1);
+    }
+
+    let attempts_snapshot_ttl_seconds = optional_env("ATTEMPTS_SNAPSHOT_TTL_SECONDS", 60u64);
+    if attempts_snapshot_ttl_seconds == 0 {
+        println!("Error: ATTEMPTS_SNAPSHOT_TTL_SECONDS must be greater than 0");
+        std::process::exit(1);
+    }
+
     AppState {
         server_address: server_addr,
         database_url,
@@ -161,7 +184,14 @@ pub fn init() -> AppState {
             lookup_rate_limit_burst,
             lookup_rate_limit_refill,
         ))),
+        attempts_token_bucket: Arc::new(Mutex::new(crate::rate_limit::TokenBucket::new(
+            attempts_rate_limit_burst,
+            attempts_rate_limit_refill,
+        ))),
         rate_limit_max_identifiers,
         database_semaphore: Arc::new(Semaphore::new(database_max_concurrency)),
+        attempts_collection_started_at: chrono::Utc::now(),
+        attempts_snapshot: Arc::new(Mutex::new(None)),
+        attempts_snapshot_ttl: std::time::Duration::from_secs(attempts_snapshot_ttl_seconds),
     }
 }

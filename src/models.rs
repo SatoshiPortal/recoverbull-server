@@ -65,12 +65,23 @@ pub struct ResponseFailedAttempt {
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct StatEntry {
+pub struct AttemptEntry {
     /// SHA-256 of the raw identifier bytes, so clients can recognize their
     /// own identifier without exposing it (pre-image resistance).
     pub id_hash: String,
     /// Total `/fetch` and `/trash` lookups in the current cooldown window.
-    pub attempts: u8,
+    pub total_attempts: u8,
     pub failed_attempts: u8,
+    /// Hour-truncated: exact timestamps would ease correlation.
+    pub window_started_at: chrono::DateTime<chrono::Utc>,
     pub last_attempt_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct AttemptsSnapshot {
+    pub version: u8,
+    /// Hour-truncated start of the in-memory collection (last server boot).
+    /// A changed value tells clients to reset their baseline.
+    pub collection_started_at: chrono::DateTime<chrono::Utc>,
+    pub entries: Vec<AttemptEntry>,
 }

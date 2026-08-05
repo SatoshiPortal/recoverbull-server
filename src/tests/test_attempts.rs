@@ -199,6 +199,14 @@ async fn test_attempts_snapshot_etag_and_conditional_requests() {
         .add_header("If-None-Match", "*")
         .await;
     assert_eq!(wildcard.status_code(), StatusCode::NOT_MODIFIED);
+
+    // RFC 9110: If-None-Match uses weak comparison — a weak validator
+    // matches our strong ETag
+    let weak = server
+        .get("/attempts")
+        .add_header("If-None-Match", format!("W/{etag}"))
+        .await;
+    assert_eq!(weak.status_code(), StatusCode::NOT_MODIFIED);
 }
 
 #[tokio::test]

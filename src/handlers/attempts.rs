@@ -66,9 +66,13 @@ pub async fn get_attempts(State(state): State<AppState>, headers: HeaderMap) -> 
         .get(header::IF_NONE_MATCH)
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| {
-            value
-                .split(',')
-                .any(|candidate| candidate.trim() == "*" || candidate.trim() == etag)
+            value.split(',').any(|candidate| {
+                let candidate = candidate.trim();
+                // RFC 9110: If-None-Match uses the weak comparison function,
+                // so a weak validator W/"…" matches our strong ETag.
+                let candidate = candidate.strip_prefix("W/").unwrap_or(candidate);
+                candidate == "*" || candidate == etag
+            })
         });
 
     let mut response = if not_modified {

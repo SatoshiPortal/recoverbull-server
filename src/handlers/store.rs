@@ -37,20 +37,22 @@ pub async fn store_secret(
         );
     }
 
-    if !is_base64(encrypted_secret) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(Some(json!({
-                "error": "encrypted_secret should be base64 encoded",
-            }))),
-        );
-    }
-
+    // Length before base64: the cheap check rejects oversized input without
+    // paying for a full decode of a body that will be rejected anyway.
     if encrypted_secret.len() > state.secret_max_length {
         return (
             StatusCode::BAD_REQUEST,
             Json(Some(json!({
                 "error": format!("encrypted_secret length exceeds the limit {}", state.secret_max_length),
+            }))),
+        );
+    }
+
+    if !is_base64(encrypted_secret) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(Some(json!({
+                "error": "encrypted_secret should be base64 encoded",
             }))),
         );
     }

@@ -101,6 +101,32 @@ async fn test_failure_encrypted_secret_invalid_base64() {
     assert_eq!(response.status_code(), StatusCode::BAD_REQUEST);
 }
 
+/// The length check runs before the base64 decode: an oversized secret that
+/// is also invalid base64 must be rejected as oversized, without paying for
+/// a full decode of a body that is rejected anyway.
+#[tokio::test]
+async fn test_store_checks_length_before_base64() {
+    let (server, state) = crate::tests::test_server::new_test_server().await;
+
+    let oversized_invalid = "!".repeat(state.secret_max_length + 4 - (state.secret_max_length % 4));
+    let response = server
+        .post("/store")
+        .json(&StoreSecret {
+            identifier: SHA256_111111.to_string(),
+            authentication_key: SHA256_222222.to_string(),
+            encrypted_secret: oversized_invalid,
+        })
+        .expect_failure()
+        .await;
+
+    assert_eq!(response.status_code(), StatusCode::BAD_REQUEST);
+    let body = response.text();
+    assert!(
+        body.contains("length exceeds the limit"),
+        "expected the length error, got: {body}"
+    );
+}
+
 #[tokio::test]
 async fn test_store_rejects_oversized_json_before_deserialization() {
     let (server, _) = crate::tests::test_server::new_test_server().await;

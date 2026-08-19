@@ -133,10 +133,6 @@ async fn test_fetch_failure_invalid_hash_format_for_authentication_key() {
 #[tokio::test]
 async fn test_fetch_rate_limit_enforced_and_reset_after_cooldown() {
     let (server, state) = crate::tests::test_server::new_test_server().await;
-    println!(
-        "\n\nThis test takes {} seconds to be executed",
-        state.rate_limit_cooldown.num_seconds()
-    );
 
     let store = &StoreSecret {
         identifier: SHA256_111111.to_string(),
@@ -162,12 +158,6 @@ async fn test_fetch_rate_limit_enforced_and_reset_after_cooldown() {
         let failed_attempt = response.json::<ResponseFailedAttempt>();
         assert_eq!(failed_attempt.attempts, i + 1);
         assert_eq!(response.status_code(), StatusCode::UNAUTHORIZED);
-
-        println!(
-            "attempts: {} | code: {}",
-            failed_attempt.attempts,
-            response.status_code()
-        );
     }
 
     // trigger the rate_limit_cooldown
@@ -184,18 +174,19 @@ async fn test_fetch_rate_limit_enforced_and_reset_after_cooldown() {
     );
     assert_eq!(response.status_code(), StatusCode::TOO_MANY_REQUESTS);
 
-    println!(
-        "attempts: {} | code: {}",
-        failed_attempt.attempts,
-        response.status_code()
-    );
-
-    let rate_limit_cooldown = state.rate_limit_cooldown.num_seconds() as u64;
-    println!(
-        "\rWaiting… {} seconds rate_limit_cooldown",
-        rate_limit_cooldown
-    );
-    std::thread::sleep(std::time::Duration::from_secs(rate_limit_cooldown));
+    // Simulate cooldown expiry by aging the in-memory entry directly instead
+    // of sleeping for the real cooldown duration: the suite must stay fast
+    // and must not depend on wall-clock time.
+    {
+        let mut identifier_rate_limit = state.identifier_rate_limit.lock().await;
+        let info = identifier_rate_limit
+            .get_mut(&identifier_hash(SHA256_111111).unwrap())
+            .unwrap();
+        let expired_at =
+            chrono::Utc::now() - state.rate_limit_cooldown - chrono::Duration::minutes(1);
+        info.window_started_at = expired_at;
+        info.last_request = expired_at;
+    }
 
     let response = server
         .post("/fetch")
@@ -207,12 +198,6 @@ async fn test_fetch_rate_limit_enforced_and_reset_after_cooldown() {
         .await;
 
     let secret = response.json::<Secret>();
-
-    println!(
-        "code: {} | key: {}",
-        response.status_code(),
-        secret.encrypted_secret
-    );
 
     assert_eq!(secret.id, SHA256_CONCAT_111111_222222);
     assert_eq!(secret.encrypted_secret, BASE64_ENCRYPTED_SECRET);

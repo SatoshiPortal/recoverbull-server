@@ -8,9 +8,10 @@ sha2 = "0.10"
 axum = "0.7.7"
 dotenvy = "0.15"
 # Minimal feature set: the server uses the multi-thread runtime, TCP, sync
-# primitives, timers and (in tests) io traits. "full" would also compile in
-# process spawning, signal handling and filesystem APIs we never call.
-tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "net", "sync", "time", "io-util"] }
+# primitives, timers, Unix/ctrl-c signal handling (for graceful shutdown, see
+# main.rs) and (in tests) io traits. "full" would also compile in process
+# spawning and filesystem APIs we never call.
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "net", "sync", "time", "io-util", "signal"] }
 serde = { version = "1.0.210", features = ["derive"] }
 diesel = { version = "2.3", features = ["sqlite"] }
 chrono = { version = "0.4.38", features = ["serde"] }

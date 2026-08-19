@@ -103,12 +103,12 @@ pub async fn get_attempts(State(state): State<AppState>, headers: HeaderMap) -> 
 /// bytes and a stable ETag across rebuilds.
 async fn build_snapshot(state: &AppState) -> Result<AttemptsSnapshotCache, Response> {
     let now = chrono::Utc::now();
-    let entries = {
+    let mut entries: Vec<AttemptEntry> = {
         let mut identifier_rate_limit = state.identifier_rate_limit.lock().await;
         identifier_rate_limit.retain(|_, info| {
             now.signed_duration_since(info.last_request) <= state.rate_limit_cooldown
         });
-        let mut entries: Vec<AttemptEntry> = identifier_rate_limit
+        identifier_rate_limit
             .iter()
             .map(|(id_hash, info)| AttemptEntry {
                 id_hash: id_hash.clone(),
@@ -117,12 +117,19 @@ async fn build_snapshot(state: &AppState) -> Result<AttemptsSnapshotCache, Respo
                 window_started_at: truncate_to_hour(info.window_started_at),
                 last_attempt_at: truncate_to_hour(info.last_request),
             })
-            .collect();
-        // deterministic ordering: identical activity must produce identical
-        // bytes so the ETag only changes when the activity does
-        entries.sort_by(|a, b| a.id_hash.cmp(&b.id_hash));
-        entries
+            .collect()
+        // lock dropped here
     };
+
+    // Sorting happens after the lock guard above goes out of scope: this is
+    // the same `identifier_rate_limit` mutex that every `/fetch` and
+    // `/trash` request must acquire to reserve an attempt, so holding it
+    // through an O(n log n) sort over up to 100k entries would inject
+    // latency into that user-facing recovery path on every TTL window.
+    // Deterministic ordering (identical activity must produce identical
+    // bytes so the ETag only changes when the activity does) does not
+    // require the lock, only a stable snapshot of the data.
+    entries.sort_by(|a, b| a.id_hash.cmp(&b.id_hash));
 
     let payload = AttemptsSnapshot {
         version: 1,

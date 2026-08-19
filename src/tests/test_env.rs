@@ -1,6 +1,6 @@
 use crate::env::{
-    canary_file_state, validate_capacity, validate_config, CanaryFileState,
-    MAX_DATABASE_CONCURRENCY, MAX_RATE_LIMIT_IDENTIFIERS,
+    canary_file_state, validate_capacity, validate_config, validate_snapshot_ttl,
+    validate_token_bucket, CanaryFileState, MAX_DATABASE_CONCURRENCY, MAX_RATE_LIMIT_IDENTIFIERS,
 };
 
 #[test]
@@ -77,10 +77,7 @@ fn test_canary_file_state_distinguishes_removal_from_unavailable() {
     // a file that parses but holds no CANARY key: deliberate removal,
     // which is the warrant-canary compromise signal
     std::fs::write(&path, "OTHER=value\n").unwrap();
-    assert!(matches!(
-        canary_file_state(&path),
-        CanaryFileState::Removed
-    ));
+    assert!(matches!(canary_file_state(&path), CanaryFileState::Removed));
     std::fs::remove_file(&path).ok();
 
     // a missing file is an ops error, not a signal
@@ -88,6 +85,56 @@ fn test_canary_file_state_distinguishes_removal_from_unavailable() {
         canary_file_state(&path),
         CanaryFileState::Unavailable
     ));
+}
+
+#[test]
+fn test_validate_token_bucket_accepts_valid_values() {
+    assert!(validate_token_bucket("STORE", 10.0, 2.0).is_ok());
+    // a zero refill rate is a valid, deliberately strict bucket
+    assert!(validate_token_bucket("STORE", 1.0, 0.0).is_ok());
+}
+
+#[test]
+fn test_validate_token_bucket_rejects_zero_burst() {
+    // a zero burst means the bucket can never hold a single token
+    assert!(validate_token_bucket("STORE", 0.0, 2.0).is_err());
+}
+
+#[test]
+fn test_validate_token_bucket_rejects_negative_burst() {
+    assert!(validate_token_bucket("STORE", -1.0, 2.0).is_err());
+}
+
+#[test]
+fn test_validate_token_bucket_rejects_negative_refill() {
+    assert!(validate_token_bucket("STORE", 10.0, -1.0).is_err());
+}
+
+#[test]
+fn test_validate_token_bucket_rejects_nan() {
+    assert!(validate_token_bucket("STORE", f64::NAN, 2.0).is_err());
+    assert!(validate_token_bucket("STORE", 10.0, f64::NAN).is_err());
+}
+
+#[test]
+fn test_validate_token_bucket_rejects_infinity() {
+    assert!(validate_token_bucket("STORE", f64::INFINITY, 2.0).is_err());
+    assert!(validate_token_bucket("STORE", 10.0, f64::INFINITY).is_err());
+    assert!(validate_token_bucket("STORE", f64::NEG_INFINITY, 2.0).is_err());
+}
+
+#[test]
+fn test_validate_snapshot_ttl_accepts_valid_values() {
+    assert!(validate_snapshot_ttl(1).is_ok());
+    assert!(validate_snapshot_ttl(60).is_ok());
+    assert!(validate_snapshot_ttl(u64::MAX).is_ok());
+}
+
+#[test]
+fn test_validate_snapshot_ttl_rejects_zero() {
+    // a zero TTL forces a fresh snapshot computation on every request,
+    // defeating the point of caching
+    assert!(validate_snapshot_ttl(0).is_err());
 }
 
 fn unique_temp_path(tag: &str) -> std::path::PathBuf {

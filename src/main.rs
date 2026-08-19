@@ -38,6 +38,10 @@ struct AppState {
     /// Dotenv file the canary is re-read from, so an operator can update or
     /// remove it without restarting the server.
     canary_path: std::path::PathBuf,
+    /// Cache of the last dotenv-file canary parse, invalidated by file
+    /// metadata (modification time and length) rather than on every
+    /// request, since `/info` is deliberately not rate-limited.
+    canary_cache: Arc<Mutex<Option<env::CachedCanary>>>,
     rate_limit_cooldown: TimeDelta,
     identifier_rate_limit: Arc<Mutex<HashMap<String, models::RateLimitInfo>>>,
     secret_max_length: usize,
@@ -82,5 +86,33 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(&app_state.server_address)
         .await
         .unwrap();
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .unwrap();
+}
+
+/// Waits for SIGINT or SIGTERM. Graceful shutdown lets in-flight requests
+/// finish instead of being killed mid-handler: `/trash` commits its database
+/// transaction before sending the response, so an abrupt process kill
+/// between the commit and the response would make the caller retry (or give
+/// up on) a backup that was, in fact, already permanently deleted.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    tokio::select! {
+        _ = ctrl_c => tracing::info!("received SIGINT, starting graceful shutdown"),
+        _ = terminate => tracing::info!("received SIGTERM, starting graceful shutdown"),
+    }
 }

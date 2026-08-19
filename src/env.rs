@@ -1,6 +1,15 @@
 use chrono::Duration;
 use dotenvy::dotenv;
-use std::{collections::HashMap, env, fmt::Display, str::FromStr, sync::Arc};
+use std::{
+    collections::HashMap,
+    env,
+    fmt::Display,
+    str::FromStr,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+};
 use tokio::sync::{Mutex, Semaphore};
 
 use crate::AppState;
@@ -21,6 +30,26 @@ where
             std::process::exit(1);
         }
     }
+}
+
+/// Builds a database path unique to this call, under the OS temp directory.
+/// Every test calls `env::init()`, so each test gets its own SQLite file:
+/// without this, all tests shared a single file and ran into each other's
+/// data under `cargo test`'s parallel execution.
+fn unique_test_database_url() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let count = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "recoverbull-test-{}-{}-{}.sqlite3",
+        std::process::id(),
+        count,
+        nanos
+    ));
+    path.to_string_lossy().into_owned()
 }
 
 /// Validates the security-critical configuration values.
@@ -77,9 +106,7 @@ pub fn validate_capacity(
     rate_limit_max_identifiers: usize,
     database_max_concurrency: usize,
 ) -> Result<(), String> {
-    if rate_limit_max_identifiers == 0
-        || rate_limit_max_identifiers > MAX_RATE_LIMIT_IDENTIFIERS
-    {
+    if rate_limit_max_identifiers == 0 || rate_limit_max_identifiers > MAX_RATE_LIMIT_IDENTIFIERS {
         return Err(format!(
             "RATE_LIMIT_MAX_IDENTIFIERS must be between 1 and {}, got {}",
             MAX_RATE_LIMIT_IDENTIFIERS, rate_limit_max_identifiers
@@ -90,6 +117,34 @@ pub fn validate_capacity(
             "DATABASE_MAX_CONCURRENCY must be between 1 and {}, got {}",
             MAX_DATABASE_CONCURRENCY, database_max_concurrency
         ));
+    }
+    Ok(())
+}
+
+/// Validates a token-bucket configuration (burst capacity and refill rate).
+///
+/// The burst must be finite and strictly positive, or the bucket could never
+/// hold any token. The refill rate must be finite and non-negative (zero
+/// disables refilling but is otherwise a valid, deliberately strict bucket).
+pub fn validate_token_bucket(name: &str, burst: f64, refill: f64) -> Result<(), String> {
+    if !burst.is_finite() || burst <= 0.0 {
+        return Err(format!(
+            "{name}_RATE_LIMIT_BURST must be finite and > 0, got {burst}"
+        ));
+    }
+    if !refill.is_finite() || refill < 0.0 {
+        return Err(format!(
+            "{name}_RATE_LIMIT_REFILL_PER_SECOND must be finite and >= 0, got {refill}"
+        ));
+    }
+    Ok(())
+}
+
+/// Validates the `/attempts` snapshot TTL: zero would force a fresh snapshot
+/// computation on every request, defeating the point of caching.
+pub fn validate_snapshot_ttl(seconds: u64) -> Result<(), String> {
+    if seconds == 0 {
+        return Err("ATTEMPTS_SNAPSHOT_TTL_SECONDS must be greater than 0".to_string());
     }
     Ok(())
 }
@@ -125,6 +180,65 @@ pub fn canary_file_state(path: &std::path::Path) -> CanaryFileState {
     CanaryFileState::Removed
 }
 
+/// Cached result of the last successful `canary_file_state` parse, keyed by
+/// the file metadata it was read under. `value` mirrors `CanaryFileState`,
+/// collapsed to an `Option` since `Unavailable` is never cached (there is
+/// nothing stable to key it on, and it must always fall back to the
+/// startup value rather than to stale cached content).
+pub struct CachedCanary {
+    modified: std::time::SystemTime,
+    len: u64,
+    value: Option<String>,
+}
+
+/// Same contract as `canary_file_state`, but skips re-parsing the dotenv
+/// file when its metadata (modification time and length) is unchanged since
+/// the last read. `/info` has no rate limit by design, so without this cache
+/// every request would re-read and re-parse the file from disk.
+pub fn canary_file_state_cached(
+    path: &std::path::Path,
+    cache: &mut Option<CachedCanary>,
+) -> CanaryFileState {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return CanaryFileState::Unavailable;
+    };
+    let modified = metadata
+        .modified()
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+    let len = metadata.len();
+
+    if let Some(cached) = cache.as_ref() {
+        if cached.modified == modified && cached.len == len {
+            return match &cached.value {
+                Some(value) => CanaryFileState::Value(value.clone()),
+                None => CanaryFileState::Removed,
+            };
+        }
+    }
+
+    let state = canary_file_state(path);
+    match &state {
+        CanaryFileState::Value(value) => {
+            *cache = Some(CachedCanary {
+                modified,
+                len,
+                value: Some(value.clone()),
+            });
+        }
+        CanaryFileState::Removed => {
+            *cache = Some(CachedCanary {
+                modified,
+                len,
+                value: None,
+            });
+        }
+        // The file vanished or became unreadable between the metadata call
+        // above and the parse: leave the previous cache entry untouched.
+        CanaryFileState::Unavailable => {}
+    }
+    state
+}
+
 pub fn init() -> AppState {
     // Whether CANARY comes from the process environment must be known before
     // dotenv loads the file: dotenvy never overrides an existing variable.
@@ -144,7 +258,11 @@ pub fn init() -> AppState {
         .expect("RATE_LIMIT_MAX_FAILED_ATTEMPTS must be set");
 
     let database_url = if cfg!(test) {
-        env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set")
+        // TEST_DATABASE_URL is fully optional and, if set, deliberately
+        // ignored here: every call must get its own unique path so that
+        // tests never share a database file, including under cargo test's
+        // parallel execution within the same process.
+        unique_test_database_url()
     } else {
         env::var("DATABASE_URL").expect("DATABASE_URL must be set")
     };
@@ -186,14 +304,9 @@ pub fn init() -> AppState {
     // service per-IP limiting is useless, so the bucket is global.
     let store_rate_limit_burst: f64 = optional_env("STORE_RATE_LIMIT_BURST", 10.0);
     let store_rate_limit_refill: f64 = optional_env("STORE_RATE_LIMIT_REFILL_PER_SECOND", 2.0);
-    if !store_rate_limit_burst.is_finite()
-        || !store_rate_limit_refill.is_finite()
-        || store_rate_limit_burst <= 0.0
-        || store_rate_limit_refill < 0.0
+    if let Err(e) = validate_token_bucket("STORE", store_rate_limit_burst, store_rate_limit_refill)
     {
-        println!(
-            "Error: STORE_RATE_LIMIT_BURST must be finite and > 0, and STORE_RATE_LIMIT_REFILL_PER_SECOND must be finite and >= 0"
-        );
+        println!("Error: {e}");
         std::process::exit(1);
     }
 
@@ -201,14 +314,10 @@ pub fn init() -> AppState {
     // It is deliberately independent from the per-identifier security budget.
     let lookup_rate_limit_burst: f64 = optional_env("LOOKUP_RATE_LIMIT_BURST", 100.0);
     let lookup_rate_limit_refill: f64 = optional_env("LOOKUP_RATE_LIMIT_REFILL_PER_SECOND", 5.0);
-    if !lookup_rate_limit_burst.is_finite()
-        || !lookup_rate_limit_refill.is_finite()
-        || lookup_rate_limit_burst <= 0.0
-        || lookup_rate_limit_refill < 0.0
+    if let Err(e) =
+        validate_token_bucket("LOOKUP", lookup_rate_limit_burst, lookup_rate_limit_refill)
     {
-        println!(
-            "Error: LOOKUP_RATE_LIMIT_BURST must be finite and > 0, and LOOKUP_RATE_LIMIT_REFILL_PER_SECOND must be finite and >= 0"
-        );
+        println!("Error: {e}");
         std::process::exit(1);
     }
 
@@ -225,20 +334,18 @@ pub fn init() -> AppState {
     let attempts_rate_limit_burst: f64 = optional_env("ATTEMPTS_RATE_LIMIT_BURST", 20.0);
     let attempts_rate_limit_refill: f64 =
         optional_env("ATTEMPTS_RATE_LIMIT_REFILL_PER_SECOND", 2.0);
-    if !attempts_rate_limit_burst.is_finite()
-        || !attempts_rate_limit_refill.is_finite()
-        || attempts_rate_limit_burst <= 0.0
-        || attempts_rate_limit_refill < 0.0
-    {
-        println!(
-            "Error: ATTEMPTS_RATE_LIMIT_BURST must be finite and > 0, and ATTEMPTS_RATE_LIMIT_REFILL_PER_SECOND must be finite and >= 0"
-        );
+    if let Err(e) = validate_token_bucket(
+        "ATTEMPTS",
+        attempts_rate_limit_burst,
+        attempts_rate_limit_refill,
+    ) {
+        println!("Error: {e}");
         std::process::exit(1);
     }
 
     let attempts_snapshot_ttl_seconds = optional_env("ATTEMPTS_SNAPSHOT_TTL_SECONDS", 60u64);
-    if attempts_snapshot_ttl_seconds == 0 {
-        println!("Error: ATTEMPTS_SNAPSHOT_TTL_SECONDS must be greater than 0");
+    if let Err(e) = validate_snapshot_ttl(attempts_snapshot_ttl_seconds) {
+        println!("Error: {e}");
         std::process::exit(1);
     }
 
@@ -248,6 +355,7 @@ pub fn init() -> AppState {
         canary,
         canary_from_env,
         canary_path: dotenv_path.unwrap_or_else(|| std::path::PathBuf::from(".env")),
+        canary_cache: Arc::new(Mutex::new(None)),
         rate_limit_cooldown: Duration::minutes(rate_limit_cooldown as i64),
         identifier_rate_limit: Arc::new(Mutex::new(HashMap::new())),
         secret_max_length,

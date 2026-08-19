@@ -10,8 +10,13 @@ use crate::AppState;
 
 const DATABASE_PERMIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
-async fn refund_attempt(state: &AppState, identifier_hash: &str) {
-    let mut identifier_rate_limit = state.identifier_rate_limit.lock().await;
+/// Gives back one reserved attempt. Split from the locking so the same
+/// logic can run under an async lock on the normal paths and under a
+/// `try_lock` from a synchronous `Drop`.
+fn refund_in_map(
+    identifier_rate_limit: &mut std::collections::HashMap<String, RateLimitInfo>,
+    identifier_hash: &str,
+) {
     let should_remove = match identifier_rate_limit.get_mut(identifier_hash) {
         Some(info) => {
             info.attempts = info.attempts.saturating_sub(1);
@@ -21,6 +26,82 @@ async fn refund_attempt(state: &AppState, identifier_hash: &str) {
     };
     if should_remove {
         identifier_rate_limit.remove(identifier_hash);
+    }
+}
+
+async fn refund_attempt(state: &AppState, identifier_hash: &str) {
+    let mut identifier_rate_limit = state.identifier_rate_limit.lock().await;
+    refund_in_map(&mut identifier_rate_limit, identifier_hash);
+}
+
+/// RAII guard armed the moment an attempt reservation succeeds
+/// (`info.attempts += 1`), so that reservation and refund can never drift
+/// apart because of cancellation. Between arming and an explicit `disarm()`
+/// on a path that legitimately consumes the attempt, the handler future
+/// awaits the database semaphore and a blocking DB task. If the future is
+/// dropped anywhere in that window - an axum route timeout, a client
+/// disconnect, a server shutdown - none of the existing error branches run,
+/// so without this guard the reservation would never be refunded and a
+/// legitimate user would silently lose part of their attempt budget without
+/// a single password ever being checked.
+///
+/// `Drop` is synchronous and cannot `.await`, but the rate-limit map lives
+/// behind a `tokio::sync::Mutex`, whose lock is only obtainable with an
+/// `.await`. Blocking the runtime thread inside `Drop` to wait for that
+/// lock (e.g. via a hand-rolled spin loop) would stall every other task on
+/// the same worker, so that is not an option either. Instead the refund is
+/// delegated to a detached task: `Drop` calls `tokio::spawn`, which only
+/// requires an active Tokio runtime handle - always the case here, since
+/// this guard is only ever constructed and dropped from within the async
+/// `fetch_secret` handler, which itself runs on the Tokio runtime. The
+/// spawned task is independent of the guard's lifetime: cancelling or
+/// dropping the handler future does not cancel the refund task, so the
+/// refund is guaranteed to eventually run to completion instead of being
+/// silently lost.
+struct AttemptReservationGuard {
+    state: AppState,
+    identifier_hash: String,
+    armed: bool,
+}
+
+impl AttemptReservationGuard {
+    fn new(state: AppState, identifier_hash: String) -> Self {
+        Self {
+            state,
+            identifier_hash,
+            armed: true,
+        }
+    }
+
+    /// Marks the reservation as legitimately consumed on this path: the
+    /// attempt must stay counted and no refund must happen.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for AttemptReservationGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let identifier_hash = std::mem::take(&mut self.identifier_hash);
+
+        // Uncontended is the overwhelmingly common case: refund right here so
+        // the map is consistent the instant the cancelled future is dropped,
+        // with no scheduling window during which the attempt still looks
+        // consumed.
+        if let Ok(mut identifier_rate_limit) = self.state.identifier_rate_limit.try_lock() {
+            refund_in_map(&mut identifier_rate_limit, &identifier_hash);
+            return;
+        }
+
+        // Contended: fall back to a detached task rather than blocking this
+        // runtime thread. The refund is deferred, never dropped.
+        let state = self.state.clone();
+        tokio::spawn(async move {
+            refund_attempt(&state, &identifier_hash).await;
+        });
     }
 }
 
@@ -141,6 +222,13 @@ pub async fn fetch_secret(
     };
     let attempt_number = attempt_status.total_attempts;
 
+    // Armed now, right as the reservation above becomes real: from this
+    // point on, either a code path below explicitly disarms it because the
+    // attempt is legitimately consumed, or the future gets cancelled and
+    // `Drop` refunds it. See `AttemptReservationGuard` for why the refund
+    // itself must be detached from `Drop`.
+    let mut attempt_guard = AttemptReservationGuard::new(state.clone(), identifier_hash.clone());
+
     let database_permit = match tokio::time::timeout(
         DATABASE_PERMIT_TIMEOUT,
         state.database_semaphore.clone().acquire_owned(),
@@ -149,6 +237,10 @@ pub async fn fetch_secret(
     {
         Ok(Ok(permit)) => permit,
         Ok(Err(_)) | Err(_) => {
+            // Refund here synchronously (not via the guard's detached task)
+            // to keep this already-covered error path's behavior and timing
+            // unchanged; disarm first so `Drop` does not refund a second time.
+            attempt_guard.disarm();
             refund_attempt(&state, &identifier_hash).await;
             tracing::warn!("database concurrency limit exceeded");
             return (
@@ -181,6 +273,7 @@ pub async fn fetch_secret(
     let result = match task {
         Ok(result) => result,
         Err(error) => {
+            attempt_guard.disarm();
             refund_attempt(&state, &identifier_hash).await;
             tracing::error!(error = %error, "database task panicked");
             return (
@@ -198,6 +291,7 @@ pub async fn fetch_secret(
             // Log discipline: the diesel error carries the SQLite message
             // only — never log identifiers, keys or request bodies.
             tracing::error!(error = %e, "database error on fetch");
+            attempt_guard.disarm();
             refund_attempt(&state, &identifier_hash).await;
 
             (
@@ -207,6 +301,10 @@ pub async fn fetch_secret(
         }
 
         Ok(Some(key)) => {
+            // The lookup completed and the attempt is legitimately consumed:
+            // no refund, whatever the outcome below.
+            attempt_guard.disarm();
+
             // A database hit does not prove ownership: an unauthenticated
             // caller may have planted the row through `/store`. Therefore a
             // successful lookup must not reset or discount the security
@@ -233,6 +331,10 @@ pub async fn fetch_secret(
         }
 
         Ok(None) => {
+            // The lookup completed and the attempt is legitimately consumed:
+            // no refund, this is the wrong-credential path itself.
+            attempt_guard.disarm();
+
             // target brute-force mitigation
             // If the entry is not found:
             // - The key has been deleted by the user

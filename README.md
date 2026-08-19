@@ -149,6 +149,8 @@ Protocol roadmap: escalating backoff (delay without permanent denial), client pr
 
 The server is designed to be reached exclusively through a **Tor onion service**: it protects the transport confidentiality of the `authentication_key` and the IP anonymity of clients. **Never expose it directly on a public interface** — the server refuses to stay silent about it and prints a startup warning when `SERVER_ADDRESS` is not loopback. Production deployments must put a reverse proxy between Tor and Axum because Axum's route timeout starts after HTTP headers have been read.
 
+The supported deployment is **single-instance**: rate limits, token buckets, the cache, and the collection marker are in memory. Load balancing or rolling overlap would multiply budgets and make telemetry inconsistent. Drain and stop the old instance before activating a new one.
+
 1. Keep Axum on a private loopback port: `SERVER_ADDRESS=127.0.0.1:3001`
 2. Configure nginx on `127.0.0.1:3000` with strict header/body timeouts and connection limits:
 

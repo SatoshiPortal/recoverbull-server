@@ -63,6 +63,18 @@ async fn test_attempts_publish_hashed_identifier_with_counters() {
     assert_hour_truncated(entry.last_attempt_at);
 }
 
+/// The id_hash algorithm is pinned by a shared test vector with the client:
+/// sha256(hex_decode(identifier)) — raw bytes, not the hex string. The client
+/// pins the same value; a drift on either side breaks the match loudly.
+#[test]
+fn test_attempts_id_hash_matches_shared_client_vector() {
+    let expected = "f5bb872a08ef929e6744d117a69d4073ee7b5df4f5d7a4ecdd606f30a58f76db";
+    assert_eq!(
+        crate::utils::identifier_hash(SHA256_111111).unwrap(),
+        expected
+    );
+}
+
 #[tokio::test]
 async fn test_attempts_count_hits_and_planted_rows() {
     let (server, _) = crate::tests::test_server::new_test_server().await;

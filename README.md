@@ -308,8 +308,8 @@ The server embeds the migrations and runs them automatically at startup. A
 legacy database that has `secret` but no `__diesel_schema_migrations` ledger is
 adopted only when its schema exactly matches migration `0001`; adoption creates
 the ledger entry without creating or modifying any `secret` row. An incompatible
-legacy schema stops startup. This temporary bridge can be removed after all
-databases have been adopted.
+legacy schema stops startup. This temporary bridge can be removed after all databases have been adopted. The project requires Rust 1.97.0 (see
+`rust-toolchain.toml`).
 
 ### Storage quota
 

@@ -2,19 +2,28 @@
 name = "keychain"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.97"
+license = "MIT"
 
 [dependencies]
 sha2 = "0.10"
 axum = "0.7.7"
 dotenvy = "0.15"
-tokio = { version = "1.40", features = ["full"] }
+# Minimal feature set: the server uses the multi-thread runtime, TCP, sync
+# primitives, timers, Unix/ctrl-c signal handling (for graceful shutdown, see
+# main.rs) and (in tests) io traits. "full" would also compile in process
+# spawning and filesystem APIs we never call.
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "net", "sync", "time", "io-util", "signal"] }
 serde = { version = "1.0.210", features = ["derive"] }
 diesel = { version = "2.3", features = ["sqlite"] }
+diesel_migrations = "2.3"
 chrono = { version = "0.4.38", features = ["serde"] }
-tower-http = { version = "0.6.1", features = ["cors"] }
+tower-http = { version = "0.6.1", features = ["timeout"] }
 serde_json = "1.0"
 hex = "0.4.3"
 base64 = "0.22.1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 axum-test = "16.2.0"

@@ -1,9 +1,10 @@
 use crate::{
-    models::{ResponseFailedAttempt, FetchSecret, Secret, StoreSecret},
+    models::{FetchSecret, ResponseFailedAttempt, Secret, StoreSecret},
     tests::{
         BASE64_ENCRYPTED_SECRET, NOT_PASSWORD_HASH, SHA256_111111, SHA256_222222,
         SHA256_CONCAT_111111_222222,
     },
+    utils::identifier_hash,
 };
 use axum::http::StatusCode;
 
@@ -64,7 +65,6 @@ async fn test_fetch_failure_invalid_hash_format_for_authentication_key() {
 #[tokio::test]
 async fn test_fetch_rate_limit_enforced_and_reset_after_cooldown() {
     let (server, state) = crate::tests::test_server::new_test_server().await;
-    println!("\n\nThis test takes {} seconds to be executed", state.rate_limit_cooldown.num_seconds());
 
     let store = &StoreSecret {
         identifier: SHA256_111111.to_string(),
@@ -80,20 +80,18 @@ async fn test_fetch_rate_limit_enforced_and_reset_after_cooldown() {
     };
 
     // trigger rate limit by attempting many fail attempts
-    for i in 0..state.rate_limit_max_failed_attempts {
+    for i in 0..state.rate_limit_max_attempts {
         let response = server
             .post("/fetch")
             .json(&fetch_wrong_authentication_key)
             .expect_failure()
             .await;
-        
-        let failed_attempt = response.json::<ResponseFailedAttempt>();
-        assert_eq!(failed_attempt.attempts, i+1);
-        assert_eq!(response.status_code(), StatusCode::UNAUTHORIZED);
 
-        println!("attempts: {} | code: {}", failed_attempt.attempts, response.status_code());
+        let failed_attempt = response.json::<ResponseFailedAttempt>();
+        assert_eq!(failed_attempt.attempts, i + 1);
+        assert_eq!(response.status_code(), StatusCode::UNAUTHORIZED);
     }
-    
+
     // trigger the rate_limit_cooldown
     let response = server
         .post("/fetch")
@@ -102,14 +100,21 @@ async fn test_fetch_rate_limit_enforced_and_reset_after_cooldown() {
         .await;
 
     let failed_attempt = response.json::<ResponseFailedAttempt>();
-    assert_eq!(failed_attempt.attempts, state.rate_limit_max_failed_attempts);
+    assert_eq!(failed_attempt.attempts, state.rate_limit_max_attempts);
     assert_eq!(response.status_code(), StatusCode::TOO_MANY_REQUESTS);
 
-    println!("attempts: {} | code: {}", failed_attempt.attempts, response.status_code());
-    
-    let rate_limit_cooldown = state.rate_limit_cooldown.num_seconds() as u64;
-    println!("\rWaiting… {} seconds rate_limit_cooldown", rate_limit_cooldown);
-    std::thread::sleep(std::time::Duration::from_secs(rate_limit_cooldown));
+    // Simulate cooldown expiry by aging the in-memory entry directly instead
+    // of sleeping for the real cooldown duration: the suite must stay fast
+    // and must not depend on wall-clock time.
+    {
+        let mut identifier_rate_limit = state.identifier_rate_limit.lock().await;
+        let info = identifier_rate_limit
+            .get_mut(&identifier_hash(SHA256_111111).unwrap())
+            .unwrap();
+        let expired_at =
+            chrono::Utc::now() - state.rate_limit_cooldown - chrono::Duration::minutes(1);
+        info.last_request = expired_at;
+    }
 
     let response = server
         .post("/fetch")
@@ -121,13 +126,16 @@ async fn test_fetch_rate_limit_enforced_and_reset_after_cooldown() {
         .await;
 
     let secret = response.json::<Secret>();
-    
-    println!("code: {} | key: {}", response.status_code(), secret.encrypted_secret);
 
     assert_eq!(secret.id, SHA256_CONCAT_111111_222222);
     assert_eq!(secret.encrypted_secret, BASE64_ENCRYPTED_SECRET);
 
-    // ensure the entry is not in the map anymore
+    // A successful lookup consumes the first attempt of the new window and
+    // must not clear the security counter.
     let identifier_rate_limit = state.identifier_rate_limit.lock().await;
-    assert_eq!(identifier_rate_limit.contains_key(SHA256_111111), false);
+    let info = identifier_rate_limit
+        .get(&identifier_hash(SHA256_111111).unwrap())
+        .unwrap();
+    assert_eq!(info.attempts, 1);
+    assert_eq!(info.failed_attempts, 0);
 }

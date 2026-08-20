@@ -1,114 +1,384 @@
 use axum::extract::State;
+use axum::response::{IntoResponse, Response};
 use axum::{http::StatusCode, Json};
-use serde_json::{json, Value};
+use serde_json::json;
 
-use crate::database::{establish_connection, read_secret_by_id, trash};
-use crate::models::{ResponseFailedAttempt, FetchSecret, RateLimitInfo};
-use crate::utils::{generate_secret_id, is_256bits_hex_hash};
+use crate::database::{establish_connection, read_and_trash_secret_by_id, read_secret_by_id};
+use crate::models::{
+    error_body, retry_after_response, FetchSecret, RateLimitInfo, ResponseFailedAttempt,
+};
+use crate::utils::{generate_secret_id, identifier_hash, is_256bits_hex_hash};
 
 use crate::AppState;
+
+const DATABASE_PERMIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Small fixed advisory backoff for global bucket and database-busy paths:
+/// unlike the per-identifier lockout, there is no real cooldown deadline to
+/// derive here, only "try again shortly".
+const GLOBAL_OVERLOAD_RETRY_AFTER_SECS: u64 = 1;
+
+/// Gives back one reserved attempt. Split from the locking so the same
+/// logic can run under an async lock on the normal paths and under a
+/// `try_lock` from a synchronous `Drop`.
+fn refund_in_map(
+    identifier_rate_limit: &mut std::collections::HashMap<String, RateLimitInfo>,
+    identifier_hash: &str,
+) {
+    let should_remove = match identifier_rate_limit.get_mut(identifier_hash) {
+        Some(info) => {
+            info.attempts = info.attempts.saturating_sub(1);
+            info.attempts == 0 && info.failed_attempts == 0
+        }
+        None => false,
+    };
+    if should_remove {
+        identifier_rate_limit.remove(identifier_hash);
+    }
+}
+
+async fn refund_attempt(state: &AppState, identifier_hash: &str) {
+    let mut identifier_rate_limit = state.identifier_rate_limit.lock().await;
+    refund_in_map(&mut identifier_rate_limit, identifier_hash);
+}
+
+/// RAII guard armed the moment an attempt reservation succeeds
+/// (`info.attempts += 1`), so that reservation and refund can never drift
+/// apart because of cancellation. Between arming and an explicit `disarm()`
+/// on a path that legitimately consumes the attempt, the handler future
+/// awaits the database semaphore and a blocking DB task. If the future is
+/// dropped anywhere in that window - an axum route timeout, a client
+/// disconnect, a server shutdown - none of the existing error branches run,
+/// so without this guard the reservation would never be refunded and a
+/// legitimate user would silently lose part of their attempt budget without
+/// a single password ever being checked.
+///
+/// `Drop` is synchronous and cannot `.await`, but the rate-limit map lives
+/// behind a `tokio::sync::Mutex`, whose lock is only obtainable with an
+/// `.await`. Blocking the runtime thread inside `Drop` to wait for that
+/// lock (e.g. via a hand-rolled spin loop) would stall every other task on
+/// the same worker, so that is not an option either. Instead the refund is
+/// delegated to a detached task: `Drop` calls `tokio::spawn`, which only
+/// requires an active Tokio runtime handle - always the case here, since
+/// this guard is only ever constructed and dropped from within the async
+/// `fetch_secret` handler, which itself runs on the Tokio runtime. The
+/// spawned task is independent of the guard's lifetime: cancelling or
+/// dropping the handler future does not cancel the refund task, so the
+/// refund is guaranteed to eventually run to completion instead of being
+/// silently lost.
+///
+/// Temporal invariant: a deferred refund can only ever land in the same
+/// window it was reserved in. The armed section below awaits at most 1s on
+/// the database semaphore (the only `.await` between arming and
+/// `disarm()`), the detached task's delay is bounded by in-memory mutex
+/// hold times (milliseconds — no lock is held across database or network
+/// work), and both are far below the minimum configurable cooldown
+/// (1 minute). A refund therefore never decrements a recreated entry.
+/// Revisit this reasoning if any of these bounds changes.
+struct AttemptReservationGuard {
+    state: AppState,
+    identifier_hash: String,
+    armed: bool,
+}
+
+impl AttemptReservationGuard {
+    fn new(state: AppState, identifier_hash: String) -> Self {
+        Self {
+            state,
+            identifier_hash,
+            armed: true,
+        }
+    }
+
+    /// Marks the reservation as legitimately consumed on this path: the
+    /// attempt must stay counted and no refund must happen.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for AttemptReservationGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let identifier_hash = std::mem::take(&mut self.identifier_hash);
+
+        // Uncontended is the overwhelmingly common case: refund right here so
+        // the map is consistent the instant the cancelled future is dropped,
+        // with no scheduling window during which the attempt still looks
+        // consumed.
+        if let Ok(mut identifier_rate_limit) = self.state.identifier_rate_limit.try_lock() {
+            refund_in_map(&mut identifier_rate_limit, &identifier_hash);
+            return;
+        }
+
+        // Contended: fall back to a detached task rather than blocking this
+        // runtime thread. The refund is deferred, never dropped.
+        let state = self.state.clone();
+        tokio::spawn(async move {
+            refund_attempt(&state, &identifier_hash).await;
+        });
+    }
+}
 
 pub async fn fetch_secret(
     State(state): State<AppState>,
     Json(request): Json<FetchSecret>,
     is_trashing_secret: bool,
-) -> (StatusCode, Json<Value>) {
-    let identifier = &request.identifier;
-    let authentication_key = &request.authentication_key;
+) -> Response {
+    // canonicalize hex inputs: "AB…" and "ab…" are the same logical value
+    // and must map to the same record and the same rate-limit entry
+    let identifier = &request.identifier.to_lowercase();
+    let authentication_key = &request.authentication_key.to_lowercase();
 
     if !is_256bits_hex_hash(identifier) || !is_256bits_hex_hash(authentication_key) {
         return (
             StatusCode::BAD_REQUEST,
-            Json(json!({
-                "error": "identifier or authentication_key are not 256 bits HEX hashes",
-            })),
-        );
+            Json(error_body(
+                "identifier or authentication_key are not 256 bits HEX hashes",
+            )),
+        )
+            .into_response();
+    }
+
+    // Keep only a one-way tag in the rate-limit state. This is also the tag
+    // clients use to recognize their entry in `/stats`.
+    let identifier_hash = identifier_hash(identifier).expect("validated hex identifier");
+
+    // Per-IP limits are meaningless behind Tor, so bound aggregate lookup
+    // work before allocating per-identifier state or touching SQLite.
+    {
+        let mut bucket = state.lookup_token_bucket.lock().await;
+        if !bucket.try_consume() {
+            tracing::warn!("global lookup rate-limit exceeded");
+            return retry_after_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                GLOBAL_OVERLOAD_RETRY_AFTER_SECS,
+                "Too many lookup requests, retry later",
+            );
+        }
     }
 
     let current_time: chrono::DateTime<chrono::Utc> = chrono::Utc::now();
-    
-    let rate_limit_info = {
-        let identifier_rate_limit = state.identifier_rate_limit.lock().await;
-        identifier_rate_limit.get(identifier).cloned()
-    };
 
-    let mut can_attempt = match rate_limit_info.clone() {
-        Some(x) => x.attempts < state.rate_limit_max_failed_attempts,
-        None => true,
-    };
+    // The rate-limit check and the attempt reservation are atomic: the entry
+    // is checked and incremented under the same lock, so concurrent requests
+    // cannot all pass the check before anyone increments.
+    let reservation = {
+        let mut identifier_rate_limit = state.identifier_rate_limit.lock().await;
 
-    // If has too many attempts we verify if the rate_limit_cooldown is elapsed
-    if can_attempt == false {
-        let is_cooldown_over = match rate_limit_info.clone() {
-            Some(x) => current_time.signed_duration_since(x.last_request) > state.rate_limit_cooldown,
-            None => true,
-        };
-        // If the rate_limit_cooldown is over we reset it so the user can attempt
-        if is_cooldown_over {
-            let mut identifier_rate_limit = state.identifier_rate_limit.lock().await;
-            identifier_rate_limit.remove(identifier);
-            can_attempt = true;
+        // entries expire once the cooldown has elapsed
+        if identifier_rate_limit
+            .get(&identifier_hash)
+            .is_some_and(|info| {
+                current_time.signed_duration_since(info.last_request) > state.rate_limit_cooldown
+            })
+        {
+            identifier_rate_limit.remove(&identifier_hash);
         }
-    } 
 
-    if can_attempt {
-        // re-generate the key_id
-        let key_id = generate_secret_id(identifier, authentication_key);
+        let is_new_identifier = !identifier_rate_limit.contains_key(&identifier_hash);
+        if is_new_identifier && identifier_rate_limit.len() >= state.rate_limit_max_identifiers {
+            identifier_rate_limit.retain(|_, info| {
+                current_time.signed_duration_since(info.last_request) <= state.rate_limit_cooldown
+            });
+        }
 
-        // look in db for this key_id
-        let mut connection: diesel::SqliteConnection = establish_connection(state.database_url);
-        let result = read_secret_by_id(&mut connection, &key_id);
-        match result {
-            Some(key) => {
-                if is_trashing_secret {
-                    trash(&mut connection, &key_id);
-                }
-
-                let code = if is_trashing_secret {
-                    StatusCode::ACCEPTED
-                } else {
-                    StatusCode::OK
-                };
-
-                (code, Json(json!(&key)))
-            }
-
-            None => {
-                // target brute-force mitigation
-                // If the entry is not found:
-                // - The key has been deleted by the user
-                // - The key_id doesn't exists for the provided identifier + authentication_key
-                // We set the rate-limit last_request and attempts for this identifier
-                let mut identifier_rate_limit = state.identifier_rate_limit.lock().await;
-                let rate_limit_info = identifier_rate_limit
-                .entry(identifier.to_string())
-                .and_modify(|info| {
-                    info.last_request = current_time;
-                    info.attempts += 1;
-                })
+        if is_new_identifier && identifier_rate_limit.len() >= state.rate_limit_max_identifiers {
+            None
+        } else {
+            let info = identifier_rate_limit
+                .entry(identifier_hash.clone())
                 .or_insert(RateLimitInfo {
                     last_request: current_time,
-                    attempts: 1,
+                    attempts: 0,
+                    failed_attempts: 0,
                 });
 
-                let response = json!(ResponseFailedAttempt{
-                    error: "Invalid identifier/authentication_key".to_owned(),
-                    requested_at: rate_limit_info.last_request,
-                    rate_limit_cooldown: state.rate_limit_cooldown.num_minutes(),
-                    attempts: rate_limit_info.attempts,
-                });
-
-                (StatusCode::UNAUTHORIZED, Json(response))
+            if info.attempts >= state.rate_limit_max_attempts {
+                Some(Err((info.attempts, info.last_request)))
+            } else {
+                info.attempts += 1;
+                info.last_request = current_time;
+                Some(Ok((info.attempts, info.last_request)))
             }
         }
-    } else {
-        let rate_limit_info = rate_limit_info.unwrap();
-        let response = json!({
-            "error": "Too many attempts",
-            "requested_at": rate_limit_info.last_request,
-            "rate_limit_cooldown": state.rate_limit_cooldown.num_minutes(),
-            "attempts": rate_limit_info.attempts,
-        });
-        (StatusCode::TOO_MANY_REQUESTS, Json(response))
+    };
+
+    let Some(reservation) = reservation else {
+        tracing::warn!("identifier rate-limit capacity exhausted");
+        return retry_after_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            GLOBAL_OVERLOAD_RETRY_AFTER_SECS,
+            "Rate-limit capacity exhausted, retry later",
+        );
+    };
+
+    let (attempt_number, last_request) = match reservation {
+        Ok(admitted) => admitted,
+        Err((attempts, last_request)) => {
+            tracing::warn!("rate-limit lockout");
+            // Real remaining cooldown, not a fixed constant: the client can
+            // compute a precise backoff instead of guessing. Never zero: a
+            // zero Retry-After would invite an immediate retry storm right
+            // at the cooldown boundary.
+            let retry_after_secs = (last_request + state.rate_limit_cooldown - current_time)
+                .num_seconds()
+                .max(1) as u64;
+            let response = json!({
+                "error": "Too many attempts",
+                "requested_at": last_request,
+                "rate_limit_cooldown": state.rate_limit_cooldown.num_minutes(),
+                "attempts": attempts,
+            });
+            let mut http_response = (StatusCode::TOO_MANY_REQUESTS, Json(response)).into_response();
+            http_response.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                axum::http::HeaderValue::from_str(&retry_after_secs.to_string())
+                    .expect("a stringified non-negative integer is a valid header value"),
+            );
+            return http_response;
+        }
+    };
+
+    // Armed now, right as the reservation above becomes real. It remains armed
+    // while waiting for the database semaphore, because cancellation there
+    // must refund the reservation. Once the blocking SQLite operation is
+    // launched, the attempt is committed before the next await; only the
+    // explicit JoinError and database-error branches refund it.
+    let mut attempt_guard = AttemptReservationGuard::new(state.clone(), identifier_hash.clone());
+
+    let database_permit = match tokio::time::timeout(
+        DATABASE_PERMIT_TIMEOUT,
+        state.database_semaphore.clone().acquire_owned(),
+    )
+    .await
+    {
+        Ok(Ok(permit)) => permit,
+        Ok(Err(_)) | Err(_) => {
+            // Refund here synchronously (not via the guard's detached task)
+            // to keep this already-covered error path's behavior and timing
+            // unchanged; disarm first so `Drop` does not refund a second time.
+            attempt_guard.disarm();
+            refund_attempt(&state, &identifier_hash).await;
+            tracing::warn!("database concurrency limit exceeded");
+            return retry_after_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                GLOBAL_OVERLOAD_RETRY_AFTER_SECS,
+                "Database busy, retry later",
+            );
+        }
+    };
+
+    // re-generate the key_id
+    let key_id = generate_secret_id(identifier, authentication_key);
+
+    // look in db for this key_id, outside the rate-limit lock and on a
+    // blocking thread: diesel is synchronous and must not stall the async
+    // workers. Trash uses an immediate transaction so only one concurrent
+    // caller can read and delete a secret.
+    let database_url = state.database_url.clone();
+    let key_id_for_db = key_id.clone();
+    #[cfg(test)]
+    let test_database_guard = state._test_database_guard.clone();
+    // The next operation launches SQLite. Cancellation while awaiting its
+    // JoinHandle must not refund an attempt that may already have deleted a
+    // secret (HTTP cannot guarantee delivery after commit).
+    attempt_guard.disarm();
+    let task = tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        let _test_database_guard = test_database_guard;
+        let _database_permit = database_permit;
+        let mut connection = establish_connection(database_url);
+        if is_trashing_secret {
+            read_and_trash_secret_by_id(&mut connection, &key_id_for_db)
+        } else {
+            read_secret_by_id(&mut connection, &key_id_for_db)
+        }
+    })
+    .await;
+
+    let result = match task {
+        Ok(result) => result,
+        Err(error) => {
+            refund_attempt(&state, &identifier_hash).await;
+            tracing::error!(error = %error, "database task panicked");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(error_body("Internal server error")),
+            )
+                .into_response();
+        }
+    };
+
+    match result {
+        Err(e) => {
+            // A database error is not a wrong credential: respond 500 and
+            // refund the attempt reserved above so transient database
+            // trouble cannot burn a user's rate-limit attempts.
+            // Log discipline: the diesel error carries the SQLite message
+            // only — never log identifiers, keys or request bodies.
+            tracing::error!(error = %e, "database error on fetch");
+            refund_attempt(&state, &identifier_hash).await;
+
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(error_body("Internal server error")),
+            )
+                .into_response()
+        }
+
+        Ok(Some(key)) => {
+            // The lookup completed and the attempt is legitimately consumed:
+            // the guard was already disarmed before awaiting the task.
+
+            // A database hit does not prove ownership: an unauthenticated
+            // caller may have planted the row through `/store`. Therefore a
+            // successful lookup must not reset or discount the security
+            // counter.
+            let code = if is_trashing_secret {
+                StatusCode::ACCEPTED
+            } else {
+                StatusCode::OK
+            };
+
+            tracing::info!(
+                attempts = attempt_number,
+                is_trash = is_trashing_secret,
+                "secret released"
+            );
+
+            (code, Json(json!(&key))).into_response()
+        }
+
+        Ok(None) => {
+            // The lookup completed and the attempt is legitimately consumed:
+            // the guard was already disarmed before awaiting the task.
+
+            // target brute-force mitigation
+            // If the entry is not found:
+            // - The key has been deleted by the user
+            // - The key_id doesn't exists for the provided identifier + authentication_key
+            let failed_attempts = {
+                let mut identifier_rate_limit = state.identifier_rate_limit.lock().await;
+                identifier_rate_limit
+                    .get_mut(&identifier_hash)
+                    .map(|info| {
+                        info.failed_attempts = info.failed_attempts.saturating_add(1);
+                        info.failed_attempts
+                    })
+                    .unwrap_or(0)
+            };
+            tracing::info!(attempt_number, failed_attempts, "failed fetch attempt");
+            let response = json!(ResponseFailedAttempt {
+                error: "Invalid identifier/authentication_key".to_owned(),
+                requested_at: last_request,
+                rate_limit_cooldown: state.rate_limit_cooldown.num_minutes(),
+                attempts: attempt_number,
+            });
+
+            (StatusCode::UNAUTHORIZED, Json(response)).into_response()
+        }
     }
 }

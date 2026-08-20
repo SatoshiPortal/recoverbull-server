@@ -332,3 +332,73 @@ async fn test_concurrent_cancellation_refunds_every_reservation() {
         "a cancellation storm must not leak the attempt budget (expected 401, no row)"
     );
 }
+
+/// The guard's `Drop` falls back to a detached task when the map lock is
+/// contended at drop time. This test holds the map lock while the handler
+/// future is aborted, which forces the deferred path (the immediate
+/// `try_lock` cannot succeed), then releases it: the refund must still land.
+/// If the deferred path were broken, the reservation would leak forever.
+#[tokio::test]
+async fn test_deferred_refund_runs_when_drop_finds_the_lock_contended() {
+    let mut state = crate::env::init();
+    state.database_semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+    crate::database::init_db(state.clone());
+
+    let request = FetchSecret {
+        identifier: SHA256_111111.to_string(),
+        authentication_key: NOT_PASSWORD_HASH.to_string(),
+    };
+    let handler_state = state.clone();
+    let handle = tokio::spawn(async move {
+        crate::handlers::fetch::fetch_secret(
+            axum::extract::State(handler_state),
+            axum::Json(request),
+            false,
+        )
+        .await;
+    });
+
+    // Wait for the reservation to land (the handler is then parked on the
+    // blocked semaphore).
+    let hash = identifier_hash(SHA256_111111).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            {
+                let map = state.identifier_rate_limit.lock().await;
+                if map.get(&hash).map(|info| info.attempts).unwrap_or(0) == 1 {
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("test setup invalid: the reservation never landed");
+
+    // Hold the map lock across the abort: the guard's Drop cannot take the
+    // immediate try_lock path and must spawn the deferred refund task.
+    let map_guard = state.identifier_rate_limit.lock().await;
+    handle.abort();
+    // Let the Drop run and the spawned task reach the contended lock.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    drop(map_guard);
+
+    // Only the deferred task can now refund: if it were broken, the
+    // reservation would leak and this poll would time out.
+    let settled = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            {
+                let map = state.identifier_rate_limit.lock().await;
+                if map.get(&hash).map(|info| info.attempts).unwrap_or(0) == 0 {
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+    assert!(
+        settled.is_ok(),
+        "the deferred refund task did not run: the reservation leaked"
+    );
+}

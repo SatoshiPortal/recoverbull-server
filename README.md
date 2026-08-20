@@ -48,10 +48,13 @@ guarded by tests and the reviewer checklist, see [SECURITY.md](SECURITY.md).
 - `identifier`
 - `authentication_key`
 
-4. The server receive the `fetch secret` request an perform:
-- Reserve one lookup in an in-memory counter keyed by `sha256(identifier)`. Every `/fetch` and `/trash` lookup counts, whether or not a matching database row exists.
-- If the identifier has reached its lookup budget, return `429` before querying the database. Otherwise compute `secret_id` = `hash(identifier + authentication_key)` and fetch the entry.
-- Never reset the lookup budget after a database hit: because `/store` is public, an attacker can create a matching row for a guessed key, so finding a row does not prove ownership. The budget expires only after the configured cooldown.
+  4. The server receives the `fetch secret` request and performs:
+- Compute the candidate tag `secret_id`/`key_id` from the identifier and authentication key. The per-identifier bucket is always `sha256(identifier)`.
+- Retain only the derived `CandidateTag` in memory. It is exactly `secret_id/key_id`: never raw authentication or password material. Candidate tags are state-only, have at most `RATE_LIMIT_MAX_ATTEMPTS` slots, are wiped after the cooldown or a restart, and are never logged or included in a snapshot.
+- A new candidate immediately reserves one slot and counts in the budget. A duplicate `Pending` candidate receives `503` before saturation rather than taking another slot.
+- If `candidate_count >= max`, return `429` before membership or database work for **every** candidate, including known, `Pending`, and `Committed`, so saturation cannot be an authentication oracle.
+- A `Committed` replay is free only before saturation: it increments `total_requests`, does not extend the candidate cooldown, and does not add another attempt. `/fetch` and `/trash` share this candidate set.
+- Finalization is detached and generation-safe. A hit or miss commits the candidate; a miss increments `failed_attempts` exactly once. A database error or cancellation before database work removes `Pending`; a trash race returning `202`/`401` does not create a false failed candidate.
 
  5. The user can fetch his `secret` by deciphering `encrypted_secret` using his `encryption_key` as encryption key.
 
@@ -60,8 +63,10 @@ guarded by tests and the reviewer checklist, see [SECURITY.md](SECURITY.md).
 > ```json
 > {
 >   "attempt_status": {
+>     "version": 1,
 >     "total_attempts": 3,
 >     "failed_attempts": 1,
+>     "total_requests": 5,
 >     "remaining_attempts": 0,
 >     "window_started_at": "2026-08-05T12:17:41Z",
 >     "previous_attempt_at": "2026-08-05T14:37:22Z",
@@ -70,8 +75,10 @@ guarded by tests and the reviewer checklist, see [SECURITY.md](SECURITY.md).
 > }
 > ```
 >
-> - `total_attempts` includes the request carrying the response and counts database hits as well as misses: a hit does not prove ownership, because a public `/store` caller can plant a matching row. A client should warn the user when the total is higher than the user's own operations.
-> - `failed_attempts` counts only lookups for which no database row existed.
+> - `total_attempts` is the number of distinct candidates admitted in the current cooldown window. A hit does not prove ownership, because a public `/store` caller can plant a matching row.
+> - `failed_attempts` counts distinct candidates for which no database row existed, incremented once when that candidate is finalized as a miss.
+> - `remaining_attempts` is `rate_limit_max_attempts - total_attempts`, saturating at zero.
+> - `total_requests` counts every `/fetch` and `/trash` request attached to this identifier's active entry, including replays, pending duplicates, and saturation rejections. Requests rejected because the global identifier map is already full have no per-identifier entry and are not included. The global lookup bucket remains the defense against floods of identical replays.
 > - `previous_attempt_at` is the admitted attempt immediately preceding this request (`null` when this request opened the window), and `resets_at` is when the budget expires.
 > - A successful lookup never resets the counters; they expire only after the configured cooldown.
 
@@ -95,7 +102,7 @@ retry or security decision.
 |---|---|---|
 | `400` | Invalid request data. | Fix the request. |
 | `401` | Invalid credentials. | Treat as an authentication failure. |
-| `429` | The targeted identifier lookup budget is locked. This is the only security alarm. | Surface the targeted lockout and honor `Retry-After`. |
+| `429` | The targeted identifier's distinct-candidate budget is locked. This is the only security alarm. | Surface the targeted lockout and honor `Retry-After`. |
 | `503` | Server pressure or unavailability, including global lookup/store/telemetry limits, a full rate-limit map, or a busy database. | Back off and retry using `Retry-After`. |
 | `500` | Internal server error. | Treat as a server failure. |
 
@@ -108,13 +115,14 @@ rejections such as `404`, `405`, `413`, and `415` may not be JSON.
 
 ```json
 {
-  "version": 1,
+    "version": 1,
   "collection_started_at": "2026-08-05T09:00:00Z",
   "entries": [
     {
       "id_hash": "7a06e6b2…",
       "total_attempts": 3,
       "failed_attempts": 1,
+      "total_requests": 5,
       "window_started_at": "2026-08-05T12:00:00Z",
       "last_attempt_at": "2026-08-05T14:00:00Z"
     }
@@ -123,14 +131,15 @@ rejections such as `404`, `405`, `413`, and `415` may not be JSON.
 ```
 
 - `id_hash`: SHA-256 of the raw `identifier` **bytes** (not the hex string). A client recognizes its own identifier by hashing it locally; nobody can recover a raw identifier from the list (pre-image resistance), which keeps the list useless for griefing or targeted lockout.
-- `total_attempts`: total number of `/fetch` and `/trash` lookups, including database hits (a hit does not prove ownership: a public `/store` caller can plant a matching row).
-- `failed_attempts`: number of lookups for which no database row existed.
+- `total_attempts`: number of distinct candidates admitted in the current cooldown window.
+- `failed_attempts`: number of distinct candidates for which no database row existed.
+- `total_requests`: every `/fetch` and `/trash` request attached to this identifier's active entry, including replays; map-capacity rejections for previously unseen identifiers cannot be attributed to an entry. It is telemetry, not candidate budget.
 - `window_started_at` / `last_attempt_at`: hour-truncated timestamps of the current window.
 - `collection_started_at`: hour-truncated start of the in-memory collection (last server boot). When it changes, counters were wiped: clients must reset their baseline.
 
 Identifiers are kept and published hashed, never raw. Entries live in the same in-memory map as the rate-limiter, so they expire with it (cooldown or server reboot): nothing is persisted.
 
-The body is **always gzip-compressed JSON** (`Content-Encoding: gzip`); clients must be gzip-capable. The snapshot is rebuilt at most once per minute and served as immutable shared bytes with a strong `ETag`: send `If-None-Match` to receive a bodyless `304` when nothing changed. `Cache-Control: public, max-age=<remaining seconds>` reflects the real freshness. A dedicated global token bucket (`ATTEMPTS_RATE_LIMIT_*`) bounds cache-bypass traffic; production deployments must additionally cache and rate-limit this route at the reverse proxy (see Deployment).
+The body is **always gzip-compressed JSON** (`Content-Encoding: gzip`); clients must be gzip-capable. This initial telemetry contract, version `1`, reports distinct-candidate counters plus `total_requests` and never exposes CandidateTags. The snapshot is rebuilt at most once per minute and served as immutable shared bytes with a strong `ETag`: send `If-None-Match` to receive a bodyless `304` when nothing changed. `Cache-Control: public, max-age=<remaining seconds>` reflects the real freshness. A dedicated global token bucket (`ATTEMPTS_RATE_LIMIT_*`) bounds cache-bypass traffic; production deployments must additionally cache and rate-limit this route at the reverse proxy (see Deployment).
 
 Detection semantics a client should implement:
 - **Poll `/attempts` proactively** (e.g. at app start, no more often than the snapshot freshness): if your identifier hash appears with attempts you did not make, someone is probing your backup.
@@ -155,7 +164,7 @@ map-filling campaigns cheap to monitor.
 A user can store multiple secrets and the server is not able to link any secret to a specific user. Each secret has a random `identifier`. The `secret_id` is built from the hash of the `identifier` and `authentication_key`.
 
 If the `identifier` is found and used by a malicious person, the server is not able to link it to a specific `secret`.
-**To mitigate targeted brute-force on a specific `secret`, the server temporarily caches only `sha256(identifier)` in memory. The data does not persist and is cleared on each server reboot.**
+**To mitigate targeted brute-force on a specific `secret`, the server temporarily caches the bucket `sha256(identifier)` and up to the configured maximum of derived CandidateTags in memory. CandidateTags are not exposed, logged, or snapshotted; all state is wiped after cooldown or restart.** This improves availability and signal for distinct guesses, at the cost of temporarily retaining up to `max` non-exposed derived tags and increasing behavioral state in memory.
 
 The server cannot read users secrets because they are encrypted client-side using the `encryption_key` derived from `password`, the secret encryption mitigate the risk of database leak, attackers would have access to: `secret_id`, `created_at` and `encrypted_secret`.
 
@@ -163,7 +172,7 @@ If an attacker can steal informations to a targeted user such as `salt` and have
 
 ### Recovery lockout (known design tension)
 
-The rate-limit counter is keyed on `sha256(identifier)` and checked **before** credentials are verified: the server cannot distinguish the legitimate owner from an attacker before the database lookup. Every lookup counts, including successful ones, because a public `/store` caller can plant a row for a guessed key. An attacker holding a victim's Backup File can therefore consume that identifier's lookup budget and keep it locked out, delaying — or with discipline, preventing — the victim's recovery. Other identifiers retain independent budgets.
+The rate-limit bucket is keyed on `sha256(identifier)` and checked **before** membership or credentials are verified. Every distinct candidate counts; every request is telemetry/global-bucketed. A targeted lockout by three distinct candidates remains an accepted risk: an attacker holding a victim's Backup File can consume that identifier's candidate budget and delay recovery. This change improves availability and signal; it is not a vulnerability correction. Other identifiers retain independent budgets.
 
 Mitigations available today:
 - **Detection**: clients should poll `/attempts` — an identifier under attack shows attempts the user did not make, and an unexpected `429` is itself an alarm. A user who still has wallet access should rotate keys immediately.
@@ -293,8 +302,9 @@ including an idempotent duplicate that does not create a new row. If every
 request has a new identifier and a maximum-size secret, SQLite grows by about
 43 to 86 MB/day, depending on page and index overhead.
 `RATE_LIMIT_MAX_ATTEMPTS` is the canonical configuration name for the
-per-identifier lookup budget. Every lookup consumes it, including database
-hits and misses. If the canonical variable is absent, the server accepts
+per-identifier distinct-candidate budget. Every distinct candidate consumes it,
+including database hits and misses; replay requests consume no new candidate
+slot. If the canonical variable is absent, the server accepts
 `RATE_LIMIT_MAX_FAILED_ATTEMPTS` as a deprecated legacy alias and logs a
 warning; when both are present, the canonical variable wins. The
 `remaining_attempts` field of `attempt_status` derives from it.
@@ -303,8 +313,10 @@ The attempts bucket is a third global limit for `GET /attempts`, sized for
 direct cache-bypass traffic; the reverse-proxy cache absorbs normal reads.
 `ATTEMPTS_SNAPSHOT_TTL_SECONDS` controls how long a snapshot is reused
 before being rebuilt (at most one rebuild per window, single-flight).
-The identifier cap bounds memory without evicting active security entries;
-new identifiers receive `503` while the cap is full. SQLite work is limited to
+The identifier cap bounds the number of `sha256(identifier)` buckets without
+evicting active security entries; new identifiers receive `503` while the cap
+is full. Each bucket's CandidateTag set is bounded by the distinct-candidate
+budget. SQLite work is limited to
 16 concurrent blocking operations, and requests waiting more than one second
 for a slot receive `503` without consuming their per-identifier attempt.
 Both capacities are range-checked at startup: `RATE_LIMIT_MAX_IDENTIFIERS`

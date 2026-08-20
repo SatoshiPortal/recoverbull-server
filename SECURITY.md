@@ -15,7 +15,7 @@ The server stores `encrypted_secret` values keyed by
 `secret_id = SHA-256(identifier_hex + authentication_key_hex)`. It never sees
 the password, the encryption key, or the cleartext secret. Because the user
 password is weak by design (a memorable PIN), the **only** server-side
-control against password brute-force is the per-identifier lookup budget
+control against password brute-force is the per-identifier distinct-candidate budget
 (3 attempts per cooldown in the documented `.env` and CI; the variable is
 mandatory — there is no code default). Everything else
 — anonymity, no accounts, Tor-only transport, daily in-memory wipe — exists
@@ -28,11 +28,13 @@ legal compulsion of both providers (see the whitepaper for the full list).
 
 ## Accepted risks and design tensions (do not re-report)
 
-1. **Recovery lockout (audit F2).** An attacker holding the Backup File can
-   consume the victim's lookup budget and keep the identifier locked out,
-   delaying or preventing recovery. The counter is keyed by
-   `sha256(identifier)` and checked before credentials are verified: the
-   server cannot distinguish owner from attacker. Mitigation is *detection*
+1. **Targeted lockout (audit F2).** An attacker holding the Backup File can
+   submit three distinct candidates and consume the victim's candidate budget,
+   delaying or preventing recovery. The bucket is always `sha256(identifier)`
+   and is checked before membership or credentials are verified: the server
+   cannot distinguish owner from attacker. This remains an accepted risk.
+   The distinct-candidate limiter improves availability and signal for replay
+   traffic; it is not a vulnerability correction. Mitigation is *detection*
    (`attempt_status`, `/attempts`, unexpected `429`), not prevention.
    **Do not "fix" this by resetting the counter on a successful lookup**:
    `/store` is public, so an attacker can plant a matching row and "succeed"
@@ -40,7 +42,9 @@ legal compulsion of both providers (see the whitepaper for the full list).
    Roadmap: escalating backoff, client proof-of-work, multi-server storage.
 2. **A successful lookup never proves ownership.** Anyone can plant a row
    for a guessed key through `/store` and then "successfully" fetch it.
-   Counters therefore include database hits and never reset on success.
+   Distinct candidate counters therefore include database hits and never reset
+   on success. A committed replay is free only before saturation, increments
+   `total_requests`, and does not extend cooldown.
 3. **Telemetry is readable by identifier holders.** `/attempts` publishes
    `SHA-256(identifier)` only. Entries are indistinguishable: real usage,
    another device, and attacker probes produce the same entry shape. This
@@ -75,13 +79,12 @@ legal compulsion of both providers (see the whitepaper for the full list).
     per-IP limiting is useless, so buckets are global; an attacker can
     exhaust them (`503` for all). Bounded by nginx/Tor defenses at the
     deployment layer.
-11. **Cancellation during an explicit refund can lose one attempt.** If the
-    handler future is cancelled in the microsecond window of an explicit
-    `refund_attempt(...).await` in an internal-error branch (after the guard
-    is disarmed), that refund is lost and the user keeps one consumed
-    attempt. The direction is conservative (budget is lost, never granted),
-    the window is microseconds, and an attacker cannot cancel a victim's
-    request — accepted rather than restructured.
+11. **Temporary behavioral state.** The server retains up to the configured
+    maximum of derived CandidateTags (`secret_id/key_id`) per bucket in memory.
+    A CandidateTag is never raw authentication or password material, and is
+    never logged or snapshotted; Pending/Committed state is wiped on cooldown
+    expiry or restart. This is a privacy trade-off: non-exposed temporary
+    state is larger than the former identifier-only state.
 
 ## Invariants (each guarded by tests)
 
@@ -92,14 +95,17 @@ code, keep the invariant — and run the guarding test.
 |---|---|---|
 | `/store` is idempotent: fresh and duplicate return the same `201`, never overwrite | F1: duplicate `403` was an unthrottled `authentication_key` oracle | `test_audit_f1_store_gives_no_existence_signal`, `test_duplicate_store_is_indistinguishable_and_does_not_overwrite`, `test_concurrent_identical_store_is_idempotent` |
 | Rate-limit check-and-increment is atomic under one lock | Concurrent requests otherwise overshoot the budget | `test_rate_limit_holds_under_concurrency` |
-| Every admitted lookup consumes budget, hits included; never reset on success | Planted rows would erase the signal or bypass the budget | `test_audit_f1_planted_rows_cannot_reset_fetch_rate_limit`, `test_success_does_not_reset_the_counter`, `test_trash_does_not_reset_the_counter` |
-| A reservation is refunded exactly once, only on internal errors, and never after SQLite work has started | Budget integrity under cancellation | `test_cancelled_request_does_not_consume_an_attempt`, `test_cancelled_trash_after_sqlite_start_keeps_attempt_reserved`, `test_concurrent_cancellation_refunds_every_reservation`, `test_deferred_refund_runs_when_drop_finds_the_lock_contended`, `test_database_error_returns_500_without_consuming_attempts` |
-| Deferred-refund temporal invariant: armed window ≤ 1s (semaphore timeout) and refund delay ≈ ms, both ≪ minimum cooldown (1 min) | Otherwise a deferred refund could decrement a recreated window's entry | Reasoning documented on `AttemptReservationGuard` in `src/handlers/fetch.rs`; the deferred path itself is exercised by `test_deferred_refund_runs_when_drop_finds_the_lock_contended` |
+| Every distinct candidate consumes budget, hits and misses included; committed replays are free only before saturation and never extend cooldown | Planted rows must not bypass the budget, while identical replays improve availability | `test_replaying_one_valid_candidate_does_not_consume_more_attempts`, `test_replaying_one_invalid_candidate_does_not_consume_more_attempts`, `test_replaying_one_candidate_does_not_slide_resets_at`, `test_audit_f1_planted_rows_cannot_reset_fetch_rate_limit` |
+| `candidate_count >= max` returns `429` before membership/DB for known, Pending, and Committed candidates | Saturation must not become an authentication oracle | `test_known_candidate_is_rejected_when_distinct_candidate_capacity_is_full`, `test_distinct_planted_candidates_consume_capacity`, `test_pending_distinct_candidates_consume_the_attempt_budget` |
+| Pending reserves a slot immediately; duplicate Pending returns `503` without a second reservation; `/fetch` and `/trash` share the set | Concurrent work must not oversubscribe or manufacture a duplicate candidate | `test_pending_duplicate_trash_is_rejected_without_a_second_reservation`, `test_fetch_and_trash_share_one_candidate_attempt` |
+| Detached finalization is generation-safe; DB error/cancellation before DB removes Pending; a miss increments failed once; trash races do not create false failures | Late completion and cancellation must not corrupt a replacement window or telemetry | `test_old_trash_completion_cannot_update_a_replaced_rate_limit_window`, `test_database_error_returns_500_without_consuming_attempts`, `test_committed_trash_race_returns_accepted_and_unauthorized_without_failure`, `test_concurrent_trash_hit_does_not_count_the_losing_miss_as_a_guess` |
+| A Pending reservation is removed exactly once on cancellation before SQLite or on internal error; after transfer to SQLite, the detached task owns finalization | Budget integrity under cancellation and lost HTTP responses | `test_cancelled_request_does_not_consume_an_attempt`, `test_cancelled_trash_after_sqlite_start_keeps_attempt_reserved`, `test_concurrent_cancellation_refunds_every_reservation`, `test_deferred_refund_runs_when_drop_finds_the_lock_contended`, `test_database_error_returns_500_without_consuming_attempts` |
+| Pending cleanup and detached finalization are candidate- and generation-specific; candidate removal plus empty-entry removal is atomic under one map lock | A stale completion must never mutate or delete a reservation in a replacement window or a newer request | `test_old_trash_completion_cannot_update_a_replaced_rate_limit_window`, `test_pending_duplicate_trash_is_rejected_without_a_second_reservation` |
 | `id_hash` = SHA-256 over raw identifier bytes; `secret_id` = SHA-256 over the two hex *strings* | Clients must match their entry; mixing algorithms silently breaks detection | `test_attempts_id_hash_matches_shared_client_vector`, `test_secret_id_and_id_hash_are_distinct_algorithms` |
 | Logs and error responses carry counts and static strings only — never identifiers, keys, or bodies | Anonymity | `test_error_responses_leak_no_secret_material`, `test_snapshot_never_contains_secret_material`, `test_500_does_not_leak_internals` |
 | Hex inputs are lowercased before validation and hashing | Case variants would split budgets and records | `test_audit_f12_hex_case_is_canonicalized` |
 | Cheap validation before expensive: length before base64 decode, 1 kB body limit | DoS via decode/parse cost | `test_store_checks_length_before_base64`, `test_store_rejects_oversized_json_before_deserialization` |
-| Snapshot is deterministic (sorted entries, gzip `mtime=0`), hour-truncated, single-flight | Stable ETag; precision gradient; bounded build cost | `test_attempts_snapshot_rebuild_is_deterministic`, `test_attempts_publish_hashed_identifier_with_counters`, `test_attempts_snapshot_at_full_map_scale`, `test_concurrent_attempts_polls_agree_on_etag` |
+| Snapshot is deterministic (sorted entries, gzip `mtime=0`), hour-truncated, single-flight, initial telemetry contract version 1; counts distinct candidates and all requests but exposes no CandidateTags | Stable ETag; precision gradient; bounded build cost and privacy | `test_attempts_snapshot_rebuild_is_deterministic`, `test_attempts_publish_hashed_identifier_with_counters`, `test_attempts_snapshot_at_full_map_scale`, `test_concurrent_attempts_polls_agree_on_etag`, `test_snapshot_never_contains_secret_material` |
 | Configuration is validated fail-closed at startup (ranges, NaN/∞/≤0 rejected) | A zero or absurd value would silently disable a protection | `src/tests/test_env.rs` |
 | Errors are classified by HTTP status only: `429` = targeted lockout, `503` = global pressure, both with `Retry-After` | Clients must not match on error text | `src/tests/test_contract.rs` |
 
@@ -134,6 +140,13 @@ code, keep the invariant — and run the guarding test.
   adversarial review and delta review of the final state — no confirmed
   residual vulnerability; full suite 122/122 and `cargo audit` clean as of
   that date.
+- **Distinct-candidate limiter review** (2026-08-20): the rate-limit bucket
+  remains `sha256(identifier)`, while `secret_id/key_id` CandidateTags are
+  retained only in bounded memory. Pending reservations, saturation-before-
+  membership, replay telemetry, shared `/fetch`/`/trash` state, and detached
+  generation-safe finalization are covered by the distinct-candidate tests.
+  The three-distinct-candidate targeted lockout remains accepted; this is an
+  availability and signal improvement, not a corrected vulnerability.
 
 ## Reviewer checklist
 

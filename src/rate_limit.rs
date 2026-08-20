@@ -41,7 +41,7 @@ impl TokenBucket {
 /// How often the sweeper removes expired rate-limit entries.
 const SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(600);
 
-/// Removes the hashed rate-limit entries whose last request is older than the
+/// Removes the hashed rate-limit entries whose last candidate is older than the
 /// cooldown. Entries are only meaningful within the cooldown window; keeping
 /// them longer would grow memory unboundedly and retain identifiers for no
 /// security benefit (the whitepaper asks identifiers to be wiped daily).
@@ -50,7 +50,7 @@ pub async fn sweep_expired_identifiers(state: &AppState) {
     let mut identifier_rate_limit = state.identifier_rate_limit.lock().await;
     let before = identifier_rate_limit.len();
     identifier_rate_limit.retain(|_, info| {
-        now.signed_duration_since(info.last_request) <= state.rate_limit_cooldown
+        now.signed_duration_since(info.last_candidate_at) <= state.rate_limit_cooldown
     });
     let remaining = identifier_rate_limit.len();
     // Log discipline: counts only, never identifiers.

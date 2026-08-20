@@ -4,6 +4,7 @@ pub mod test_audit_claims;
 pub mod test_concurrency;
 pub mod test_contract;
 pub mod test_db_errors;
+pub mod test_distinct_candidates;
 pub mod test_env;
 pub mod test_fetch;
 pub mod test_info;
@@ -19,3 +20,7 @@ static SHA256_CONCAT_111111_222222: &str =
     "dd1d9109d8404436efc6d86bf1eb9f292f884d935b0ba0d22eb44ce8421ded19";
 static NOT_PASSWORD_HASH: &str = "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb";
 static BASE64_ENCRYPTED_SECRET: &str = "4a1dl1T8cxcP2pnvxwYWDwm/I68vVd9oWMY0nTOmBSNbonEN/mfBjkPWkSNlxjWacsS2lRVzoGUQ4guZArKf415dLvbObReqWNtzmA4vaB9/feJapmgWAssVI9EbhJFf";
+
+pub(crate) fn distinct_candidate(index: usize) -> String {
+    format!("{:064x}", index + 1)
+}

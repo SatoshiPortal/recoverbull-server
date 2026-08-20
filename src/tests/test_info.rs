@@ -1,5 +1,6 @@
 use crate::models::Info;
 use axum::http::StatusCode;
+use chrono::Timelike;
 
 #[tokio::test]
 async fn test_info_success() {
@@ -18,6 +19,19 @@ async fn test_info_success() {
     assert_eq!(
         info.rate_limit_max_failed_attempts, info.rate_limit_max_attempts,
         "the legacy info field must mirror the canonical field"
+    );
+    assert_eq!(
+        info.max_attempt_identifiers,
+        state.rate_limit_max_identifiers
+    );
+
+    // hour-truncated, and consistent with the in-memory collection start
+    assert_eq!(info.attempts_collection_started_at.minute(), 0);
+    assert_eq!(info.attempts_collection_started_at.second(), 0);
+    assert_eq!(info.attempts_collection_started_at.nanosecond(), 0);
+    assert!(
+        info.attempts_collection_started_at <= state.attempts_collection_started_at,
+        "truncation rounds down"
     );
 }
 

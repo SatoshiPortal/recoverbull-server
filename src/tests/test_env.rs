@@ -1,6 +1,7 @@
 use crate::env::{
     canary_file_state, unique_test_database, validate_capacity, validate_config,
-    validate_token_bucket, CanaryFileState, MAX_DATABASE_CONCURRENCY, MAX_RATE_LIMIT_IDENTIFIERS,
+    validate_snapshot_ttl, validate_token_bucket, CanaryFileState, MAX_DATABASE_CONCURRENCY,
+    MAX_RATE_LIMIT_IDENTIFIERS,
 };
 
 #[test]
@@ -143,6 +144,20 @@ fn test_validate_token_bucket_rejects_infinity() {
     assert!(validate_token_bucket("STORE", f64::INFINITY, 2.0).is_err());
     assert!(validate_token_bucket("STORE", 10.0, f64::INFINITY).is_err());
     assert!(validate_token_bucket("STORE", f64::NEG_INFINITY, 2.0).is_err());
+}
+
+#[test]
+fn test_validate_snapshot_ttl_accepts_valid_values() {
+    assert!(validate_snapshot_ttl(1).is_ok());
+    assert!(validate_snapshot_ttl(60).is_ok());
+    assert!(validate_snapshot_ttl(u64::MAX).is_ok());
+}
+
+#[test]
+fn test_validate_snapshot_ttl_rejects_zero() {
+    // a zero TTL forces a fresh snapshot computation on every request,
+    // defeating the point of caching
+    assert!(validate_snapshot_ttl(0).is_err());
 }
 
 fn unique_temp_path(tag: &str) -> std::path::PathBuf {

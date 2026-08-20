@@ -100,16 +100,10 @@ async fn test_audit_f1_planted_rows_cannot_reset_fetch_rate_limit() {
             .await;
         let body = response.json::<serde_json::Value>();
         assert_eq!(body["encrypted_secret"], marker);
-        // a hit on a planted row still consumes the budget: the security
-        // counter grows by exactly one per lookup, verified in the map
-        let attempts = {
-            let identifier_rate_limit = state.identifier_rate_limit.lock().await;
-            identifier_rate_limit
-                .get(&crate::utils::identifier_hash(SHA256_111111).unwrap())
-                .map(|info| info.attempts)
-                .unwrap_or(0)
-        };
-        assert_eq!(attempts, i + 1);
+        // a hit on a planted row still consumes the budget and is reported:
+        // total_attempts grows while failed_attempts stays at zero
+        assert_eq!(body["attempt_status"]["total_attempts"], i + 1);
+        assert_eq!(body["attempt_status"]["failed_attempts"], 0);
     }
 
     let response = server

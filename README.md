@@ -2,6 +2,9 @@
 
 The server provides secret storage without relying on traditional credentials systems (account based).
 
+For the threat model, the risks accepted by design, the security invariants
+guarded by tests and the reviewer checklist, see [SECURITY.md](SECURITY.md).
+
 ## Description
 
 ### Definitions
@@ -366,11 +369,15 @@ curl --compressed -X GET http://localhost:3000/attempts -H 'If-None-Match: "<eta
 
 ## Tests
 
-### End to End
-Do not run tests in parallel
+### End to end
+The suite is safe to run with the default parallel test runner — per-test
+database isolation is handled by the test harness — and matches CI:
 ```sh
-cargo test -- --test-threads=1 --nocapture
+cargo test --locked
 ```
+Tests that exercise rate limits install their own token buckets rather than
+relying on environment-provided values, so the suite passes with any `.env`
+(see [SECURITY.md](SECURITY.md), "Test-writing traps").
 
 ### Coverage
 ```sh

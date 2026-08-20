@@ -16,7 +16,8 @@ The server stores `encrypted_secret` values keyed by
 the password, the encryption key, or the cleartext secret. Because the user
 password is weak by design (a memorable PIN), the **only** server-side
 control against password brute-force is the per-identifier lookup budget
-(default 3 attempts per cooldown per `sha256(identifier)`). Everything else
+(3 attempts per cooldown in the documented `.env` and CI; the variable is
+mandatory — there is no code default). Everything else
 — anonymity, no accounts, Tor-only transport, daily in-memory wipe — exists
 to keep that control meaningful and the server unlinkable to users.
 
@@ -51,8 +52,10 @@ legal compulsion of both providers (see the whitepaper for the full list).
    last admitted attempt: accepted, and needed by clients to compute retry
    time.
 5. **Service-state oracle via distinct `503` bodies.** Lookup-bucket
-   exhaustion, map-full, and database-busy are deliberately distinguishable
-   (clients must react differently). An attacker reads the same states.
+   exhaustion, map-full, and database-busy return different messages, so an
+   attacker (and an operator) can tell them apart. The documented client
+   contract is to classify by HTTP status only, never to match on the
+   message (see README and `src/tests/test_contract.rs`).
 6. **Telemetry suppression.** Flooding `/attempts` or churning the snapshot
    ETag can delay clients' snapshot reads. `attempt_status` on a successful
    fetch is the fallback signal, unaffected by that flood.
@@ -72,6 +75,13 @@ legal compulsion of both providers (see the whitepaper for the full list).
     per-IP limiting is useless, so buckets are global; an attacker can
     exhaust them (`503` for all). Bounded by nginx/Tor defenses at the
     deployment layer.
+11. **Cancellation during an explicit refund can lose one attempt.** If the
+    handler future is cancelled in the microsecond window of an explicit
+    `refund_attempt(...).await` in an internal-error branch (after the guard
+    is disarmed), that refund is lost and the user keeps one consumed
+    attempt. The direction is conservative (budget is lost, never granted),
+    the window is microseconds, and an attacker cannot cancel a victim's
+    request — accepted rather than restructured.
 
 ## Invariants (each guarded by tests)
 
@@ -83,13 +93,13 @@ code, keep the invariant — and run the guarding test.
 | `/store` is idempotent: fresh and duplicate return the same `201`, never overwrite | F1: duplicate `403` was an unthrottled `authentication_key` oracle | `test_audit_f1_store_gives_no_existence_signal`, `test_duplicate_store_is_indistinguishable_and_does_not_overwrite`, `test_concurrent_identical_store_is_idempotent` |
 | Rate-limit check-and-increment is atomic under one lock | Concurrent requests otherwise overshoot the budget | `test_rate_limit_holds_under_concurrency` |
 | Every admitted lookup consumes budget, hits included; never reset on success | Planted rows would erase the signal or bypass the budget | `test_audit_f1_planted_rows_cannot_reset_fetch_rate_limit`, `test_success_does_not_reset_the_counter`, `test_trash_does_not_reset_the_counter` |
-| A reservation is refunded exactly once, only on internal errors, and never after SQLite work has started | Budget integrity under cancellation | `test_cancelled_request_does_not_consume_an_attempt`, `test_cancelled_trash_after_sqlite_start_keeps_attempt_reserved`, `test_concurrent_cancellation_refunds_every_reservation`, `test_database_error_returns_500_without_consuming_attempts` |
-| Deferred-refund temporal invariant: armed window ≤ 1s (semaphore timeout) and refund delay ≈ ms, both ≪ minimum cooldown (1 min) | Otherwise a deferred refund could decrement a recreated window's entry | Reasoning documented on `AttemptReservationGuard` in `src/handlers/fetch.rs` |
+| A reservation is refunded exactly once, only on internal errors, and never after SQLite work has started | Budget integrity under cancellation | `test_cancelled_request_does_not_consume_an_attempt`, `test_cancelled_trash_after_sqlite_start_keeps_attempt_reserved`, `test_concurrent_cancellation_refunds_every_reservation`, `test_deferred_refund_runs_when_drop_finds_the_lock_contended`, `test_database_error_returns_500_without_consuming_attempts` |
+| Deferred-refund temporal invariant: armed window ≤ 1s (semaphore timeout) and refund delay ≈ ms, both ≪ minimum cooldown (1 min) | Otherwise a deferred refund could decrement a recreated window's entry | Reasoning documented on `AttemptReservationGuard` in `src/handlers/fetch.rs`; the deferred path itself is exercised by `test_deferred_refund_runs_when_drop_finds_the_lock_contended` |
 | `id_hash` = SHA-256 over raw identifier bytes; `secret_id` = SHA-256 over the two hex *strings* | Clients must match their entry; mixing algorithms silently breaks detection | `test_attempts_id_hash_matches_shared_client_vector`, `test_secret_id_and_id_hash_are_distinct_algorithms` |
 | Logs and error responses carry counts and static strings only — never identifiers, keys, or bodies | Anonymity | `test_error_responses_leak_no_secret_material`, `test_snapshot_never_contains_secret_material`, `test_500_does_not_leak_internals` |
 | Hex inputs are lowercased before validation and hashing | Case variants would split budgets and records | `test_audit_f12_hex_case_is_canonicalized` |
 | Cheap validation before expensive: length before base64 decode, 1 kB body limit | DoS via decode/parse cost | `test_store_checks_length_before_base64`, `test_store_rejects_oversized_json_before_deserialization` |
-| Snapshot is deterministic (sorted entries, gzip `mtime=0`), hour-truncated, single-flight | Stable ETag; precision gradient; bounded build cost | `test_attempts_snapshot_rebuild_is_deterministic`, `test_attempts_snapshot_at_full_map_scale`, `test_concurrent_attempts_polls_agree_on_etag` |
+| Snapshot is deterministic (sorted entries, gzip `mtime=0`), hour-truncated, single-flight | Stable ETag; precision gradient; bounded build cost | `test_attempts_snapshot_rebuild_is_deterministic`, `test_attempts_publish_hashed_identifier_with_counters`, `test_attempts_snapshot_at_full_map_scale`, `test_concurrent_attempts_polls_agree_on_etag` |
 | Configuration is validated fail-closed at startup (ranges, NaN/∞/≤0 rejected) | A zero or absurd value would silently disable a protection | `src/tests/test_env.rs` |
 | Errors are classified by HTTP status only: `429` = targeted lockout, `503` = global pressure, both with `Retry-After` | Clients must not match on error text | `src/tests/test_contract.rs` |
 
@@ -112,16 +122,18 @@ code, keep the invariant — and run the guarding test.
 ## Audit history
 
 - **SECURITY-AUDIT-2026-08-04** (multi-model external review of
-  `main@38b274f`): 13 findings (F1–F13), absorbed in PR #8 over three
-  rounds. Characterization tests live in `src/tests/test_audit_claims.rs`.
-- **F1 (CRITICAL) proven Red-Green on live servers**: on `main`, a
-  duplicate `/store` returned `403` (existence oracle → unthrottled PIN
-  brute-force, followed by `200` on `/fetch` with the found key); on the
-  fix branch, the duplicate returns `201`, indistinguishable from a fresh
-  store.
-- **Independent re-reviews** (2026-08-20): full-branch adversarial review
-  and delta review of the final state — no confirmed residual
-  vulnerability; full suite 122/122 and `cargo audit` clean.
+  `main@38b274f`): 13 findings (F1–F13) per the audit report, absorbed in
+  PR #8 over three rounds. Characterized by tests: F1, F2, F9, F11 and F12
+  in `src/tests/test_audit_claims.rs`, F3 in `src/tests/test_db_errors.rs`.
+- **F1 (CRITICAL) proven Red-Green on live servers** (2026-08-20,
+  `main@38b274f` vs this branch): on `main`, a duplicate `/store` returned
+  `403` (existence oracle → unthrottled PIN brute-force, followed by `200`
+  on `/fetch` with the found key); on the fix branch, the duplicate returns
+  `201`, indistinguishable from a fresh store.
+- **Independent re-reviews** (2026-08-20, commit `89af2b1`): full-branch
+  adversarial review and delta review of the final state — no confirmed
+  residual vulnerability; full suite 122/122 and `cargo audit` clean as of
+  that date.
 
 ## Reviewer checklist
 

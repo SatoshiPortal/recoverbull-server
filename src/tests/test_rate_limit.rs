@@ -1,9 +1,10 @@
 use crate::{
-    models::{FetchSecret, RateLimitInfo, ResponseFailedAttempt},
-    tests::{NOT_PASSWORD_HASH, SHA256_111111, SHA256_222222},
-    utils::identifier_hash,
+    models::{FetchSecret, RateLimitInfo, ResponseFailedAttempt, StoreSecret},
+    tests::{BASE64_ENCRYPTED_SECRET, NOT_PASSWORD_HASH, SHA256_111111, SHA256_222222},
+    utils::{generate_secret_id, identifier_hash},
 };
 use axum::http::StatusCode;
+use diesel::RunQueryDsl;
 
 #[tokio::test]
 async fn test_sweep_removes_only_expired_entries() {
@@ -188,5 +189,76 @@ async fn test_cancelled_request_does_not_consume_an_attempt() {
         "cancelling the request while it awaits the database semaphore must not \
          consume an attempt: the reservation made before the await was never \
          refunded because the cancelled future never reached the refund branch"
+    );
+}
+
+// Once the SQLite operation has started, the attempt is committed even if the
+// HTTP future is cancelled: the detached blocking closure continues and
+// `/trash` may delete the secret. HTTP cannot guarantee delivery after commit;
+// this test covers the accounting boundary, not response delivery.
+#[tokio::test]
+async fn test_cancelled_trash_after_sqlite_start_keeps_attempt_reserved() {
+    let (server, state) = crate::tests::test_server::new_test_server().await;
+    let store = StoreSecret {
+        identifier: SHA256_111111.to_string(),
+        authentication_key: SHA256_222222.to_string(),
+        encrypted_secret: BASE64_ENCRYPTED_SECRET.to_string(),
+    };
+    server.post("/store").json(&store).expect_success().await;
+
+    let mut lock_connection = crate::database::establish_connection(state.database_url.clone());
+    diesel::sql_query("BEGIN IMMEDIATE")
+        .execute(&mut lock_connection)
+        .expect("test must acquire the SQLite write lock");
+
+    let request = FetchSecret {
+        identifier: SHA256_111111.to_string(),
+        authentication_key: SHA256_222222.to_string(),
+    };
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        crate::handlers::fetch::fetch_secret(
+            axum::extract::State(state.clone()),
+            axum::Json(request),
+            true,
+        ),
+    )
+    .await;
+    assert!(
+        outcome.is_err(),
+        "test setup invalid: trash should still be waiting on SQLite"
+    );
+
+    // Always release the test lock before checking either observable. The
+    // detached blocking task must then be allowed to finish its transaction.
+    diesel::sql_query("COMMIT")
+        .execute(&mut lock_connection)
+        .expect("test must release the SQLite write lock");
+
+    let secret_id = generate_secret_id(SHA256_111111, SHA256_222222);
+    let deletion = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let mut connection = crate::database::establish_connection(state.database_url.clone());
+            let remaining = crate::database::read_secret_by_id(&mut connection, &secret_id)
+                .expect("secret lookup must succeed after releasing the test lock");
+            if remaining.is_none() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+    assert!(
+        deletion.is_ok(),
+        "detached trash operation did not finish in time"
+    );
+
+    let identifier_rate_limit = state.identifier_rate_limit.lock().await;
+    assert_eq!(
+        identifier_rate_limit
+            .get(&identifier_hash(SHA256_111111).unwrap())
+            .map(|info| info.attempts),
+        Some(1),
+        "once SQLite has started, cancelling HTTP must not refund the committed attempt"
     );
 }

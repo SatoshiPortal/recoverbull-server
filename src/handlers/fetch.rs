@@ -245,11 +245,11 @@ pub async fn fetch_secret(
     };
     let attempt_number = attempt_status.total_attempts;
 
-    // Armed now, right as the reservation above becomes real: from this
-    // point on, either a code path below explicitly disarms it because the
-    // attempt is legitimately consumed, or the future gets cancelled and
-    // `Drop` refunds it. See `AttemptReservationGuard` for why the refund
-    // itself must be detached from `Drop`.
+    // Armed now, right as the reservation above becomes real. It remains armed
+    // while waiting for the database semaphore, because cancellation there
+    // must refund the reservation. Once the blocking SQLite operation is
+    // launched, the attempt is committed before the next await; only the
+    // explicit JoinError and database-error branches refund it.
     let mut attempt_guard = AttemptReservationGuard::new(state.clone(), identifier_hash.clone());
 
     let database_permit = match tokio::time::timeout(
@@ -285,6 +285,10 @@ pub async fn fetch_secret(
     let key_id_for_db = key_id.clone();
     #[cfg(test)]
     let test_database_guard = state._test_database_guard.clone();
+    // The next operation launches SQLite. Cancellation while awaiting its
+    // JoinHandle must not refund an attempt that may already have deleted a
+    // secret (HTTP cannot guarantee delivery after commit).
+    attempt_guard.disarm();
     let task = tokio::task::spawn_blocking(move || {
         #[cfg(test)]
         let _test_database_guard = test_database_guard;
@@ -330,8 +334,7 @@ pub async fn fetch_secret(
 
         Ok(Some(key)) => {
             // The lookup completed and the attempt is legitimately consumed:
-            // no refund, whatever the outcome below.
-            attempt_guard.disarm();
+            // the guard was already disarmed before awaiting the task.
 
             // A database hit does not prove ownership: an unauthenticated
             // caller may have planted the row through `/store`. Therefore a
@@ -360,8 +363,7 @@ pub async fn fetch_secret(
 
         Ok(None) => {
             // The lookup completed and the attempt is legitimately consumed:
-            // no refund, this is the wrong-credential path itself.
-            attempt_guard.disarm();
+            // the guard was already disarmed before awaiting the task.
 
             // target brute-force mitigation
             // If the entry is not found:

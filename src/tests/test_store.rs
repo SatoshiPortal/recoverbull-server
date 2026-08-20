@@ -69,6 +69,8 @@ async fn test_failure_identifier_not_64_letters() {
     let response = server.post("/store").json(store).expect_failure().await;
 
     assert_eq!(response.status_code(), StatusCode::BAD_REQUEST);
+    let body = response.json::<serde_json::Value>();
+    assert!(body.get("error").is_some());
 }
 
 #[tokio::test]
@@ -125,6 +127,39 @@ async fn test_store_checks_length_before_base64() {
         body.contains("length exceeds the limit"),
         "expected the length error, got: {body}"
     );
+}
+
+/// `/store`'s `500` body must be a coherent object like every other error
+/// response, not the bare `null` that `Json(None)` used to produce: a client
+/// parsing errors uniformly must not special-case this one status.
+#[tokio::test]
+async fn test_store_database_error_returns_coherent_body() {
+    use diesel::RunQueryDsl;
+
+    let (server, state) = crate::tests::test_server::new_test_server().await;
+
+    // Force the write to fail: drop the table out from under the server.
+    let mut connection = crate::database::establish_connection(state.clone().database_url);
+    diesel::sql_query("DROP TABLE secret")
+        .execute(&mut connection)
+        .expect("failed to drop table");
+
+    let response = server
+        .post("/store")
+        .json(&StoreSecret {
+            identifier: SHA256_111111.to_string(),
+            authentication_key: SHA256_222222.to_string(),
+            encrypted_secret: BASE64_ENCRYPTED_SECRET.to_string(),
+        })
+        .await;
+
+    assert_eq!(response.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = response.json::<serde_json::Value>();
+    assert!(
+        body.is_object(),
+        "the 500 body must be a coherent object, not null: got {body}"
+    );
+    assert!(body.get("error").is_some());
 }
 
 #[tokio::test]

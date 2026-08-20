@@ -8,13 +8,16 @@ use axum::{
     Json,
 };
 use flate2::{write::GzEncoder, Compression};
-use serde_json::json;
 
 use crate::{
-    models::{AttemptEntry, AttemptsSnapshot},
+    models::{error_body, retry_after_response, AttemptEntry, AttemptsSnapshot},
     utils::{sha256_hex, truncate_to_hour},
     AppState, AttemptsSnapshotCache,
 };
+
+/// Small fixed advisory backoff for the global attempts-telemetry bucket:
+/// there is no cooldown deadline to derive here, only "try again shortly".
+const GLOBAL_OVERLOAD_RETRY_AFTER_SECS: u64 = 1;
 
 /// Public lookup telemetry.
 ///
@@ -37,11 +40,11 @@ pub async fn get_attempts(State(state): State<AppState>, headers: HeaderMap) -> 
         let mut bucket = state.attempts_token_bucket.lock().await;
         if !bucket.try_consume() {
             tracing::warn!("attempts telemetry rate-limit exceeded");
-            return (
-                StatusCode::TOO_MANY_REQUESTS,
-                Json(json!({"error": "Too many attempts telemetry requests, retry later"})),
-            )
-                .into_response();
+            return retry_after_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                GLOBAL_OVERLOAD_RETRY_AFTER_SECS,
+                "Too many attempts telemetry requests, retry later",
+            );
         }
     }
 
@@ -156,7 +159,7 @@ async fn build_snapshot(state: &AppState) -> Result<AttemptsSnapshotCache, Respo
             tracing::error!(error = %error, "failed to compress attempts snapshot");
             Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "Internal server error"})),
+                Json(error_body("Internal server error")),
             )
                 .into_response())
         }
@@ -164,7 +167,7 @@ async fn build_snapshot(state: &AppState) -> Result<AttemptsSnapshotCache, Respo
             tracing::error!(error = %error, "attempts snapshot task panicked");
             Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "Internal server error"})),
+                Json(error_body("Internal server error")),
             )
                 .into_response())
         }

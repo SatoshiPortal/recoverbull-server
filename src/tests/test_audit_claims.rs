@@ -180,7 +180,7 @@ async fn test_audit_f9_store_writes_are_token_bucketed() {
         } else {
             assert_eq!(
                 response.status_code(),
-                StatusCode::TOO_MANY_REQUESTS,
+                StatusCode::SERVICE_UNAVAILABLE,
                 "writes beyond the bucket capacity must be rejected"
             );
         }
@@ -212,7 +212,7 @@ async fn test_lookup_flood_is_globally_token_bucketed() {
             authentication_key: NOT_PASSWORD_HASH.to_string(),
         })
         .await;
-    assert_eq!(second.status_code(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(second.status_code(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
 /// F11 (LOW): wildcard CORS on every endpoint — FIXED. The CORS layers

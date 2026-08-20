@@ -81,6 +81,24 @@ Timestamp precision follows the knowledge gradient — the more a caller must al
 - **Lockout (`429`)**: `requested_at` is the **exact** time of the last *admitted* attempt, which may be the victim's. Anyone holding the `identifier` can read it once the budget is exhausted. This is accepted: the same caller already gets hour precision from the public snapshot, and the exact value is what a client needs to compute its retry time.
 - **Public `/attempts` snapshot**: hour-truncated timestamps, because the audience is everyone — exact timestamps would ease correlation without requiring any knowledge of the `identifier`.
 
+### Error responses
+
+Clients classify errors **only by HTTP status**. Application error responses are
+JSON objects containing at least an `error` field. The `error` text is for
+humans and logs; it is not contractual and must never be matched to make a
+retry or security decision.
+
+| HTTP status | Meaning | Client treatment |
+|---|---|---|
+| `400` | Invalid request data. | Fix the request. |
+| `401` | Invalid credentials. | Treat as an authentication failure. |
+| `429` | The targeted identifier lookup budget is locked. This is the only security alarm. | Surface the targeted lockout and honor `Retry-After`. |
+| `503` | Server pressure or unavailability, including global lookup/store/telemetry limits, a full rate-limit map, or a busy database. | Back off and retry using `Retry-After`. |
+| `500` | Internal server error. | Treat as a server failure. |
+
+Every `429` and `503` response carries `Retry-After`, in seconds. Framework-generated
+rejections such as `404`, `405`, `413`, and `415` may not be JSON.
+
 ### Attempts
 
 `GET /attempts` returns a public telemetry snapshot for the current cooldown windows:
@@ -113,7 +131,7 @@ The body is **always gzip-compressed JSON** (`Content-Encoding: gzip`); clients 
 
 Detection semantics a client should implement:
 - **Poll `/attempts` proactively** (e.g. at app start, no more often than the snapshot freshness): if your identifier hash appears with attempts you did not make, someone is probing your backup.
-- **Treat a per-identifier `429` (`"Too many attempts"`, with an `attempts` field) as an alarm**: the separate global overload response (`"Too many lookup requests"`) indicates service-wide pressure instead.
+- **Treat a `429` as an alarm**: global service pressure uses `503` instead. See [Error responses](#error-responses) for the full table; do not match on the `error` text.
 - **`attempt_status` on a successful fetch is the freshest signal**: it needs no extra request and stays available even when `/attempts` is overloaded. Failures older than the cooldown expire (entries are swept and forgotten), but a success never resets the counters early.
 - **Telemetry is advisory**: the server cannot distinguish an attacker from the user or another of the user's devices, and a compromised server can fabricate or suppress counters. Clients must warn, never act automatically.
 

@@ -137,11 +137,9 @@ async fn test_store_is_not_counted_in_attempts() {
     );
 }
 
-/// The targeted per-identifier 429 is identified by its HTTP status and the
-/// machine-readable metadata needed by the client. Error prose is not part of
-/// this contract.
+/// A targeted lockout is the only 429 response and carries targeted metadata.
 #[tokio::test]
-async fn test_targeted_429_has_machine_metadata() {
+async fn test_targeted_429_has_targeted_metadata() {
     let (server, state) = crate::tests::test_server::new_test_server().await;
 
     // exhaust the per-identifier budget
@@ -173,13 +171,18 @@ async fn test_targeted_429_has_machine_metadata() {
             "targeted 429 must include {field}"
         );
     }
+    let retry_after = response
+        .header("retry-after")
+        .to_str()
+        .unwrap()
+        .parse::<u64>()
+        .expect("Retry-After must be a positive integer number of seconds");
+    assert!(retry_after > 0, "Retry-After must be a positive backoff");
 }
 
-/// Global 429 responses are structurally distinct from the targeted response:
-/// they carry no targeted-attempt metadata. Error prose is not part of this
-/// contract.
+/// Global buckets all use 503 and carry no targeted-attempt metadata.
 #[tokio::test]
-async fn test_global_429_has_no_targeted_machine_metadata() {
+async fn test_global_buckets_use_503_without_targeted_metadata() {
     let (server, state) = crate::tests::test_server::new_test_server().await;
 
     // exhaust the global lookup bucket
@@ -192,14 +195,20 @@ async fn test_global_429_has_no_targeted_machine_metadata() {
         })
         .expect_failure()
         .await;
-    assert_eq!(response.status_code(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(response.status_code(), StatusCode::SERVICE_UNAVAILABLE);
     let body = response.json::<serde_json::Value>();
     for field in ["attempts", "requested_at", "rate_limit_cooldown"] {
         assert!(
             body.get(field).is_none(),
-            "global lookup 429 must not include {field}"
+            "global lookup 503 must not include {field}"
         );
     }
+    assert!(response
+        .header("retry-after")
+        .to_str()
+        .unwrap()
+        .parse::<u64>()
+        .is_ok());
 
     // exhaust the global store bucket
     *state.store_token_bucket.lock().await = crate::rate_limit::TokenBucket::new(0.0, 0.0);
@@ -212,24 +221,94 @@ async fn test_global_429_has_no_targeted_machine_metadata() {
         })
         .expect_failure()
         .await;
-    assert_eq!(response.status_code(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(response.status_code(), StatusCode::SERVICE_UNAVAILABLE);
     let body = response.json::<serde_json::Value>();
     for field in ["attempts", "requested_at", "rate_limit_cooldown"] {
         assert!(
             body.get(field).is_none(),
-            "global store 429 must not include {field}"
+            "global store 503 must not include {field}"
         );
     }
+    assert!(response
+        .header("retry-after")
+        .to_str()
+        .unwrap()
+        .parse::<u64>()
+        .is_ok());
 
     // exhaust the global attempts bucket
     *state.attempts_token_bucket.lock().await = crate::rate_limit::TokenBucket::new(0.0, 0.0);
     let response = server.get("/attempts").expect_failure().await;
-    assert_eq!(response.status_code(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(response.status_code(), StatusCode::SERVICE_UNAVAILABLE);
     let body = response.json::<serde_json::Value>();
     for field in ["attempts", "requested_at", "rate_limit_cooldown"] {
         assert!(
             body.get(field).is_none(),
-            "global attempts 429 must not include {field}"
+            "global attempts 503 must not include {field}"
         );
     }
+    assert!(response
+        .header("retry-after")
+        .to_str()
+        .unwrap()
+        .parse::<u64>()
+        .is_ok());
+}
+
+/// Capacity and database pressure both use 503 and carry `Retry-After`.
+#[tokio::test]
+async fn test_503_responses_have_no_machine_code() {
+    // identifier-map capacity exhausted: force a full map so a brand new
+    // identifier cannot get a slot.
+    let mut state = crate::env::init();
+    state.rate_limit_max_identifiers = 1;
+    crate::database::init_db(state.clone());
+    let server = axum_test::TestServer::new(crate::router::new(state.clone())).unwrap();
+
+    server
+        .post("/fetch")
+        .json(&FetchSecret {
+            identifier: SHA256_111111.to_string(),
+            authentication_key: NOT_PASSWORD_HASH.to_string(),
+        })
+        .await;
+    let response = server
+        .post("/fetch")
+        .json(&FetchSecret {
+            identifier: SHA256_222222.to_string(),
+            authentication_key: NOT_PASSWORD_HASH.to_string(),
+        })
+        .await;
+    assert_eq!(response.status_code(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = response.json::<serde_json::Value>();
+    assert!(body.get("error").is_some());
+    assert!(response
+        .header("retry-after")
+        .to_str()
+        .unwrap()
+        .parse::<u64>()
+        .is_ok());
+
+    // database busy: block the concurrency semaphore.
+    let mut state = crate::env::init();
+    state.database_semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+    crate::database::init_db(state.clone());
+    let server = axum_test::TestServer::new(crate::router::new(state.clone())).unwrap();
+
+    let response = server
+        .post("/fetch")
+        .json(&FetchSecret {
+            identifier: SHA256_111111.to_string(),
+            authentication_key: NOT_PASSWORD_HASH.to_string(),
+        })
+        .await;
+    assert_eq!(response.status_code(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = response.json::<serde_json::Value>();
+    assert!(body.get("error").is_some());
+    assert!(response
+        .header("retry-after")
+        .to_str()
+        .unwrap()
+        .parse::<u64>()
+        .is_ok());
 }

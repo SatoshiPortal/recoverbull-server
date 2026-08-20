@@ -1,14 +1,23 @@
 use axum::extract::State;
+use axum::response::{IntoResponse, Response};
 use axum::{http::StatusCode, Json};
-use serde_json::{json, Value};
+use serde_json::json;
 
 use crate::database::{establish_connection, read_and_trash_secret_by_id, read_secret_by_id};
-use crate::models::{AttemptStatus, FetchSecret, RateLimitInfo, ResponseFailedAttempt};
+use crate::models::{
+    error_body, retry_after_response, AttemptStatus, FetchSecret, RateLimitInfo,
+    ResponseFailedAttempt,
+};
 use crate::utils::{generate_secret_id, identifier_hash, is_256bits_hex_hash};
 
 use crate::AppState;
 
 const DATABASE_PERMIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Small fixed advisory backoff for global bucket and database-busy paths:
+/// unlike the per-identifier lockout, there is no real cooldown deadline to
+/// derive here, only "try again shortly".
+const GLOBAL_OVERLOAD_RETRY_AFTER_SECS: u64 = 1;
 
 /// Gives back one reserved attempt. Split from the locking so the same
 /// logic can run under an async lock on the normal paths and under a
@@ -109,7 +118,7 @@ pub async fn fetch_secret(
     State(state): State<AppState>,
     Json(request): Json<FetchSecret>,
     is_trashing_secret: bool,
-) -> (StatusCode, Json<Value>) {
+) -> Response {
     // canonicalize hex inputs: "AB…" and "ab…" are the same logical value
     // and must map to the same record and the same rate-limit entry
     let identifier = &request.identifier.to_lowercase();
@@ -118,10 +127,11 @@ pub async fn fetch_secret(
     if !is_256bits_hex_hash(identifier) || !is_256bits_hex_hash(authentication_key) {
         return (
             StatusCode::BAD_REQUEST,
-            Json(json!({
-                "error": "identifier or authentication_key are not 256 bits HEX hashes",
-            })),
-        );
+            Json(error_body(
+                "identifier or authentication_key are not 256 bits HEX hashes",
+            )),
+        )
+            .into_response();
     }
 
     // Keep only a one-way tag in the rate-limit state. This is also the tag
@@ -134,9 +144,10 @@ pub async fn fetch_secret(
         let mut bucket = state.lookup_token_bucket.lock().await;
         if !bucket.try_consume() {
             tracing::warn!("global lookup rate-limit exceeded");
-            return (
-                StatusCode::TOO_MANY_REQUESTS,
-                Json(json!({"error": "Too many lookup requests, retry later"})),
+            return retry_after_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                GLOBAL_OVERLOAD_RETRY_AFTER_SECS,
+                "Too many lookup requests, retry later",
             );
         }
     }
@@ -201,9 +212,10 @@ pub async fn fetch_secret(
 
     let Some(reservation) = reservation else {
         tracing::warn!("identifier rate-limit capacity exhausted");
-        return (
+        return retry_after_response(
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "Rate-limit capacity exhausted, retry later"})),
+            GLOBAL_OVERLOAD_RETRY_AFTER_SECS,
+            "Rate-limit capacity exhausted, retry later",
         );
     };
 
@@ -211,13 +223,26 @@ pub async fn fetch_secret(
         Ok(admitted) => admitted,
         Err((attempts, last_request)) => {
             tracing::warn!("rate-limit lockout");
+            // Real remaining cooldown, not a fixed constant: the client can
+            // compute a precise backoff instead of guessing. Never zero: a
+            // zero Retry-After would invite an immediate retry storm right
+            // at the cooldown boundary.
+            let retry_after_secs = (last_request + state.rate_limit_cooldown - current_time)
+                .num_seconds()
+                .max(1) as u64;
             let response = json!({
                 "error": "Too many attempts",
                 "requested_at": last_request,
                 "rate_limit_cooldown": state.rate_limit_cooldown.num_minutes(),
                 "attempts": attempts,
             });
-            return (StatusCode::TOO_MANY_REQUESTS, Json(response));
+            let mut http_response = (StatusCode::TOO_MANY_REQUESTS, Json(response)).into_response();
+            http_response.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                axum::http::HeaderValue::from_str(&retry_after_secs.to_string())
+                    .expect("a stringified non-negative integer is a valid header value"),
+            );
+            return http_response;
         }
     };
     let attempt_number = attempt_status.total_attempts;
@@ -243,9 +268,10 @@ pub async fn fetch_secret(
             attempt_guard.disarm();
             refund_attempt(&state, &identifier_hash).await;
             tracing::warn!("database concurrency limit exceeded");
-            return (
+            return retry_after_response(
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({"error": "Database busy, retry later"})),
+                GLOBAL_OVERLOAD_RETRY_AFTER_SECS,
+                "Database busy, retry later",
             );
         }
     };
@@ -278,8 +304,9 @@ pub async fn fetch_secret(
             tracing::error!(error = %error, "database task panicked");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "Internal server error"})),
-            );
+                Json(error_body("Internal server error")),
+            )
+                .into_response();
         }
     };
 
@@ -296,8 +323,9 @@ pub async fn fetch_secret(
 
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "Internal server error"})),
+                Json(error_body("Internal server error")),
             )
+                .into_response()
         }
 
         Ok(Some(key)) => {
@@ -327,7 +355,7 @@ pub async fn fetch_secret(
             let mut response = json!(&key);
             response["attempt_status"] = json!(attempt_status);
 
-            (code, Json(response))
+            (code, Json(response)).into_response()
         }
 
         Ok(None) => {
@@ -357,7 +385,7 @@ pub async fn fetch_secret(
                 attempts: attempt_number,
             });
 
-            (StatusCode::UNAUTHORIZED, Json(response))
+            (StatusCode::UNAUTHORIZED, Json(response)).into_response()
         }
     }
 }

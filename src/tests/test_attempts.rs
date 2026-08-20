@@ -175,6 +175,7 @@ async fn test_fetch_success_reports_status_without_resetting_attempt_budget() {
         .expect_failure()
         .await;
     assert_eq!(response.status_code(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(response.header("retry-after").to_str().is_ok());
 }
 
 #[tokio::test]
@@ -313,7 +314,8 @@ async fn test_attempts_rate_limit_bucket() {
 
     server.get("/attempts").expect_success().await;
     let response = server.get("/attempts").await;
-    assert_eq!(response.status_code(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(response.status_code(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(response.header("retry-after").to_str().is_ok());
 }
 
 #[tokio::test]

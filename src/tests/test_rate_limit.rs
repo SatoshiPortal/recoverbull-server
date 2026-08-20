@@ -262,3 +262,73 @@ async fn test_cancelled_trash_after_sqlite_start_keeps_attempt_reserved() {
         "once SQLite has started, cancelling HTTP must not refund the committed attempt"
     );
 }
+
+/// 20 concurrent requests on the same identifier, all cancelled while parked
+/// on a blocked database semaphore. Only `max_attempts` are admitted and
+/// reserved; the rest get an immediate 429. Every admitted reservation must
+/// be refunded exactly once (immediate `try_lock` in `Drop` or the detached
+/// task), and the identifier must keep its full budget afterwards.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn test_concurrent_cancellation_refunds_every_reservation() {
+    let mut state = crate::env::init();
+    state.database_semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+    crate::database::init_db(state.clone());
+
+    let request = || FetchSecret {
+        identifier: SHA256_111111.to_string(),
+        authentication_key: NOT_PASSWORD_HASH.to_string(),
+    };
+
+    let mut handles = Vec::new();
+    for _ in 0..20 {
+        let state = state.clone();
+        handles.push(tokio::spawn(async move {
+            tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                crate::handlers::fetch::fetch_secret(
+                    axum::extract::State(state),
+                    axum::Json(request()),
+                    false,
+                ),
+            )
+            .await
+        }));
+    }
+    for handle in handles {
+        let _ = handle.await.unwrap();
+    }
+
+    // Poll until the deferred refunds land (they complete in milliseconds).
+    let hash = identifier_hash(SHA256_111111).unwrap();
+    let settled = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            {
+                let map = state.identifier_rate_limit.lock().await;
+                if map.get(&hash).map(|info| info.attempts).unwrap_or(0) == 0 {
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+    assert!(
+        settled.is_ok(),
+        "cancelled reservations were not all refunded within 2s"
+    );
+
+    // No phantom budget loss: the identifier must be admitted again. Give the
+    // semaphore a permit so the request can reach the (empty) database.
+    state.database_semaphore.add_permits(1);
+    let response = crate::handlers::fetch::fetch_secret(
+        axum::extract::State(state.clone()),
+        axum::Json(request()),
+        false,
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        axum::http::StatusCode::UNAUTHORIZED,
+        "a cancellation storm must not leak the attempt budget (expected 401, no row)"
+    );
+}

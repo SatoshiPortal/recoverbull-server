@@ -326,3 +326,54 @@ async fn test_stats_route_is_not_exposed() {
         StatusCode::NOT_FOUND
     );
 }
+
+/// Fill the rate-limit map to its configured capacity (100,000) and request
+/// /attempts: the build must complete in bounded time with bounded output,
+/// and the second request must be served from the cache with the same ETag.
+/// This is the worst case the deployment guardrails are sized for.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_attempts_snapshot_at_full_map_scale() {
+    let (server, state) = crate::tests::test_server::new_test_server().await;
+
+    let now = chrono::Utc::now();
+    {
+        let mut map = state.identifier_rate_limit.lock().await;
+        for i in 0..100_000u32 {
+            map.insert(
+                format!("{:064x}", i),
+                crate::models::RateLimitInfo {
+                    window_started_at: now,
+                    last_request: now,
+                    attempts: 1,
+                    failed_attempts: 0,
+                },
+            );
+        }
+    }
+
+    let started = std::time::Instant::now();
+    let response = server.get("/attempts").await;
+    let first_build = started.elapsed();
+
+    assert_eq!(response.status_code(), StatusCode::OK);
+    let body: &[u8] = response.as_bytes();
+    let (raw, snapshot) = decode_gzip(body);
+    assert_eq!(snapshot.entries.len(), 100_000);
+
+    println!(
+        "full-map snapshot: build={first_build:?} gzip={}B json={}B",
+        body.len(),
+        raw.len()
+    );
+    assert!(
+        first_build < std::time::Duration::from_secs(10),
+        "snapshot build at full scale exceeded 10s: {first_build:?}"
+    );
+
+    // Second request within the TTL: cached, same ETag, fast.
+    let started = std::time::Instant::now();
+    let second = server.get("/attempts").await;
+    let cached_serve = started.elapsed();
+    assert_eq!(second.header("etag"), response.header("etag"));
+    assert!(cached_serve < std::time::Duration::from_secs(1));
+}

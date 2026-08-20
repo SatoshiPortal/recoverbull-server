@@ -150,3 +150,50 @@ async fn test_concurrent_trash_releases_secret_once() {
 
     assert_eq!(statuses, vec![202, 401]);
 }
+
+/// The F1 fix under race: 50 concurrent /store calls with the SAME payload
+/// must all return 201 (indistinguishable, the oracle stays closed) and
+/// create exactly one row (ON CONFLICT DO NOTHING is idempotent even when
+/// SQLite serializes the writers at the last moment).
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn test_concurrent_identical_store_is_idempotent() {
+    use diesel::{QueryDsl, RunQueryDsl};
+
+    let (addr, app_state) = spawn_server().await;
+
+    let body = format!(
+        "{{\"identifier\":\"{}\",\"authentication_key\":\"{}\",\"encrypted_secret\":\"{}\"}}",
+        crate::tests::SHA256_111111,
+        crate::tests::SHA256_222222,
+        crate::tests::BASE64_ENCRYPTED_SECRET
+    );
+
+    const N: usize = 50;
+    let mut handles = Vec::new();
+    for _ in 0..N {
+        let body = body.clone();
+        handles.push(tokio::spawn(
+            async move { raw_post(addr, "/store", body).await },
+        ));
+    }
+
+    let mut created = 0usize;
+    let mut other = Vec::new();
+    for h in handles {
+        match h.await.unwrap() {
+            201 => created += 1,
+            code => other.push(code),
+        }
+    }
+    assert_eq!(
+        created, N,
+        "every concurrent identical store must return 201, got: {other:?}"
+    );
+
+    let mut connection = crate::database::establish_connection(app_state.database_url);
+    let rows: i64 = crate::schema::secret::table
+        .count()
+        .get_result(&mut connection)
+        .unwrap();
+    assert_eq!(rows, 1, "concurrent identical stores must create one row");
+}

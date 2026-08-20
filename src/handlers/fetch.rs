@@ -5,7 +5,8 @@ use serde_json::json;
 
 use crate::database::{establish_connection, read_and_trash_secret_by_id, read_secret_by_id};
 use crate::models::{
-    error_body, retry_after_response, FetchSecret, RateLimitInfo, ResponseFailedAttempt,
+    error_body, retry_after_response, AttemptStatus, FetchSecret, RateLimitInfo,
+    ResponseFailedAttempt,
 };
 use crate::utils::{generate_secret_id, identifier_hash, is_256bits_hex_hash};
 
@@ -191,6 +192,7 @@ pub async fn fetch_secret(
             let info = identifier_rate_limit
                 .entry(identifier_hash.clone())
                 .or_insert(RateLimitInfo {
+                    window_started_at: current_time,
                     last_request: current_time,
                     attempts: 0,
                     failed_attempts: 0,
@@ -199,9 +201,18 @@ pub async fn fetch_secret(
             if info.attempts >= state.rate_limit_max_attempts {
                 Some(Err((info.attempts, info.last_request)))
             } else {
+                let previous_attempt_at = (info.attempts > 0).then_some(info.last_request);
                 info.attempts += 1;
                 info.last_request = current_time;
-                Some(Ok((info.attempts, info.last_request)))
+                let attempt_status = AttemptStatus {
+                    total_attempts: info.attempts,
+                    failed_attempts: info.failed_attempts,
+                    remaining_attempts: state.rate_limit_max_attempts.saturating_sub(info.attempts),
+                    window_started_at: info.window_started_at,
+                    previous_attempt_at,
+                    resets_at: info.last_request + state.rate_limit_cooldown,
+                };
+                Some(Ok((attempt_status, info.last_request)))
             }
         }
     };
@@ -215,7 +226,7 @@ pub async fn fetch_secret(
         );
     };
 
-    let (attempt_number, last_request) = match reservation {
+    let (attempt_status, last_request) = match reservation {
         Ok(admitted) => admitted,
         Err((attempts, last_request)) => {
             tracing::warn!("rate-limit lockout");
@@ -241,6 +252,7 @@ pub async fn fetch_secret(
             return http_response;
         }
     };
+    let attempt_number = attempt_status.total_attempts;
 
     // Armed now, right as the reservation above becomes real. It remains armed
     // while waiting for the database semaphore, because cancellation there
@@ -336,7 +348,9 @@ pub async fn fetch_secret(
             // A database hit does not prove ownership: an unauthenticated
             // caller may have planted the row through `/store`. Therefore a
             // successful lookup must not reset or discount the security
-            // counter.
+            // counter. The attempt counters captured at reservation time are
+            // reported so the client can detect lookups it did not make —
+            // including hits on planted rows, which never count as failures.
             let code = if is_trashing_secret {
                 StatusCode::ACCEPTED
             } else {
@@ -344,12 +358,16 @@ pub async fn fetch_secret(
             };
 
             tracing::info!(
-                attempts = attempt_number,
+                attempts = attempt_status.total_attempts,
+                failed_attempts = attempt_status.failed_attempts,
                 is_trash = is_trashing_secret,
                 "secret released"
             );
 
-            (code, Json(json!(&key))).into_response()
+            let mut response = json!(&key);
+            response["attempt_status"] = json!(attempt_status);
+
+            (code, Json(response)).into_response()
         }
 
         Ok(None) => {

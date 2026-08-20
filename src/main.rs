@@ -10,10 +10,19 @@ mod schema;
 mod tests;
 mod utils;
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 
+use axum::body::Bytes;
 use chrono::TimeDelta;
 use tokio::sync::{Mutex, Semaphore};
+
+/// Immutable `/attempts` representation: serialized and compressed at most
+/// once per TTL window, then shared by every response without copying.
+struct AttemptsSnapshotCache {
+    gzip_body: Arc<Bytes>,
+    etag: String,
+    created_at: Instant,
+}
 
 #[derive(Clone)]
 struct AppState {
@@ -41,8 +50,12 @@ struct AppState {
     rate_limit_max_attempts: u8,
     store_token_bucket: Arc<Mutex<rate_limit::TokenBucket>>,
     lookup_token_bucket: Arc<Mutex<rate_limit::TokenBucket>>,
+    attempts_token_bucket: Arc<Mutex<rate_limit::TokenBucket>>,
     rate_limit_max_identifiers: usize,
     database_semaphore: Arc<Semaphore>,
+    attempts_collection_started_at: chrono::DateTime<chrono::Utc>,
+    attempts_snapshot: Arc<Mutex<Option<AttemptsSnapshotCache>>>,
+    attempts_snapshot_ttl: std::time::Duration,
 }
 
 #[tokio::main]

@@ -1,4 +1,5 @@
 use base64::{prelude::BASE64_STANDARD, Engine};
+use chrono::DurationRound;
 use sha2::{Digest, Sha256};
 
 fn is_hex(input: &str) -> bool {
@@ -28,6 +29,15 @@ pub fn sha256_hex(data: &[u8]) -> String {
 
 pub fn identifier_hash(identifier: &str) -> Option<String> {
     hex::decode(identifier).ok().map(|raw| sha256_hex(&raw))
+}
+
+/// Rounds a timestamp down to the hour in UTC. Public telemetry uses this
+/// precision: enough to tell the user when activity happened, too coarse to
+/// correlate it with other events.
+pub fn truncate_to_hour(timestamp: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<chrono::Utc> {
+    timestamp
+        .duration_trunc(chrono::Duration::hours(1))
+        .expect("hour truncation of a valid timestamp")
 }
 
 pub fn generate_secret_id(identifier: &str, authentication_key: &str) -> String {

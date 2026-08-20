@@ -1,6 +1,7 @@
 use crate::env::{
-    canary_file_state, validate_capacity, validate_config, validate_snapshot_ttl,
-    validate_token_bucket, CanaryFileState, MAX_DATABASE_CONCURRENCY, MAX_RATE_LIMIT_IDENTIFIERS,
+    canary_file_state, unique_test_database, validate_capacity, validate_config,
+    validate_snapshot_ttl, validate_token_bucket, CanaryFileState, MAX_DATABASE_CONCURRENCY,
+    MAX_RATE_LIMIT_IDENTIFIERS,
 };
 
 #[test]
@@ -32,8 +33,30 @@ fn test_validate_config_rejects_zero_secret_max_length() {
 }
 
 #[test]
-fn test_validate_config_rejects_zero_max_failed_attempts() {
+fn test_validate_config_rejects_zero_max_attempts() {
     assert!(validate_config(1440, 128, 0).is_err());
+}
+
+#[test]
+fn test_database_guard_removes_database_and_sqlite_sidecars_after_last_clone() {
+    let (database_url, guard) = unique_test_database();
+    let database = std::path::PathBuf::from(&database_url);
+    let wal = std::path::PathBuf::from(format!("{database_url}-wal"));
+    let shm = std::path::PathBuf::from(format!("{database_url}-shm"));
+    std::fs::write(&database, b"database").unwrap();
+    std::fs::write(&wal, b"wal").unwrap();
+    std::fs::write(&shm, b"shm").unwrap();
+
+    let clone = guard.clone();
+    drop(guard);
+    assert!(database.exists());
+    assert!(wal.exists());
+    assert!(shm.exists());
+
+    drop(clone);
+    assert!(!database.exists());
+    assert!(!wal.exists());
+    assert!(!shm.exists());
 }
 
 #[test]

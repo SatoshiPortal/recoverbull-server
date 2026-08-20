@@ -198,9 +198,7 @@ pub async fn fetch_secret(
                 let attempt_status = AttemptStatus {
                     total_attempts: info.attempts,
                     failed_attempts: info.failed_attempts,
-                    remaining_attempts: state
-                        .rate_limit_max_failed_attempts
-                        .saturating_sub(info.attempts),
+                    remaining_attempts: state.rate_limit_max_failed_attempts.saturating_sub(info.attempts),
                     window_started_at: info.window_started_at,
                     previous_attempt_at,
                     resets_at: info.last_request + state.rate_limit_cooldown,
@@ -285,7 +283,11 @@ pub async fn fetch_secret(
     // caller can read and delete a secret.
     let database_url = state.database_url.clone();
     let key_id_for_db = key_id.clone();
+    #[cfg(test)]
+    let test_database_guard = state._test_database_guard.clone();
     let task = tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        let _test_database_guard = test_database_guard;
         let _database_permit = database_permit;
         let mut connection = establish_connection(database_url);
         if is_trashing_secret {
@@ -299,7 +301,6 @@ pub async fn fetch_secret(
     let result = match task {
         Ok(result) => result,
         Err(error) => {
-            attempt_guard.disarm();
             refund_attempt(&state, &identifier_hash).await;
             tracing::error!(error = %error, "database task panicked");
             return (
@@ -318,7 +319,6 @@ pub async fn fetch_secret(
             // Log discipline: the diesel error carries the SQLite message
             // only — never log identifiers, keys or request bodies.
             tracing::error!(error = %e, "database error on fetch");
-            attempt_guard.disarm();
             refund_attempt(&state, &identifier_hash).await;
 
             (

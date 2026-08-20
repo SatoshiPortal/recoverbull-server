@@ -28,6 +28,8 @@ struct AttemptsSnapshotCache {
 struct AppState {
     server_address: String,
     database_url: String,
+    #[cfg(test)]
+    _test_database_guard: Arc<env::TestDatabaseGuard>,
     /// Warrant canary captured at startup. Serves as the fallback when the
     /// dotenv file is unreadable, and as the authoritative value when it
     /// came from the process environment.

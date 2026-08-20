@@ -1,15 +1,6 @@
 use chrono::Duration;
 use dotenvy::dotenv;
-use std::{
-    collections::HashMap,
-    env,
-    fmt::Display,
-    str::FromStr,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
-};
+use std::{collections::HashMap, env, fmt::Display, str::FromStr, sync::Arc};
 use tokio::sync::{Mutex, Semaphore};
 
 use crate::AppState;
@@ -36,9 +27,29 @@ where
 /// Every test calls `env::init()`, so each test gets its own SQLite file:
 /// without this, all tests shared a single file and ran into each other's
 /// data under `cargo test`'s parallel execution.
-fn unique_test_database_url() -> String {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let count = COUNTER.fetch_add(1, Ordering::Relaxed);
+#[cfg(test)]
+pub(crate) struct TestDatabaseGuard {
+    path: std::path::PathBuf,
+}
+
+#[cfg(test)]
+impl Drop for TestDatabaseGuard {
+    fn drop(&mut self) {
+        for suffix in ["", "-wal", "-shm"] {
+            let path = if suffix.is_empty() {
+                self.path.clone()
+            } else {
+                std::path::PathBuf::from(format!("{}{}", self.path.display(), suffix))
+            };
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn unique_test_database() -> (String, Arc<TestDatabaseGuard>) {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let count = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -49,14 +60,15 @@ fn unique_test_database_url() -> String {
         count,
         nanos
     ));
-    path.to_string_lossy().into_owned()
+    let url = path.to_string_lossy().into_owned();
+    (url, Arc::new(TestDatabaseGuard { path }))
 }
 
 /// Validates the security-critical configuration values.
 ///
 /// A non-positive rate-limit cooldown would silently disable rate-limiting
 /// entirely (the cooldown check would always be elapsed), and a zero
-/// max_failed_attempts or secret_max_length makes the service unusable.
+/// max_attempts or secret_max_length makes the service unusable.
 /// The server must refuse to start rather than run degraded.
 pub fn validate_config(
     rate_limit_cooldown: i64,
@@ -254,18 +266,34 @@ pub fn init() -> AppState {
         env::var("RATE_LIMIT_COOLDOWN").expect("RATE_LIMIT_COOLDOWN must be set");
     let secret_max_length = env::var("SECRET_MAX_LENGTH").expect("SECRET_MAX_LENGTH must be set");
     let canary = env::var("CANARY").expect("CANARY must be set");
-    let rate_limit_max_failed_attempts = env::var("RATE_LIMIT_MAX_FAILED_ATTEMPTS")
-        .expect("RATE_LIMIT_MAX_FAILED_ATTEMPTS must be set");
+    let (rate_limit_max_failed_attempts_name, rate_limit_max_failed_attempts) = match env::var(
+        "RATE_LIMIT_MAX_FAILED_ATTEMPTS",
+    ) {
+        Ok(value) => ("RATE_LIMIT_MAX_FAILED_ATTEMPTS", value),
+        Err(env::VarError::NotPresent) => match env::var("RATE_LIMIT_MAX_FAILED_ATTEMPTS") {
+            Ok(value) => {
+                #[cfg(not(test))]
+                eprintln!(
+                        "Warning: RATE_LIMIT_MAX_FAILED_ATTEMPTS is deprecated; use RATE_LIMIT_MAX_FAILED_ATTEMPTS"
+                    );
+                ("RATE_LIMIT_MAX_FAILED_ATTEMPTS", value)
+            }
+            Err(env::VarError::NotPresent) => panic!("RATE_LIMIT_MAX_FAILED_ATTEMPTS must be set"),
+            Err(error) => panic!("cannot read RATE_LIMIT_MAX_FAILED_ATTEMPTS: {error}"),
+        },
+        Err(error) => panic!("cannot read RATE_LIMIT_MAX_FAILED_ATTEMPTS: {error}"),
+    };
 
-    let database_url = if cfg!(test) {
+    #[cfg(test)]
+    let (database_url, test_database_guard) = {
         // TEST_DATABASE_URL is fully optional and, if set, deliberately
         // ignored here: every call must get its own unique path so that
         // tests never share a database file, including under cargo test's
         // parallel execution within the same process.
-        unique_test_database_url()
-    } else {
-        env::var("DATABASE_URL").expect("DATABASE_URL must be set")
+        unique_test_database()
     };
+    #[cfg(not(test))]
+    let database_url = { env::var("DATABASE_URL").expect("DATABASE_URL must be set") };
 
     let rate_limit_cooldown = match rate_limit_cooldown.parse::<i64>() {
         Ok(number) => number,
@@ -286,7 +314,7 @@ pub fn init() -> AppState {
     let rate_limit_max_failed_attempts = match rate_limit_max_failed_attempts.parse::<u8>() {
         Ok(number) => number,
         Err(e) => {
-            println!("Error: RATE_LIMIT_MAX_FAILED_ATTEMPTS must be a u8: {}", e);
+            println!("Error: {rate_limit_max_failed_attempts_name} must be a u8: {e}");
             std::process::exit(1);
         }
     };
@@ -352,6 +380,8 @@ pub fn init() -> AppState {
     AppState {
         server_address: server_addr,
         database_url,
+        #[cfg(test)]
+        _test_database_guard: test_database_guard,
         canary,
         canary_from_env,
         canary_path: dotenv_path.unwrap_or_else(|| std::path::PathBuf::from(".env")),

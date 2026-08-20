@@ -104,7 +104,11 @@ pub async fn store_secret(
     // diesel is synchronous: run the write on a blocking thread so it
     // cannot stall the async workers
     let database_url = state.database_url.clone();
+    #[cfg(test)]
+    let test_database_guard = state._test_database_guard.clone();
     let task = tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        let _test_database_guard = test_database_guard;
         let _database_permit = database_permit;
         let mut connection = establish_connection(database_url);
         crate::database::write(&mut connection, &key)

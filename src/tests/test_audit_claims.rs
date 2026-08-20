@@ -21,7 +21,19 @@ use axum::http::StatusCode;
 /// (no new oracle may be introduced).
 #[tokio::test]
 async fn test_audit_f1_store_gives_no_existence_signal() {
-    let (server, _) = crate::tests::test_server::new_test_server().await;
+    // Dedicated store bucket with no refill: the 12 stores below must not
+    // depend on the environment-provided bucket (burst defaults to 10 in the
+    // README while CI and the repo .env set 10000), otherwise the final
+    // assertion fails on a 503 for a reason unrelated to the oracle.
+    let mut app_state = crate::env::init();
+    app_state.store_token_bucket = std::sync::Arc::new(tokio::sync::Mutex::new(
+        crate::rate_limit::TokenBucket::new(12.0, 0.0),
+    ));
+    crate::database::init_db(app_state.clone());
+    let app = crate::router::new(app_state.clone());
+    let mut connection = crate::database::establish_connection(app_state.clone().database_url);
+    crate::tests::test_server::clear_table_secret(&mut connection).await;
+    let server = axum_test::TestServer::new(app).unwrap();
 
     let store = &StoreSecret {
         identifier: SHA256_111111.to_string(),

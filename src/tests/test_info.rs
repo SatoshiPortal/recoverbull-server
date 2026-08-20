@@ -15,6 +15,11 @@ async fn test_info_success() {
     );
     assert_eq!(info.secret_max_length, state.secret_max_length);
     assert_eq!(info.canary, "🐦");
+    assert_eq!(info.rate_limit_max_attempts, state.rate_limit_max_attempts);
+    assert_eq!(
+        info.rate_limit_max_failed_attempts, info.rate_limit_max_attempts,
+        "the legacy info field must mirror the canonical field"
+    );
     assert_eq!(
         info.max_attempt_identifiers,
         state.rate_limit_max_identifiers

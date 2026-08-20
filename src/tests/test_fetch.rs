@@ -58,7 +58,7 @@ async fn test_fetch_success_reports_exact_attempt_status() {
     assert_eq!(status["failed_attempts"], 0);
     assert_eq!(
         status["remaining_attempts"],
-        state.rate_limit_max_failed_attempts - 1
+        state.rate_limit_max_attempts - 1
     );
     assert!(status["previous_attempt_at"].is_null());
 
@@ -148,7 +148,7 @@ async fn test_fetch_rate_limit_enforced_and_reset_after_cooldown() {
     };
 
     // trigger rate limit by attempting many fail attempts
-    for i in 0..state.rate_limit_max_failed_attempts {
+    for i in 0..state.rate_limit_max_attempts {
         let response = server
             .post("/fetch")
             .json(&fetch_wrong_authentication_key)
@@ -168,10 +168,7 @@ async fn test_fetch_rate_limit_enforced_and_reset_after_cooldown() {
         .await;
 
     let failed_attempt = response.json::<ResponseFailedAttempt>();
-    assert_eq!(
-        failed_attempt.attempts,
-        state.rate_limit_max_failed_attempts
-    );
+    assert_eq!(failed_attempt.attempts, state.rate_limit_max_attempts);
     assert_eq!(response.status_code(), StatusCode::TOO_MANY_REQUESTS);
 
     // Simulate cooldown expiry by aging the in-memory entry directly instead

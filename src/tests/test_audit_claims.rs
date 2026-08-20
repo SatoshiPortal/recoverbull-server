@@ -64,7 +64,7 @@ async fn test_audit_f1_planted_rows_cannot_reset_fetch_rate_limit() {
         .expect_success()
         .await;
 
-    for i in 0..state.rate_limit_max_failed_attempts {
+    for i in 0..state.rate_limit_max_attempts {
         let guessed_key = format!("{:064x}", i + 1);
         let marker = "dGVzdA==";
 
@@ -119,7 +119,7 @@ async fn test_audit_f2_attacker_failures_deny_legitimate_owner() {
     server.post("/store").json(store).expect_success().await;
 
     // the attacker exhausts the attempts with a wrong key
-    for _ in 0..state.rate_limit_max_failed_attempts {
+    for _ in 0..state.rate_limit_max_attempts {
         let response = server
             .post("/fetch")
             .json(&FetchSecret {

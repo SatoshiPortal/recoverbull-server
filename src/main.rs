@@ -47,7 +47,7 @@ struct AppState {
     rate_limit_cooldown: TimeDelta,
     identifier_rate_limit: Arc<Mutex<HashMap<String, models::RateLimitInfo>>>,
     secret_max_length: usize,
-    rate_limit_max_failed_attempts: u8,
+    rate_limit_max_attempts: u8,
     store_token_bucket: Arc<Mutex<rate_limit::TokenBucket>>,
     lookup_token_bucket: Arc<Mutex<rate_limit::TokenBucket>>,
     attempts_token_bucket: Arc<Mutex<rate_limit::TokenBucket>>,

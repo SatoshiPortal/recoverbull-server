@@ -73,7 +73,7 @@ pub(crate) fn unique_test_database() -> (String, Arc<TestDatabaseGuard>) {
 pub fn validate_config(
     rate_limit_cooldown: i64,
     secret_max_length: usize,
-    rate_limit_max_failed_attempts: u8,
+    rate_limit_max_attempts: u8,
 ) -> Result<(), String> {
     if rate_limit_cooldown <= 0 {
         return Err(format!(
@@ -92,8 +92,8 @@ pub fn validate_config(
     if secret_max_length == 0 {
         return Err("SECRET_MAX_LENGTH must be greater than 0".to_string());
     }
-    if rate_limit_max_failed_attempts == 0 {
-        return Err("RATE_LIMIT_MAX_FAILED_ATTEMPTS must be at least 1".to_string());
+    if rate_limit_max_attempts == 0 {
+        return Err("RATE_LIMIT_MAX_ATTEMPTS must be at least 1".to_string());
     }
     Ok(())
 }
@@ -266,22 +266,22 @@ pub fn init() -> AppState {
         env::var("RATE_LIMIT_COOLDOWN").expect("RATE_LIMIT_COOLDOWN must be set");
     let secret_max_length = env::var("SECRET_MAX_LENGTH").expect("SECRET_MAX_LENGTH must be set");
     let canary = env::var("CANARY").expect("CANARY must be set");
-    let (rate_limit_max_failed_attempts_name, rate_limit_max_failed_attempts) = match env::var(
-        "RATE_LIMIT_MAX_FAILED_ATTEMPTS",
+    let (rate_limit_max_attempts_name, rate_limit_max_attempts) = match env::var(
+        "RATE_LIMIT_MAX_ATTEMPTS",
     ) {
-        Ok(value) => ("RATE_LIMIT_MAX_FAILED_ATTEMPTS", value),
+        Ok(value) => ("RATE_LIMIT_MAX_ATTEMPTS", value),
         Err(env::VarError::NotPresent) => match env::var("RATE_LIMIT_MAX_FAILED_ATTEMPTS") {
             Ok(value) => {
                 #[cfg(not(test))]
                 eprintln!(
-                        "Warning: RATE_LIMIT_MAX_FAILED_ATTEMPTS is deprecated; use RATE_LIMIT_MAX_FAILED_ATTEMPTS"
+                        "Warning: RATE_LIMIT_MAX_FAILED_ATTEMPTS is deprecated; use RATE_LIMIT_MAX_ATTEMPTS"
                     );
                 ("RATE_LIMIT_MAX_FAILED_ATTEMPTS", value)
             }
-            Err(env::VarError::NotPresent) => panic!("RATE_LIMIT_MAX_FAILED_ATTEMPTS must be set"),
+            Err(env::VarError::NotPresent) => panic!("RATE_LIMIT_MAX_ATTEMPTS must be set"),
             Err(error) => panic!("cannot read RATE_LIMIT_MAX_FAILED_ATTEMPTS: {error}"),
         },
-        Err(error) => panic!("cannot read RATE_LIMIT_MAX_FAILED_ATTEMPTS: {error}"),
+        Err(error) => panic!("cannot read RATE_LIMIT_MAX_ATTEMPTS: {error}"),
     };
 
     #[cfg(test)]
@@ -311,10 +311,10 @@ pub fn init() -> AppState {
         }
     };
 
-    let rate_limit_max_failed_attempts = match rate_limit_max_failed_attempts.parse::<u8>() {
+    let rate_limit_max_attempts = match rate_limit_max_attempts.parse::<u8>() {
         Ok(number) => number,
         Err(e) => {
-            println!("Error: {rate_limit_max_failed_attempts_name} must be a u8: {e}");
+            println!("Error: {rate_limit_max_attempts_name} must be a u8: {e}");
             std::process::exit(1);
         }
     };
@@ -322,7 +322,7 @@ pub fn init() -> AppState {
     if let Err(e) = validate_config(
         rate_limit_cooldown,
         secret_max_length,
-        rate_limit_max_failed_attempts,
+        rate_limit_max_attempts,
     ) {
         println!("Error: {}", e);
         std::process::exit(1);
@@ -389,7 +389,7 @@ pub fn init() -> AppState {
         rate_limit_cooldown: Duration::minutes(rate_limit_cooldown as i64),
         identifier_rate_limit: Arc::new(Mutex::new(HashMap::new())),
         secret_max_length,
-        rate_limit_max_failed_attempts,
+        rate_limit_max_attempts,
         store_token_bucket: Arc::new(Mutex::new(crate::rate_limit::TokenBucket::new(
             store_rate_limit_burst,
             store_rate_limit_refill,

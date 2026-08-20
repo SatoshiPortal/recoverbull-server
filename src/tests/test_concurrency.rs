@@ -119,10 +119,10 @@ async fn test_rate_limit_holds_under_concurrency() {
 
     assert_eq!(other, 0, "unexpected status codes");
     assert_eq!(
-        unauthorized, state.rate_limit_max_failed_attempts as usize,
+        unauthorized, state.rate_limit_max_attempts as usize,
         "rate limit bypassed: more guesses consumed than allowed"
     );
-    assert_eq!(too_many, N - state.rate_limit_max_failed_attempts as usize);
+    assert_eq!(too_many, N - state.rate_limit_max_attempts as usize);
 }
 
 /// Reading and deleting must be one atomic operation. Otherwise concurrent

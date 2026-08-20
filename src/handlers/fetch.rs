@@ -189,7 +189,7 @@ pub async fn fetch_secret(
                     failed_attempts: 0,
                 });
 
-            if info.attempts >= state.rate_limit_max_failed_attempts {
+            if info.attempts >= state.rate_limit_max_attempts {
                 Some(Err((info.attempts, info.last_request)))
             } else {
                 let previous_attempt_at = (info.attempts > 0).then_some(info.last_request);
@@ -198,7 +198,7 @@ pub async fn fetch_secret(
                 let attempt_status = AttemptStatus {
                     total_attempts: info.attempts,
                     failed_attempts: info.failed_attempts,
-                    remaining_attempts: state.rate_limit_max_failed_attempts.saturating_sub(info.attempts),
+                    remaining_attempts: state.rate_limit_max_attempts.saturating_sub(info.attempts),
                     window_started_at: info.window_started_at,
                     previous_attempt_at,
                     resets_at: info.last_request + state.rate_limit_cooldown,

@@ -247,7 +247,7 @@ async fn test_successful_fetch_is_not_refunded() {
 async fn test_429_does_not_consume_budget() {
     let (server, state) = crate::tests::test_server::new_test_server().await;
 
-    for _ in 0..state.rate_limit_max_failed_attempts {
+    for _ in 0..state.rate_limit_max_attempts {
         server
             .post("/fetch")
             .json(&FetchSecret {
@@ -269,7 +269,7 @@ async fn test_429_does_not_consume_budget() {
     let map = state.identifier_rate_limit.lock().await;
     let info = &map[&identifier_hash(SHA256_111111).unwrap()];
     assert_eq!(
-        info.attempts, state.rate_limit_max_failed_attempts,
+        info.attempts, state.rate_limit_max_attempts,
         "a 429 must not consume budget"
     );
 }
@@ -286,7 +286,7 @@ async fn test_full_map_does_not_evict_protected_identifier() {
     let server = axum_test::TestServer::new(crate::router::new(state.clone())).unwrap();
 
     // lock out the first identifier
-    for _ in 0..state.rate_limit_max_failed_attempts {
+    for _ in 0..state.rate_limit_max_attempts {
         server
             .post("/fetch")
             .json(&FetchSecret {
@@ -356,7 +356,7 @@ async fn test_remaining_attempts_relationship() {
     assert_eq!(total, 1);
     assert_eq!(
         remaining,
-        state.rate_limit_max_failed_attempts - total,
+        state.rate_limit_max_attempts - total,
         "remaining must equal max - total_attempts"
     );
 
@@ -383,7 +383,7 @@ async fn test_remaining_attempts_relationship() {
     assert_eq!(total, 3);
     assert_eq!(
         remaining,
-        state.rate_limit_max_failed_attempts - total,
+        state.rate_limit_max_attempts - total,
         "remaining must equal max - total_attempts"
     );
 }
@@ -620,7 +620,7 @@ async fn test_error_responses_leak_no_secret_material() {
     assert!(!body.contains(SHA256_222222));
 
     // drive to 429
-    for _ in 0..state.rate_limit_max_failed_attempts {
+    for _ in 0..state.rate_limit_max_attempts {
         server
             .post("/fetch")
             .json(&FetchSecret {
@@ -867,7 +867,7 @@ async fn test_resets_at_slides_forward_with_each_attempt() {
 async fn test_429_requested_at_is_the_last_admitted_attempt() {
     let (server, state) = crate::tests::test_server::new_test_server().await;
 
-    for _ in 0..state.rate_limit_max_failed_attempts {
+    for _ in 0..state.rate_limit_max_attempts {
         server
             .post("/fetch")
             .json(&FetchSecret {
@@ -1322,7 +1322,7 @@ async fn test_500_does_not_leak_internals() {
 #[tokio::test]
 async fn test_lockout_boundary_is_exact() {
     let (server, state) = crate::tests::test_server::new_test_server().await;
-    let max = state.rate_limit_max_failed_attempts;
+    let max = state.rate_limit_max_attempts;
 
     // the first `max` attempts are all admitted (401)
     for i in 1..=max {
@@ -1513,7 +1513,7 @@ async fn test_resets_at_is_in_the_future_for_active_entry() {
 #[tokio::test]
 async fn test_attempts_counter_does_not_overflow_at_u8_max() {
     let mut state = crate::env::init();
-    state.rate_limit_max_failed_attempts = 255;
+    state.rate_limit_max_attempts = 255;
     crate::database::init_db(state.clone());
     let server = axum_test::TestServer::new(crate::router::new(state.clone())).unwrap();
 

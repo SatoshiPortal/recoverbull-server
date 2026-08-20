@@ -143,7 +143,7 @@ async fn test_targeted_429_has_targeted_metadata() {
     let (server, state) = crate::tests::test_server::new_test_server().await;
 
     // exhaust the per-identifier budget
-    for _ in 0..state.rate_limit_max_failed_attempts {
+    for _ in 0..state.rate_limit_max_attempts {
         server
             .post("/fetch")
             .json(&FetchSecret {

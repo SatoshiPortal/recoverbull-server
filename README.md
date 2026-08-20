@@ -135,7 +135,15 @@ Detection semantics a client should implement:
 - **`attempt_status` on a successful fetch is the freshest signal**: it needs no extra request and stays available even when `/attempts` is overloaded. Failures older than the cooldown expire (entries are swept and forgotten), but a success never resets the counters early.
 - **Telemetry is advisory**: the server cannot distinguish an attacker from the user or another of the user's devices, and a compromised server can fabricate or suppress counters. Clients must warn, never act automatically.
 
-`GET /info` complements the snapshot with two static fields: `attempts_collection_started_at` (hour-truncated, same value as the snapshot — a cheap wipe check during the existing connection check) and `max_attempt_identifiers` (the configured map capacity, so a client can compute the snapshot fullness ratio and warn when the service is under pressure). `/info` never exposes a live identifier count: that would make map-filling campaigns cheap to monitor.
+`GET /info` exposes `rate_limit_max_attempts`, the total per-identifier lookup
+budget. The response also retains `rate_limit_max_failed_attempts` as a
+legacy alias with the same value. It complements the snapshot with two static
+fields: `attempts_collection_started_at` (hour-truncated, same value as the
+snapshot — a cheap wipe check during the existing connection check) and
+`max_attempt_identifiers` (the configured map capacity, so a client can
+compute the snapshot fullness ratio and warn when the service is under
+pressure). `/info` never exposes a live identifier count: that would make
+map-filling campaigns cheap to monitor.
 
 
 
@@ -234,13 +242,11 @@ sudo cat /var/lib/tor/recoverbull/hostname
 
 ```sh
 echo "DATABASE_URL=production_db.sqlite3" >> .env && \
-echo "TEST_DATABASE_URL=test_db.sqlite3" >> .env && \
 echo "SERVER_ADDRESS=127.0.0.1:3001" >> .env && \
 echo "SECRET_MAX_LENGTH=128" >> .env && \
 echo "CANARY='🐦'" >> .env && \
 echo "RATE_LIMIT_COOLDOWN=1440" >> .env && \
-echo "RATE_LIMIT_MAX_FAILED_ATTEMPTS=3" >> .env && \
-echo "MIGRATIONS_DIR=$(pwd)/migrations" >> .env
+echo "RATE_LIMIT_MAX_ATTEMPTS=3" >> .env
 ```
 
 The file holds the database path and the canary: keep it readable by the
@@ -248,9 +254,9 @@ service account only (`chmod 600 .env`, same `0700` directory discipline as
 the database volume).
 
 `CANARY` is the warrant canary served by `/info`. When it is provided by
-this file (the common case), it is **re-read from the file on every `/info`
-request**, following the whitepaper's warrant-canary workflow without a
-restart:
+this file (the common case), `/info` checks the file metadata on every request
+and re-reads it whenever it changes, following the whitepaper's warrant-canary
+workflow without a restart:
 
 - **Edit the value** → the new value is served immediately.
 - **Remove the `CANARY` line** → an **empty** canary is served: this is the
@@ -283,9 +289,12 @@ can admit at most 172,810 requests. Every admitted request consumes a token,
 including an idempotent duplicate that does not create a new row. If every
 request has a new identifier and a maximum-size secret, SQLite grows by about
 43 to 86 MB/day, depending on page and index overhead.
-`RATE_LIMIT_MAX_FAILED_ATTEMPTS` is the legacy configuration name for the
-per-identifier lookup budget; database hits consume it as well as misses.
-The `remaining_attempts` field of `attempt_status` derives from it.
+`RATE_LIMIT_MAX_ATTEMPTS` is the canonical configuration name for the
+per-identifier lookup budget. Every lookup consumes it, including database
+hits and misses. If the canonical variable is absent, the server accepts
+`RATE_LIMIT_MAX_FAILED_ATTEMPTS` as a deprecated legacy alias and logs a
+warning; when both are present, the canonical variable wins. The
+`remaining_attempts` field of `attempt_status` derives from it.
 The lookup bucket is a separate global safety limit for `/fetch` and `/trash`.
 The attempts bucket is a third global limit for `GET /attempts`, sized for
 direct cache-bypass traffic; the reverse-proxy cache absorbs normal reads.
@@ -308,7 +317,8 @@ The server embeds the migrations and runs them automatically at startup. A
 legacy database that has `secret` but no `__diesel_schema_migrations` ledger is
 adopted only when its schema exactly matches migration `0001`; adoption creates
 the ledger entry without creating or modifying any `secret` row. An incompatible
-legacy schema stops startup. This temporary bridge can be removed after all databases have been adopted. The project requires Rust 1.97.0 (see
+legacy schema stops startup. This temporary bridge can be removed after all
+databases have been adopted. The project requires Rust 1.97.0 (see
 `rust-toolchain.toml`).
 
 ### Storage quota

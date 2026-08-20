@@ -27,7 +27,7 @@ async fn test_database_error_returns_500_without_consuming_attempts() {
     };
 
     // More requests than max_failed_attempts: none may be 401 or 429.
-    for _ in 0..(state.rate_limit_max_failed_attempts + 2) {
+    for _ in 0..(state.rate_limit_max_attempts + 2) {
         let response = server.post("/fetch").json(fetch).await;
         assert_eq!(
             response.status_code(),

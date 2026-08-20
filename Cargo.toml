@@ -4,15 +4,17 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-sha2 = "0.9"
+sha2 = "0.10"
 axum = "0.7.7"
-dotenv = "0.15.0"
+dotenvy = "0.15"
 tokio = { version = "1.40", features = ["full"] }
 serde = { version = "1.0.210", features = ["derive"] }
-diesel = { version = "2.2", features = ["sqlite"] }
+diesel = { version = "2.3", features = ["sqlite"] }
 chrono = { version = "0.4.38", features = ["serde"] }
 tower-http = { version = "0.6.1", features = ["cors"] }
 serde_json = "1.0"
-axum-test = "16.2.0"
 hex = "0.4.3"
 base64 = "0.22.1"
+
+[dev-dependencies]
+axum-test = "16.2.0"

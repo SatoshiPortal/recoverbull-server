@@ -1,4 +1,5 @@
 use base64::{prelude::BASE64_STANDARD, Engine};
+use chrono::DurationRound;
 use sha2::{Digest, Sha256};
 
 fn is_hex(input: &str) -> bool {
@@ -6,7 +7,7 @@ fn is_hex(input: &str) -> bool {
 }
 
 pub fn is_base64(input: &str) -> bool {
-    if input.len() % 4 != 0 {
+    if !input.len().is_multiple_of(4) {
         return false;
     }
     BASE64_STANDARD.decode(input).is_ok()
@@ -20,14 +21,29 @@ pub fn is_256bits_hex_hash(input: &str) -> bool {
     is_length(64, input) && is_hex(input)
 }
 
+pub fn sha256_hex(data: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    hex::encode(hasher.finalize())
+}
+
+pub fn identifier_hash(identifier: &str) -> Option<String> {
+    hex::decode(identifier).ok().map(|raw| sha256_hex(&raw))
+}
+
+/// Rounds a timestamp down to the hour in UTC. Public telemetry uses this
+/// precision: enough to tell the user when activity happened, too coarse to
+/// correlate it with other events.
+pub fn truncate_to_hour(timestamp: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<chrono::Utc> {
+    timestamp
+        .duration_trunc(chrono::Duration::hours(1))
+        .expect("hour truncation of a valid timestamp")
+}
+
 pub fn generate_secret_id(identifier: &str, authentication_key: &str) -> String {
     let mut identifier_and_authentication_key = Vec::new();
     identifier_and_authentication_key.extend_from_slice(identifier.as_bytes());
     identifier_and_authentication_key.extend_from_slice(authentication_key.as_bytes());
 
-    let mut hasher = Sha256::new();
-    hasher.update(&identifier_and_authentication_key);
-
-    let secret_id = hasher.finalize();
-    hex::encode(secret_id)
+    sha256_hex(&identifier_and_authentication_key)
 }

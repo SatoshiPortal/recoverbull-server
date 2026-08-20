@@ -302,11 +302,14 @@ the server refuses to start instead.
 > `SECRET_MAX_LENGTH=128` represents the size of a 96 octets encrypted secret encoded using base64
 > 96 octets =  `nonce` (16 octets) | `ciphertext` (32 octets) | `hmac` (32 octets) + 16 octets padding to round up to 32 octets blocks
 
-### execute migrations
+### Migrations
 
-```sh
-diesel migration run
-```
+The server embeds the migrations and runs them automatically at startup. A
+legacy database that has `secret` but no `__diesel_schema_migrations` ledger is
+adopted only when its schema exactly matches migration `0001`; adoption creates
+the ledger entry without creating or modifying any `secret` row. An incompatible
+legacy schema stops startup. This temporary bridge can be removed after all
+databases have been adopted.
 
 ### Storage quota
 

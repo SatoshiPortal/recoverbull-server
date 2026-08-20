@@ -15,7 +15,7 @@ async fn test_database_error_returns_500_without_consuming_attempts() {
     let (server, state) = crate::tests::test_server::new_test_server().await;
 
     // Force every subsequent query to fail: drop the table out from under
-    // the server. init_db recreates it on the next test (IF NOT EXISTS).
+    // the server. Database initialization is tested separately.
     let mut connection = crate::database::establish_connection(state.clone().database_url);
     diesel::sql_query("DROP TABLE secret")
         .execute(&mut connection)

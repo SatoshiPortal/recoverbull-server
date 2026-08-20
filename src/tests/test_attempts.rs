@@ -26,16 +26,14 @@ fn assert_hour_truncated(timestamp: chrono::DateTime<chrono::Utc>) {
 async fn test_attempts_publish_hashed_identifier_with_counters() {
     let (server, _) = crate::tests::test_server::new_test_server().await;
 
-    let fetch_wrong_authentication_key = &FetchSecret {
-        identifier: SHA256_111111.to_string(),
-        authentication_key: NOT_PASSWORD_HASH.to_string(),
-    };
-
     // two failed attempts
-    for _ in 0..2 {
+    for index in 0..2 {
         let response = server
             .post("/fetch")
-            .json(&fetch_wrong_authentication_key)
+            .json(&FetchSecret {
+                identifier: SHA256_111111.to_string(),
+                authentication_key: crate::tests::distinct_candidate(index),
+            })
             .expect_failure()
             .await;
         assert_eq!(response.status_code(), StatusCode::UNAUTHORIZED);
@@ -59,6 +57,7 @@ async fn test_attempts_publish_hashed_identifier_with_counters() {
     assert_eq!(entry.id_hash, expected_id_hash);
     assert_eq!(entry.total_attempts, 2);
     assert_eq!(entry.failed_attempts, 2);
+    assert_eq!(entry.total_requests, 2);
     assert_hour_truncated(entry.window_started_at);
     assert_hour_truncated(entry.last_attempt_at);
 }
@@ -88,12 +87,12 @@ async fn test_attempts_count_hits_and_planted_rows() {
 
     // two misses, then a hit: the hit consumes the budget without counting
     // as a failure
-    for _ in 0..2 {
+    for index in 0..2 {
         server
             .post("/fetch")
             .json(&FetchSecret {
                 identifier: SHA256_111111.to_string(),
-                authentication_key: NOT_PASSWORD_HASH.to_string(),
+                authentication_key: crate::tests::distinct_candidate(index),
             })
             .expect_failure()
             .await;
@@ -112,6 +111,7 @@ async fn test_attempts_count_hits_and_planted_rows() {
     assert_eq!(snapshot.entries.len(), 1);
     assert_eq!(snapshot.entries[0].total_attempts, 3);
     assert_eq!(snapshot.entries[0].failed_attempts, 2);
+    assert_eq!(snapshot.entries[0].total_requests, 3);
 }
 
 #[tokio::test]
@@ -126,12 +126,12 @@ async fn test_fetch_success_reports_status_without_resetting_attempt_budget() {
     server.post("/store").json(&store).expect_success().await;
 
     // two failed attempts
-    for _ in 0..2 {
+    for index in 0..2 {
         server
             .post("/fetch")
             .json(&FetchSecret {
                 identifier: SHA256_111111.to_string(),
-                authentication_key: NOT_PASSWORD_HASH.to_string(),
+                authentication_key: crate::tests::distinct_candidate(index),
             })
             .expect_failure()
             .await;
@@ -290,9 +290,11 @@ async fn test_attempts_omit_entries_after_cooldown_without_waiting_for_sweeper()
             crate::utils::identifier_hash(SHA256_111111).unwrap(),
             RateLimitInfo {
                 window_started_at,
-                last_request: window_started_at,
-                attempts: 1,
-                failed_attempts: 1,
+                last_candidate_at: window_started_at,
+                last_request_at: window_started_at,
+                candidates: std::collections::HashMap::new(),
+                failed_candidates: 1,
+                total_requests: 1,
             },
         );
     }
@@ -343,9 +345,11 @@ async fn test_attempts_snapshot_at_full_map_scale() {
                 format!("{:064x}", i),
                 crate::models::RateLimitInfo {
                     window_started_at: now,
-                    last_request: now,
-                    attempts: 1,
-                    failed_attempts: 0,
+                    last_candidate_at: now,
+                    last_request_at: now,
+                    candidates: std::collections::HashMap::new(),
+                    failed_candidates: 0,
+                    total_requests: 1,
                 },
             );
         }

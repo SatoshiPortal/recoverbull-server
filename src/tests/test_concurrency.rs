@@ -101,15 +101,13 @@ async fn test_rate_limit_holds_under_concurrency() {
     assert_eq!(raw_post(addr, "/store", store_body).await, 201);
 
     const N: usize = 100;
-    let fetch_body = format!(
-        "{{\"identifier\":\"{}\",\"authentication_key\":\"{}\"}}",
-        crate::tests::SHA256_111111,
-        crate::tests::NOT_PASSWORD_HASH
-    );
-
     let mut handles = Vec::new();
-    for _ in 0..N {
-        let body = fetch_body.clone();
+    for index in 0..N {
+        let body = format!(
+            "{{\"identifier\":\"{}\",\"authentication_key\":\"{}\"}}",
+            crate::tests::SHA256_111111,
+            crate::tests::distinct_candidate(index)
+        );
         handles.push(tokio::spawn(
             async move { raw_post(addr, "/fetch", body).await },
         ));
@@ -134,8 +132,9 @@ async fn test_rate_limit_holds_under_concurrency() {
     assert_eq!(too_many, N - state.rate_limit_max_attempts as usize);
 }
 
-/// Reading and deleting must be one atomic operation. Otherwise concurrent
-/// `/trash` requests can both read and release the same secret.
+/// A duplicate arriving while the first trash lookup is Pending is rejected;
+/// once committed, a replay is allowed to reach SQLite and is indistinguishable
+/// from a miss (covered by the distinct-candidate tests).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_concurrent_trash_releases_secret_once() {
     let (addr, _) = spawn_server().await;
@@ -157,7 +156,7 @@ async fn test_concurrent_trash_releases_secret_once() {
     let mut statuses = vec![first.await.unwrap(), second.await.unwrap()];
     statuses.sort_unstable();
 
-    assert_eq!(statuses, vec![202, 401]);
+    assert_eq!(statuses, vec![202, 503]);
 }
 
 /// The F1 fix under race: 50 concurrent /store calls with the SAME payload

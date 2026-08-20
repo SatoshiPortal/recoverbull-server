@@ -5,6 +5,7 @@ use axum::{
 };
 use diesel::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Builds a consistent error body. Clients classify errors by HTTP status;
 /// this text is intended for humans and may change without notice.
@@ -66,28 +67,61 @@ pub struct Secret {
     pub encrypted_secret: String,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum CandidateState {
+    Pending,
+    Committed,
+}
+
+/// The already-derived `secret_id`/`key_id`; raw authentication material is
+/// never retained in rate-limit state.
+pub type CandidateTag = String;
+
 #[derive(Clone)]
 pub struct RateLimitInfo {
-    /// First admitted attempt of the current window.
     pub window_started_at: chrono::DateTime<chrono::Utc>,
-    pub last_request: chrono::DateTime<chrono::Utc>,
-    /// All secret lookups count, including matches: an unauthenticated
-    /// caller can create its own matching row through `/store`.
-    pub attempts: u8,
-    pub failed_attempts: u8,
+    pub last_candidate_at: chrono::DateTime<chrono::Utc>,
+    pub last_request_at: chrono::DateTime<chrono::Utc>,
+    pub candidates: HashMap<CandidateTag, CandidateState>,
+    pub failed_candidates: u8,
+    pub total_requests: u64,
+}
+
+impl RateLimitInfo {
+    pub fn new(now: chrono::DateTime<chrono::Utc>) -> Self {
+        Self {
+            window_started_at: now,
+            last_candidate_at: now,
+            last_request_at: now,
+            candidates: HashMap::new(),
+            failed_candidates: 0,
+            total_requests: 0,
+        }
+    }
+
+    pub fn candidate_count(&self) -> u8 {
+        self.candidates
+            .len()
+            .try_into()
+            .expect("candidate map cannot exceed the configured u8 bound")
+    }
 }
 
 /// Attempt counters reported to the caller of a successful `/fetch` or
 /// `/trash`. This is a security signal, not an audit ledger: concurrent
 /// requests may shift the counters by one.
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct AttemptStatus {
-    /// Total lookups in the current window, including this request.
+    /// The initial telemetry contract distinguishes candidate counters from
+    /// request-counting semantics.
+    pub version: u8,
+    /// Total distinct candidates in the current window.
     pub total_attempts: u8,
     pub failed_attempts: u8,
     pub remaining_attempts: u8,
+    pub total_requests: u64,
     pub window_started_at: chrono::DateTime<chrono::Utc>,
-    /// Admitted attempt immediately preceding this request, if any.
+    /// Distinct candidate immediately preceding this request, if any.
     pub previous_attempt_at: Option<chrono::DateTime<chrono::Utc>>,
     pub resets_at: chrono::DateTime<chrono::Utc>,
 }
@@ -98,6 +132,7 @@ pub struct ResponseFailedAttempt {
     pub requested_at: chrono::DateTime<chrono::Utc>,
     pub rate_limit_cooldown: i64,
     pub attempts: u8,
+    pub total_requests: u64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -105,9 +140,10 @@ pub struct AttemptEntry {
     /// SHA-256 of the raw identifier bytes, so clients can recognize their
     /// own identifier without exposing it (pre-image resistance).
     pub id_hash: String,
-    /// Total `/fetch` and `/trash` lookups in the current cooldown window.
+    /// Total distinct candidates in the current cooldown window.
     pub total_attempts: u8,
     pub failed_attempts: u8,
+    pub total_requests: u64,
     /// Hour-truncated: exact timestamps would ease correlation.
     pub window_started_at: chrono::DateTime<chrono::Utc>,
     pub last_attempt_at: chrono::DateTime<chrono::Utc>,

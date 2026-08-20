@@ -19,18 +19,22 @@ async fn test_sweep_removes_only_expired_entries() {
             identifier_hash(SHA256_111111).unwrap(),
             RateLimitInfo {
                 window_started_at: expired_at,
-                last_request: expired_at,
-                attempts: 2,
-                failed_attempts: 2,
+                last_candidate_at: expired_at,
+                last_request_at: expired_at,
+                candidates: std::collections::HashMap::new(),
+                failed_candidates: 2,
+                total_requests: 2,
             },
         );
         identifier_rate_limit.insert(
             identifier_hash(SHA256_222222).unwrap(),
             RateLimitInfo {
                 window_started_at: now,
-                last_request: now,
-                attempts: 1,
-                failed_attempts: 1,
+                last_candidate_at: now,
+                last_request_at: now,
+                candidates: std::collections::HashMap::new(),
+                failed_candidates: 1,
+                total_requests: 1,
             },
         );
     }
@@ -61,9 +65,11 @@ async fn test_fetch_expires_sub_threshold_entry_after_cooldown() {
             identifier_hash(SHA256_111111).unwrap(),
             RateLimitInfo {
                 window_started_at,
-                last_request: window_started_at,
-                attempts: 2,
-                failed_attempts: 2,
+                last_candidate_at: window_started_at,
+                last_request_at: window_started_at,
+                candidates: std::collections::HashMap::new(),
+                failed_candidates: 2,
+                total_requests: 2,
             },
         );
     }
@@ -182,7 +188,7 @@ async fn test_cancelled_request_does_not_consume_an_attempt() {
     let identifier_hash = identifier_hash(SHA256_111111).unwrap();
     let leaked_attempts = identifier_rate_limit
         .get(&identifier_hash)
-        .map(|info| info.attempts)
+        .map(|info| info.candidate_count())
         .unwrap_or(0);
     assert_eq!(
         leaked_attempts, 0,
@@ -257,7 +263,7 @@ async fn test_cancelled_trash_after_sqlite_start_keeps_attempt_reserved() {
     assert_eq!(
         identifier_rate_limit
             .get(&identifier_hash(SHA256_111111).unwrap())
-            .map(|info| info.attempts),
+            .map(|info| info.candidate_count()),
         Some(1),
         "once SQLite has started, cancelling HTTP must not refund the committed attempt"
     );
@@ -304,7 +310,12 @@ async fn test_concurrent_cancellation_refunds_every_reservation() {
         loop {
             {
                 let map = state.identifier_rate_limit.lock().await;
-                if map.get(&hash).map(|info| info.attempts).unwrap_or(0) == 0 {
+                if map
+                    .get(&hash)
+                    .map(|info| info.candidate_count())
+                    .unwrap_or(0)
+                    == 0
+                {
                     break;
                 }
             }
@@ -365,7 +376,12 @@ async fn test_deferred_refund_runs_when_drop_finds_the_lock_contended() {
         loop {
             {
                 let map = state.identifier_rate_limit.lock().await;
-                if map.get(&hash).map(|info| info.attempts).unwrap_or(0) == 1 {
+                if map
+                    .get(&hash)
+                    .map(|info| info.candidate_count())
+                    .unwrap_or(0)
+                    == 1
+                {
                     break;
                 }
             }
@@ -389,7 +405,12 @@ async fn test_deferred_refund_runs_when_drop_finds_the_lock_contended() {
         loop {
             {
                 let map = state.identifier_rate_limit.lock().await;
-                if map.get(&hash).map(|info| info.attempts).unwrap_or(0) == 0 {
+                if map
+                    .get(&hash)
+                    .map(|info| info.candidate_count())
+                    .unwrap_or(0)
+                    == 0
+                {
                     break;
                 }
             }

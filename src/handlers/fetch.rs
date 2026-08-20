@@ -67,6 +67,15 @@ async fn refund_attempt(state: &AppState, identifier_hash: &str) {
 /// dropping the handler future does not cancel the refund task, so the
 /// refund is guaranteed to eventually run to completion instead of being
 /// silently lost.
+///
+/// Temporal invariant: a deferred refund can only ever land in the same
+/// window it was reserved in. The armed section below awaits at most 1s on
+/// the database semaphore (the only `.await` between arming and
+/// `disarm()`), the detached task's delay is bounded by in-memory mutex
+/// hold times (milliseconds — no lock is held across database or network
+/// work), and both are far below the minimum configurable cooldown
+/// (1 minute). A refund therefore never decrements a recreated entry.
+/// Revisit this reasoning if any of these bounds changes.
 struct AttemptReservationGuard {
     state: AppState,
     identifier_hash: String,

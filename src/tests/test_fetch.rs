@@ -35,6 +35,74 @@ async fn test_fetch_success() {
 }
 
 #[tokio::test]
+async fn test_fetch_success_reports_exact_attempt_status() {
+    let (server, state) = crate::tests::test_server::new_test_server().await;
+
+    let store = &StoreSecret {
+        identifier: SHA256_111111.to_string(),
+        authentication_key: SHA256_222222.to_string(),
+        encrypted_secret: BASE64_ENCRYPTED_SECRET.to_string(),
+    };
+    server.post("/store").json(&store).expect_success().await;
+
+    let fetch = &FetchSecret {
+        identifier: SHA256_111111.to_string(),
+        authentication_key: SHA256_222222.to_string(),
+    };
+
+    // first lookup ever: no previous attempt, full budget remaining
+    let before_first = chrono::Utc::now();
+    let response = server.post("/fetch").json(&fetch).expect_success().await;
+    let status = &response.json::<serde_json::Value>()["attempt_status"];
+    assert_eq!(status["total_attempts"], 1);
+    assert_eq!(status["failed_attempts"], 0);
+    assert_eq!(
+        status["remaining_attempts"],
+        state.rate_limit_max_attempts - 1
+    );
+    assert!(status["previous_attempt_at"].is_null());
+
+    let window_started_at = status["window_started_at"]
+        .as_str()
+        .unwrap()
+        .parse::<chrono::DateTime<chrono::Utc>>()
+        .unwrap();
+    assert!(window_started_at >= before_first);
+
+    // the window resets one cooldown after the most recent admitted attempt
+    let resets_at = status["resets_at"]
+        .as_str()
+        .unwrap()
+        .parse::<chrono::DateTime<chrono::Utc>>()
+        .unwrap();
+    assert_eq!(
+        resets_at - window_started_at,
+        state.rate_limit_cooldown,
+        "first window: resets_at is one cooldown after the first attempt"
+    );
+
+    // second lookup: the previous attempt is the first one, exactly
+    let response = server.post("/fetch").json(&fetch).expect_success().await;
+    let status = &response.json::<serde_json::Value>()["attempt_status"];
+    assert_eq!(status["total_attempts"], 2);
+    let previous_attempt_at = status["previous_attempt_at"]
+        .as_str()
+        .unwrap()
+        .parse::<chrono::DateTime<chrono::Utc>>()
+        .unwrap();
+    assert_eq!(previous_attempt_at, window_started_at);
+    assert_eq!(
+        status["window_started_at"]
+            .as_str()
+            .unwrap()
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .unwrap(),
+        window_started_at,
+        "the window start never moves within a window"
+    );
+}
+
+#[tokio::test]
 async fn test_fetch_key_failure_invalid_hash_for_format_identifier() {
     let (server, _) = crate::tests::test_server::new_test_server().await;
 
@@ -113,6 +181,7 @@ async fn test_fetch_rate_limit_enforced_and_reset_after_cooldown() {
             .unwrap();
         let expired_at =
             chrono::Utc::now() - state.rate_limit_cooldown - chrono::Duration::minutes(1);
+        info.window_started_at = expired_at;
         info.last_request = expired_at;
     }
 

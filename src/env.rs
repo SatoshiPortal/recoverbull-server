@@ -152,6 +152,15 @@ pub fn validate_token_bucket(name: &str, burst: f64, refill: f64) -> Result<(), 
     Ok(())
 }
 
+/// Validates the `/attempts` snapshot TTL: zero would force a fresh snapshot
+/// computation on every request, defeating the point of caching.
+pub fn validate_snapshot_ttl(seconds: u64) -> Result<(), String> {
+    if seconds == 0 {
+        return Err("ATTEMPTS_SNAPSHOT_TTL_SECONDS must be greater than 0".to_string());
+    }
+    Ok(())
+}
+
 /// Live state of the warrant canary in the dotenv file.
 pub enum CanaryFileState {
     /// The file holds a CANARY key (possibly an empty value).
@@ -347,6 +356,27 @@ pub fn init() -> AppState {
         std::process::exit(1);
     }
 
+    // `/attempts` serves a cached snapshot; this third bucket bounds direct
+    // cache-bypass traffic without consuming lookup tokens needed for
+    // recovery. The reverse-proxy cache absorbs the normal read volume.
+    let attempts_rate_limit_burst: f64 = optional_env("ATTEMPTS_RATE_LIMIT_BURST", 20.0);
+    let attempts_rate_limit_refill: f64 =
+        optional_env("ATTEMPTS_RATE_LIMIT_REFILL_PER_SECOND", 2.0);
+    if let Err(e) = validate_token_bucket(
+        "ATTEMPTS",
+        attempts_rate_limit_burst,
+        attempts_rate_limit_refill,
+    ) {
+        println!("Error: {e}");
+        std::process::exit(1);
+    }
+
+    let attempts_snapshot_ttl_seconds = optional_env("ATTEMPTS_SNAPSHOT_TTL_SECONDS", 60u64);
+    if let Err(e) = validate_snapshot_ttl(attempts_snapshot_ttl_seconds) {
+        println!("Error: {e}");
+        std::process::exit(1);
+    }
+
     AppState {
         server_address: server_addr,
         database_url,
@@ -368,7 +398,14 @@ pub fn init() -> AppState {
             lookup_rate_limit_burst,
             lookup_rate_limit_refill,
         ))),
+        attempts_token_bucket: Arc::new(Mutex::new(crate::rate_limit::TokenBucket::new(
+            attempts_rate_limit_burst,
+            attempts_rate_limit_refill,
+        ))),
         rate_limit_max_identifiers,
         database_semaphore: Arc::new(Semaphore::new(database_max_concurrency)),
+        attempts_collection_started_at: chrono::Utc::now(),
+        attempts_snapshot: Arc::new(Mutex::new(None)),
+        attempts_snapshot_ttl: std::time::Duration::from_secs(attempts_snapshot_ttl_seconds),
     }
 }

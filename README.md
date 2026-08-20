@@ -13,7 +13,7 @@ guarded by tests and the reviewer checklist, see [SECURITY.md](SECURITY.md).
 - `authentication_key` A deterministic hash derived from `password` used server-side to compute an internal `secret_id`.
 - `encryption_key` A deterministic hash derived from `password` used client-side to **encrypt** the `secret` **before** storage on the server.
 - `identifier` random secure octets (e.g., in a local file), required to retrieve the `encrypted_secret`.
-- `secret_id` = `hash(identifier + authentication_key)` Unique record key in the server’s database. Concretely: **SHA-256 over the concatenation of the two lowercase hex *strings*** (128 ASCII bytes) — not over the decoded raw bytes.
+- `secret_id` = `hash(identifier + authentication_key)` Unique record key in the server’s database. Concretely: **SHA-256 over the concatenation of the two lowercase hex *strings*** (128 ASCII bytes) — not over the decoded raw bytes. This differs from the `/attempts` `id_hash`, which hashes the raw identifier bytes; client implementations must not mix the two.
 - `encrypted_secret` = `encrypt(private_key: encryption_key, payload: secret)` The ciphertext of the secret using `encryption_key`.
 
 ### Store
@@ -55,12 +55,34 @@ guarded by tests and the reviewer checklist, see [SECURITY.md](SECURITY.md).
 
  5. The user can fetch his `secret` by deciphering `encrypted_secret` using his `encryption_key` as encryption key.
 
+> On success, the response also contains an `attempt_status` object: the attempt counters recorded for this `identifier` during the current cooldown window.
+>
+> ```json
+> {
+>   "attempt_status": {
+>     "total_attempts": 3,
+>     "failed_attempts": 1,
+>     "remaining_attempts": 0,
+>     "window_started_at": "2026-08-05T12:17:41Z",
+>     "previous_attempt_at": "2026-08-05T14:37:22Z",
+>     "resets_at": "2026-08-06T15:04:13Z"
+>   }
+> }
+> ```
+>
+> - `total_attempts` includes the request carrying the response and counts database hits as well as misses: a hit does not prove ownership, because a public `/store` caller can plant a matching row. A client should warn the user when the total is higher than the user's own operations.
+> - `failed_attempts` counts only lookups for which no database row existed.
+> - `previous_attempt_at` is the admitted attempt immediately preceding this request (`null` when this request opened the window), and `resets_at` is when the budget expires.
+> - A successful lookup never resets the counters; they expire only after the configured cooldown.
+
 #### Timestamp precision by response
 
 Timestamp precision follows the knowledge gradient — the more a caller must already know, the more precise the timestamps it receives:
 
+- **Successful `/fetch` and `/trash` (`attempt_status`)**: exact, second-precision timestamps. Reachable by anyone holding the `identifier` (a hit can always be manufactured by planting a row through `/store`), so exact precision here widens no audience.
 - **Failed lookup (`401`)**: `requested_at` is the time of the caller's own request — it reveals nothing about anyone else.
-- **Lockout (`429`)**: `requested_at` is the **exact** time of the last *admitted* attempt, which may be the victim's. Anyone holding the `identifier` can read it once the budget is exhausted. This is accepted: the exact value is what a client needs to compute its retry time.
+- **Lockout (`429`)**: `requested_at` is the **exact** time of the last *admitted* attempt, which may be the victim's. Anyone holding the `identifier` can read it once the budget is exhausted. This is accepted: the same caller already gets hour precision from the public snapshot, and the exact value is what a client needs to compute its retry time.
+- **Public `/attempts` snapshot**: hour-truncated timestamps, because the audience is everyone — exact timestamps would ease correlation without requiring any knowledge of the `identifier`.
 
 ### Error responses
 
@@ -74,15 +96,57 @@ retry or security decision.
 | `400` | Invalid request data. | Fix the request. |
 | `401` | Invalid credentials. | Treat as an authentication failure. |
 | `429` | The targeted identifier lookup budget is locked. This is the only security alarm. | Surface the targeted lockout and honor `Retry-After`. |
-| `503` | Server pressure or unavailability, including global lookup/store limits, a full rate-limit map, or a busy database. | Back off and retry using `Retry-After`. |
+| `503` | Server pressure or unavailability, including global lookup/store/telemetry limits, a full rate-limit map, or a busy database. | Back off and retry using `Retry-After`. |
 | `500` | Internal server error. | Treat as a server failure. |
 
 Every `429` and `503` response carries `Retry-After`, in seconds. Framework-generated
 rejections such as `404`, `405`, `413`, and `415` may not be JSON.
 
+### Attempts
+
+`GET /attempts` returns a public telemetry snapshot for the current cooldown windows:
+
+```json
+{
+  "version": 1,
+  "collection_started_at": "2026-08-05T09:00:00Z",
+  "entries": [
+    {
+      "id_hash": "7a06e6b2…",
+      "total_attempts": 3,
+      "failed_attempts": 1,
+      "window_started_at": "2026-08-05T12:00:00Z",
+      "last_attempt_at": "2026-08-05T14:00:00Z"
+    }
+  ]
+}
+```
+
+- `id_hash`: SHA-256 of the raw `identifier` **bytes** (not the hex string). A client recognizes its own identifier by hashing it locally; nobody can recover a raw identifier from the list (pre-image resistance), which keeps the list useless for griefing or targeted lockout.
+- `total_attempts`: total number of `/fetch` and `/trash` lookups, including database hits (a hit does not prove ownership: a public `/store` caller can plant a matching row).
+- `failed_attempts`: number of lookups for which no database row existed.
+- `window_started_at` / `last_attempt_at`: hour-truncated timestamps of the current window.
+- `collection_started_at`: hour-truncated start of the in-memory collection (last server boot). When it changes, counters were wiped: clients must reset their baseline.
+
+Identifiers are kept and published hashed, never raw. Entries live in the same in-memory map as the rate-limiter, so they expire with it (cooldown or server reboot): nothing is persisted.
+
+The body is **always gzip-compressed JSON** (`Content-Encoding: gzip`); clients must be gzip-capable. The snapshot is rebuilt at most once per minute and served as immutable shared bytes with a strong `ETag`: send `If-None-Match` to receive a bodyless `304` when nothing changed. `Cache-Control: public, max-age=<remaining seconds>` reflects the real freshness. A dedicated global token bucket (`ATTEMPTS_RATE_LIMIT_*`) bounds cache-bypass traffic; production deployments must additionally cache and rate-limit this route at the reverse proxy (see Deployment).
+
+Detection semantics a client should implement:
+- **Poll `/attempts` proactively** (e.g. at app start, no more often than the snapshot freshness): if your identifier hash appears with attempts you did not make, someone is probing your backup.
+- **Treat a `429` as an alarm**: global service pressure uses `503` instead. See [Error responses](#error-responses) for the full table; do not match on the `error` text.
+- **`attempt_status` on a successful fetch is the freshest signal**: it needs no extra request and stays available even when `/attempts` is overloaded. Failures older than the cooldown expire (entries are swept and forgotten), but a success never resets the counters early.
+- **Telemetry is advisory**: the server cannot distinguish an attacker from the user or another of the user's devices, and a compromised server can fabricate or suppress counters. Clients must warn, never act automatically.
+
 `GET /info` exposes `rate_limit_max_attempts`, the total per-identifier lookup
 budget. The response also retains `rate_limit_max_failed_attempts` as a
-legacy alias with the same value.
+legacy alias with the same value. It complements the snapshot with two static
+fields: `attempts_collection_started_at` (hour-truncated, same value as the
+snapshot — a cheap wipe check during the existing connection check) and
+`max_attempt_identifiers` (the configured map capacity, so a client can
+compute the snapshot fullness ratio and warn when the service is under
+pressure). `/info` never exposes a live identifier count: that would make
+map-filling campaigns cheap to monitor.
 
 
 
@@ -102,7 +166,7 @@ If an attacker can steal informations to a targeted user such as `salt` and have
 The rate-limit counter is keyed on `sha256(identifier)` and checked **before** credentials are verified: the server cannot distinguish the legitimate owner from an attacker before the database lookup. Every lookup counts, including successful ones, because a public `/store` caller can plant a row for a guessed key. An attacker holding a victim's Backup File can therefore consume that identifier's lookup budget and keep it locked out, delaying — or with discipline, preventing — the victim's recovery. Other identifiers retain independent budgets.
 
 Mitigations available today:
-- **Detection**: an unexpected `429` is itself an alarm. A user who still has wallet access should rotate keys immediately.
+- **Detection**: clients should poll `/attempts` — an identifier under attack shows attempts the user did not make, and an unexpected `429` is itself an alarm. A user who still has wallet access should rotate keys immediately.
 - **Redundancy** (client-side): an exported copy of the Backup Key, social recovery, or a second independent Key Server makes the lockout of a single server non-fatal.
 
 Protocol roadmap: escalating backoff (delay without permanent denial), client proof-of-work (cost per guess instead of a hard cap), or multi-server storage.
@@ -114,13 +178,15 @@ Protocol roadmap: escalating backoff (delay without permanent denial), client pr
 
 The server is designed to be reached exclusively through a **Tor onion service**: it protects the transport confidentiality of the `authentication_key` and the IP anonymity of clients. **Never expose it directly on a public interface** — the server refuses to stay silent about it and prints a startup warning when `SERVER_ADDRESS` is not loopback. Production deployments must put a reverse proxy between Tor and Axum because Axum's route timeout starts after HTTP headers have been read.
 
-The supported deployment is **single-instance**: rate limits, token buckets and the cache are in memory. Load balancing or rolling overlap would multiply budgets. Drain and stop the old instance before activating a new one.
+The supported deployment is **single-instance**: rate limits, token buckets, the cache, and the collection marker are in memory. Load balancing or rolling overlap would multiply budgets and make telemetry inconsistent. Drain and stop the old instance before activating a new one.
 
 1. Keep Axum on a private loopback port: `SERVER_ADDRESS=127.0.0.1:3001`
 2. Configure nginx on `127.0.0.1:3000` with strict header/body timeouts and connection limits:
 
 ```nginx
 limit_conn_zone $binary_remote_addr zone=recoverbull_connections:10m;
+limit_req_zone $binary_remote_addr zone=recoverbull_attempts:10m rate=5r/s;
+proxy_cache_path /var/cache/nginx/recoverbull levels=1:2 keys_zone=recoverbull_cache:10m max_size=100m inactive=2m;
 
 server {
     listen 127.0.0.1:3000;
@@ -130,6 +196,19 @@ server {
     send_timeout 35s;
     limit_conn recoverbull_connections 100;
 
+    # The telemetry snapshot can reach several megabytes: cache the
+    # precompressed body, coalesce concurrent fills and shape egress.
+    location = /attempts {
+        proxy_pass http://127.0.0.1:3001;
+        proxy_connect_timeout 2s;
+        proxy_read_timeout 35s;
+        proxy_cache recoverbull_cache;
+        proxy_cache_lock on;
+        proxy_cache_valid 200 30s;
+        limit_req zone=recoverbull_attempts burst=20 nodelay;
+        limit_rate 512k;
+    }
+
     location / {
         proxy_pass http://127.0.0.1:3001;
         proxy_connect_timeout 2s;
@@ -138,7 +217,9 @@ server {
 }
 ```
 
-All Tor connections reach nginx from loopback, so these connection and request limits are intentionally global. The proxy is also what lets slow clients take their time: with default `proxy_buffering`, nginx drains Axum quickly (within its 30s route timeout) and feeds the client at its own pace.
+All Tor connections reach nginx from loopback, so these connection and request limits are intentionally global. The backend already serves `/attempts` precompressed: nginx caches that exact body instead of recompressing per request. `limit_rate` caps per-connection throughput; multiplied by the connection limit it bounds aggregate snapshot egress. The proxy is also what lets slow clients take their time: with default `proxy_buffering`, nginx drains Axum quickly (within its 30s route timeout) and feeds the client at its own pace.
+
+> **Conditional requests behind nginx**: when serving `/attempts` from `proxy_cache`, nginx answers with the cached `200` body without evaluating the client's `If-None-Match` — the bodyless `304` path only benefits clients reaching Axum directly. Clients behind nginx therefore re-download the snapshot body whenever nginx's cache entry has expired (30s) and the content changed. This is an egress tradeoff, not a correctness issue: clients must still compare the received `ETag` to detect change, and aggregate egress stays bounded by `limit_conn` × `limit_rate`.
 
 3. Configure the onion service in `torrc` to reach nginx, with Tor's built-in DoS defenses enabled (they cover connection floods; body downloads remain an nginx concern):
 
@@ -215,8 +296,13 @@ request has a new identifier and a maximum-size secret, SQLite grows by about
 per-identifier lookup budget. Every lookup consumes it, including database
 hits and misses. If the canonical variable is absent, the server accepts
 `RATE_LIMIT_MAX_FAILED_ATTEMPTS` as a deprecated legacy alias and logs a
-warning; when both are present, the canonical variable wins.
+warning; when both are present, the canonical variable wins. The
+`remaining_attempts` field of `attempt_status` derives from it.
 The lookup bucket is a separate global safety limit for `/fetch` and `/trash`.
+The attempts bucket is a third global limit for `GET /attempts`, sized for
+direct cache-bypass traffic; the reverse-proxy cache absorbs normal reads.
+`ATTEMPTS_SNAPSHOT_TTL_SECONDS` controls how long a snapshot is reused
+before being rebuilt (at most one rebuild per window, single-flight).
 The identifier cap bounds memory without evicting active security entries;
 new identifiers receive `503` while the cap is full. SQLite work is limited to
 16 concurrent blocking operations, and requests waiting more than one second
@@ -273,6 +359,12 @@ curl -i -X POST http://localhost:3000/fetch \
 curl -i -X POST http://localhost:3000/trash \
 -H "Content-Type: application/json" \
 -d '{"identifier":"bcb15f821479b4d5772bd0ca866c00ad5f926e3580720659cc80d39c9d09802a","authentication_key":"4cc8f4d609b717356701c57a03e737e5ac8fe885da8c7163d3de47e01849c635"}'
+
+# Attempts (lookup telemetry snapshot, gzip-compressed, identifiers are SHA-256 hashed)
+curl --compressed -X GET http://localhost:3000/attempts
+
+# Attempts, conditional revalidation (returns 304 when unchanged)
+curl --compressed -X GET http://localhost:3000/attempts -H 'If-None-Match: "<etag>"'
 ```
 
 ## Tests

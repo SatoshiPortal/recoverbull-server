@@ -5,7 +5,7 @@ use axum::{
 };
 
 use crate::{
-    handlers::{fetch, info, store},
+    handlers::{attempts, fetch, info, store},
     models::FetchSecret,
     AppState,
 };
@@ -37,6 +37,8 @@ pub fn new(app_state: AppState) -> Router {
         )
         .with_state(app_state.clone())
         .route("/info", get(info::get_info))
+        .with_state(app_state.clone())
+        .route("/attempts", get(attempts::get_attempts))
         .with_state(app_state)
         // Legitimate JSON requests are below 320 bytes. Keep modest headroom
         // while rejecting oversized bodies before deserialization.

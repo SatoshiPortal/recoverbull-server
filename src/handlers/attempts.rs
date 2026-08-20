@@ -109,16 +109,17 @@ async fn build_snapshot(state: &AppState) -> Result<AttemptsSnapshotCache, Respo
     let mut entries: Vec<AttemptEntry> = {
         let mut identifier_rate_limit = state.identifier_rate_limit.lock().await;
         identifier_rate_limit.retain(|_, info| {
-            now.signed_duration_since(info.last_request) <= state.rate_limit_cooldown
+            now.signed_duration_since(info.last_candidate_at) <= state.rate_limit_cooldown
         });
         identifier_rate_limit
             .iter()
             .map(|(id_hash, info)| AttemptEntry {
                 id_hash: id_hash.clone(),
-                total_attempts: info.attempts,
-                failed_attempts: info.failed_attempts,
+                total_attempts: info.candidate_count(),
+                failed_attempts: info.failed_candidates,
+                total_requests: info.total_requests,
                 window_started_at: truncate_to_hour(info.window_started_at),
-                last_attempt_at: truncate_to_hour(info.last_request),
+                last_attempt_at: truncate_to_hour(info.last_request_at),
             })
             .collect()
         // lock dropped here
@@ -135,7 +136,7 @@ async fn build_snapshot(state: &AppState) -> Result<AttemptsSnapshotCache, Respo
     entries.sort_by(|a, b| a.id_hash.cmp(&b.id_hash));
 
     let payload = AttemptsSnapshot {
-        version: 1,
+        version: 2,
         collection_started_at: truncate_to_hour(state.attempts_collection_started_at),
         entries,
     };

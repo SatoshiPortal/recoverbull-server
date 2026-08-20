@@ -170,9 +170,9 @@ async fn test_successful_fetch_increments_total_attempts() {
     assert_eq!(entry["failed_attempts"], 0);
 }
 
-/// A success never resets the counter: after a successful fetch, a failed
-/// attempt continues the count instead of restarting at 1 — otherwise an
-/// attacker with a planted row could erase their own tracks.
+/// A success never resets the counter: after a successful fetch, a distinct
+/// failed candidate continues the count instead of restarting at 1 — while a
+/// replay only increases total_requests.
 #[tokio::test]
 async fn test_success_does_not_reset_the_counter() {
     let (server, _) = crate::tests::test_server::new_test_server().await;
@@ -208,6 +208,7 @@ async fn test_success_does_not_reset_the_counter() {
         status["attempts"], 2,
         "the counter must continue, not reset after a success"
     );
+    assert_eq!(status["total_requests"], 2);
 }
 
 /// A successful fetch is never refunded: the attempt stays consumed. Refunds
@@ -237,7 +238,7 @@ async fn test_successful_fetch_is_not_refunded() {
 
     let map = state.identifier_rate_limit.lock().await;
     let info = &map[&identifier_hash(SHA256_111111).unwrap()];
-    assert_eq!(info.attempts, 1, "a 200 must not be refunded");
+    assert_eq!(info.candidate_count(), 1, "a 200 must not be refunded");
 }
 
 /// A 429 does not consume budget: a locked-out identifier's rejected request
@@ -247,12 +248,12 @@ async fn test_successful_fetch_is_not_refunded() {
 async fn test_429_does_not_consume_budget() {
     let (server, state) = crate::tests::test_server::new_test_server().await;
 
-    for _ in 0..state.rate_limit_max_attempts {
+    for index in 0..state.rate_limit_max_attempts as usize {
         server
             .post("/fetch")
             .json(&FetchSecret {
                 identifier: SHA256_111111.to_string(),
-                authentication_key: NOT_PASSWORD_HASH.to_string(),
+                authentication_key: crate::tests::distinct_candidate(index),
             })
             .expect_failure()
             .await;
@@ -261,7 +262,9 @@ async fn test_429_does_not_consume_budget() {
         .post("/fetch")
         .json(&FetchSecret {
             identifier: SHA256_111111.to_string(),
-            authentication_key: NOT_PASSWORD_HASH.to_string(),
+            // Replay an already admitted key: saturation must be based on
+            // distinct candidates, while this request still counts.
+            authentication_key: crate::tests::distinct_candidate(0),
         })
         .expect_failure()
         .await;
@@ -269,8 +272,14 @@ async fn test_429_does_not_consume_budget() {
     let map = state.identifier_rate_limit.lock().await;
     let info = &map[&identifier_hash(SHA256_111111).unwrap()];
     assert_eq!(
-        info.attempts, state.rate_limit_max_attempts,
+        info.candidate_count(),
+        state.rate_limit_max_attempts,
         "a 429 must not consume budget"
+    );
+    assert_eq!(
+        info.total_requests,
+        u64::from(state.rate_limit_max_attempts) + 1,
+        "a rejected replay must still increase total_requests"
     );
 }
 
@@ -286,12 +295,12 @@ async fn test_full_map_does_not_evict_protected_identifier() {
     let server = axum_test::TestServer::new(crate::router::new(state.clone())).unwrap();
 
     // lock out the first identifier
-    for _ in 0..state.rate_limit_max_attempts {
+    for index in 0..state.rate_limit_max_attempts as usize {
         server
             .post("/fetch")
             .json(&FetchSecret {
                 identifier: SHA256_111111.to_string(),
-                authentication_key: NOT_PASSWORD_HASH.to_string(),
+                authentication_key: crate::tests::distinct_candidate(index),
             })
             .expect_failure()
             .await;
@@ -359,13 +368,15 @@ async fn test_remaining_attempts_relationship() {
         state.rate_limit_max_attempts - total,
         "remaining must equal max - total_attempts"
     );
+    assert_eq!(status["total_requests"], 1);
 
-    // a failure consumes budget too; the next success reports it
+    // a distinct failure consumes budget too; replaying the stored candidate
+    // reports the same distinct-candidate total
     server
         .post("/fetch")
         .json(&FetchSecret {
             identifier: SHA256_111111.to_string(),
-            authentication_key: NOT_PASSWORD_HASH.to_string(),
+            authentication_key: crate::tests::distinct_candidate(2),
         })
         .expect_failure()
         .await;
@@ -380,12 +391,13 @@ async fn test_remaining_attempts_relationship() {
     let status = &response.json::<serde_json::Value>()["attempt_status"];
     let total = status["total_attempts"].as_u64().unwrap() as u8;
     let remaining = status["remaining_attempts"].as_u64().unwrap() as u8;
-    assert_eq!(total, 3);
+    assert_eq!(total, 2);
     assert_eq!(
         remaining,
         state.rate_limit_max_attempts - total,
         "remaining must equal max - total_attempts"
     );
+    assert_eq!(status["total_requests"], 3);
 }
 
 // ---------------------------------------------------------------------------
@@ -620,12 +632,12 @@ async fn test_error_responses_leak_no_secret_material() {
     assert!(!body.contains(SHA256_222222));
 
     // drive to 429
-    for _ in 0..state.rate_limit_max_attempts {
+    for index in 1..state.rate_limit_max_attempts as usize {
         server
             .post("/fetch")
             .json(&FetchSecret {
                 identifier: SHA256_111111.to_string(),
-                authentication_key: NOT_PASSWORD_HASH.to_string(),
+                authentication_key: crate::tests::distinct_candidate(index),
             })
             .expect_failure()
             .await;
@@ -807,11 +819,10 @@ async fn test_401_attempts_and_snapshot_counters_agree() {
     assert_eq!(entry["total_attempts"].as_u64().unwrap(), direct_attempts);
 }
 
-/// `resets_at` slides forward with each admitted attempt: this is the
-/// lockout-renewal mechanism (an attacker keeps the victim locked out by
-/// probing), so the sliding behavior must be exact.
+/// `resets_at` advances for each distinct admitted candidate, but remains
+/// stable when the same candidate is replayed.
 #[tokio::test]
-async fn test_resets_at_slides_forward_with_each_attempt() {
+async fn test_resets_at_advances_with_each_distinct_candidate() {
     let (server, _) = crate::tests::test_server::new_test_server().await;
 
     server
@@ -838,13 +849,41 @@ async fn test_resets_at_slides_forward_with_each_attempt() {
         .parse::<chrono::DateTime<chrono::Utc>>()
         .unwrap();
 
+    let replay = server
+        .post("/fetch")
+        .json(&FetchSecret {
+            identifier: SHA256_111111.to_string(),
+            authentication_key: SHA256_222222.to_string(),
+        })
+        .expect_success()
+        .await;
+    let replay_resets = replay.json::<serde_json::Value>()["attempt_status"]["resets_at"]
+        .as_str()
+        .unwrap()
+        .parse::<chrono::DateTime<chrono::Utc>>()
+        .unwrap();
+    assert_eq!(
+        replay_resets, first_resets,
+        "a replay must not renew resets_at"
+    );
+
     tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+
+    server
+        .post("/store")
+        .json(&StoreSecret {
+            identifier: SHA256_111111.to_string(),
+            authentication_key: crate::tests::distinct_candidate(1),
+            encrypted_secret: BASE64_ENCRYPTED_SECRET.to_string(),
+        })
+        .expect_success()
+        .await;
 
     let second = server
         .post("/fetch")
         .json(&FetchSecret {
             identifier: SHA256_111111.to_string(),
-            authentication_key: SHA256_222222.to_string(),
+            authentication_key: crate::tests::distinct_candidate(1),
         })
         .expect_success()
         .await;
@@ -856,7 +895,7 @@ async fn test_resets_at_slides_forward_with_each_attempt() {
 
     assert!(
         second_resets > first_resets,
-        "resets_at must slide forward with each admitted attempt"
+        "resets_at must advance with each distinct admitted candidate"
     );
 }
 
@@ -867,12 +906,12 @@ async fn test_resets_at_slides_forward_with_each_attempt() {
 async fn test_429_requested_at_is_the_last_admitted_attempt() {
     let (server, state) = crate::tests::test_server::new_test_server().await;
 
-    for _ in 0..state.rate_limit_max_attempts {
+    for index in 0..state.rate_limit_max_attempts as usize {
         server
             .post("/fetch")
             .json(&FetchSecret {
                 identifier: SHA256_111111.to_string(),
-                authentication_key: NOT_PASSWORD_HASH.to_string(),
+                authentication_key: crate::tests::distinct_candidate(index),
             })
             .expect_failure()
             .await;
@@ -916,9 +955,11 @@ async fn test_expired_entry_disappears_from_snapshot() {
             identifier_hash(SHA256_111111).unwrap(),
             crate::models::RateLimitInfo {
                 window_started_at: expired_at,
-                last_request: expired_at,
-                attempts: 3,
-                failed_attempts: 3,
+                last_candidate_at: expired_at,
+                last_request_at: expired_at,
+                candidates: std::collections::HashMap::new(),
+                failed_candidates: 3,
+                total_requests: 3,
             },
         );
     }
@@ -960,7 +1001,8 @@ async fn test_trash_does_not_reset_the_counter() {
         .expect_success()
         .await;
 
-    // the row is gone, but the counter continues
+    // the row is gone, but the distinct-candidate counter stays stable while
+    // total_requests records the replay
     let response = server
         .post("/fetch")
         .json(&FetchSecret {
@@ -970,11 +1012,9 @@ async fn test_trash_does_not_reset_the_counter() {
         .expect_failure()
         .await;
     assert_eq!(response.status_code(), StatusCode::UNAUTHORIZED);
-    assert_eq!(
-        response.json::<serde_json::Value>()["attempts"],
-        2,
-        "trash must not reset the counter"
-    );
+    let body = response.json::<serde_json::Value>();
+    assert_eq!(body["attempts"], 1, "trash must not reset the counter");
+    assert_eq!(body["total_requests"], 2);
 }
 
 /// `/info`'s `attempts_collection_started_at` and the snapshot's
@@ -997,7 +1037,7 @@ async fn test_info_and_snapshot_collection_started_at_agree() {
     assert_eq!(info_collection, snapshot_collection);
 }
 
-/// The snapshot version is pinned at 1: the client parses according to this
+/// The snapshot version is pinned at 2: the client parses according to this
 /// version and must reject an unexpected one loudly here, not in production.
 #[tokio::test]
 async fn test_snapshot_version_is_pinned() {
@@ -1006,7 +1046,7 @@ async fn test_snapshot_version_is_pinned() {
     let snapshot = server.get("/attempts").expect_success().await;
     let body = decode_snapshot(snapshot.as_bytes());
     assert_eq!(
-        body["version"], 1,
+        body["version"], 2,
         "the snapshot version is a client contract"
     );
 }
@@ -1325,12 +1365,12 @@ async fn test_lockout_boundary_is_exact() {
     let max = state.rate_limit_max_attempts;
 
     // the first `max` attempts are all admitted (401)
-    for i in 1..=max {
+    for i in 0..max as usize {
         let response = server
             .post("/fetch")
             .json(&FetchSecret {
                 identifier: SHA256_111111.to_string(),
-                authentication_key: NOT_PASSWORD_HASH.to_string(),
+                authentication_key: crate::tests::distinct_candidate(i),
             })
             .expect_failure()
             .await;
@@ -1524,9 +1564,18 @@ async fn test_attempts_counter_does_not_overflow_at_u8_max() {
             identifier_hash(SHA256_111111).unwrap(),
             crate::models::RateLimitInfo {
                 window_started_at: chrono::Utc::now(),
-                last_request: chrono::Utc::now(),
-                attempts: 254,
-                failed_attempts: 254,
+                last_candidate_at: chrono::Utc::now(),
+                last_request_at: chrono::Utc::now(),
+                candidates: (0..254)
+                    .map(|i| {
+                        (
+                            format!("candidate-{i}"),
+                            crate::models::CandidateState::Committed,
+                        )
+                    })
+                    .collect(),
+                failed_candidates: 254,
+                total_requests: 254,
             },
         );
     }
@@ -1555,7 +1604,7 @@ async fn test_attempts_counter_does_not_overflow_at_u8_max() {
 
     let map = state.identifier_rate_limit.lock().await;
     assert_eq!(
-        map[&identifier_hash(SHA256_111111).unwrap()].attempts,
+        map[&identifier_hash(SHA256_111111).unwrap()].candidate_count(),
         255,
         "the counter must cap at u8::MAX, never wrap to 0"
     );

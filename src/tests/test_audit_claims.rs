@@ -121,7 +121,7 @@ async fn test_audit_f1_planted_rows_cannot_reset_fetch_rate_limit() {
 /// victim's identifier can lock the legitimate owner out of recovery.
 #[tokio::test]
 async fn test_audit_f2_attacker_failures_deny_legitimate_owner() {
-    let (server, state) = crate::tests::test_server::new_test_server().await;
+    let (server, _) = crate::tests::test_server::new_test_server().await;
 
     let store = &StoreSecret {
         identifier: SHA256_111111.to_string(),
@@ -131,12 +131,12 @@ async fn test_audit_f2_attacker_failures_deny_legitimate_owner() {
     server.post("/store").json(store).expect_success().await;
 
     // the attacker exhausts the attempts with a wrong key
-    for _ in 0..state.rate_limit_max_attempts {
+    for index in 0..3 {
         let response = server
             .post("/fetch")
             .json(&FetchSecret {
                 identifier: SHA256_111111.to_string(),
-                authentication_key: NOT_PASSWORD_HASH.to_string(),
+                authentication_key: crate::tests::distinct_candidate(index),
             })
             .await;
         assert_eq!(response.status_code(), StatusCode::UNAUTHORIZED);

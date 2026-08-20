@@ -1,9 +1,6 @@
 use crate::{
-    models::{FetchSecret, ResponseFailedAttempt, Secret, StoreSecret},
-    tests::{
-        BASE64_ENCRYPTED_SECRET, NOT_PASSWORD_HASH, SHA256_111111, SHA256_222222,
-        SHA256_CONCAT_111111_222222,
-    },
+    models::{FetchSecret, Secret, StoreSecret},
+    tests::{BASE64_ENCRYPTED_SECRET, SHA256_111111, SHA256_222222, SHA256_CONCAT_111111_222222},
     utils::identifier_hash,
 };
 use axum::http::StatusCode;
@@ -55,6 +52,7 @@ async fn test_fetch_success_reports_exact_attempt_status() {
     let response = server.post("/fetch").json(&fetch).expect_success().await;
     let status = &response.json::<serde_json::Value>()["attempt_status"];
     assert_eq!(status["total_attempts"], 1);
+    assert_eq!(status["total_requests"], 1);
     assert_eq!(status["failed_attempts"], 0);
     assert_eq!(
         status["remaining_attempts"],
@@ -81,16 +79,14 @@ async fn test_fetch_success_reports_exact_attempt_status() {
         "first window: resets_at is one cooldown after the first attempt"
     );
 
-    // second lookup: the previous attempt is the first one, exactly
+    // second lookup replays the same candidate: attempts stay stable while
+    // requests increase, and no new candidate timestamp is published
     let response = server.post("/fetch").json(&fetch).expect_success().await;
     let status = &response.json::<serde_json::Value>()["attempt_status"];
-    assert_eq!(status["total_attempts"], 2);
-    let previous_attempt_at = status["previous_attempt_at"]
-        .as_str()
-        .unwrap()
-        .parse::<chrono::DateTime<chrono::Utc>>()
-        .unwrap();
-    assert_eq!(previous_attempt_at, window_started_at);
+    assert_eq!(status["total_attempts"], 1);
+    assert_eq!(status["total_requests"], 2);
+    assert_eq!(status["failed_attempts"], 0);
+    assert!(status["previous_attempt_at"].is_null());
     assert_eq!(
         status["window_started_at"]
             .as_str()
@@ -142,33 +138,35 @@ async fn test_fetch_rate_limit_enforced_and_reset_after_cooldown() {
 
     server.post("/store").json(&store).expect_success().await;
 
-    let fetch_wrong_authentication_key = &FetchSecret {
-        identifier: SHA256_111111.to_string(),
-        authentication_key: NOT_PASSWORD_HASH.to_string(), // this should make the fetchy fail
-    };
-
     // trigger rate limit by attempting many fail attempts
-    for i in 0..state.rate_limit_max_attempts {
+    for i in 0..state.rate_limit_max_attempts as usize {
+        let fetch_wrong_authentication_key = FetchSecret {
+            identifier: SHA256_111111.to_string(),
+            authentication_key: crate::tests::distinct_candidate(i),
+        };
         let response = server
             .post("/fetch")
             .json(&fetch_wrong_authentication_key)
             .expect_failure()
             .await;
 
-        let failed_attempt = response.json::<ResponseFailedAttempt>();
-        assert_eq!(failed_attempt.attempts, i + 1);
+        let failed_attempt = response.json::<serde_json::Value>();
+        assert_eq!(failed_attempt["attempts"], (i + 1) as u8);
         assert_eq!(response.status_code(), StatusCode::UNAUTHORIZED);
     }
 
     // trigger the rate_limit_cooldown
     let response = server
         .post("/fetch")
-        .json(&fetch_wrong_authentication_key)
+        .json(&FetchSecret {
+            identifier: SHA256_111111.to_string(),
+            authentication_key: crate::tests::distinct_candidate(0),
+        })
         .expect_failure()
         .await;
 
-    let failed_attempt = response.json::<ResponseFailedAttempt>();
-    assert_eq!(failed_attempt.attempts, state.rate_limit_max_attempts);
+    let failed_attempt = response.json::<serde_json::Value>();
+    assert_eq!(failed_attempt["attempts"], state.rate_limit_max_attempts);
     assert_eq!(response.status_code(), StatusCode::TOO_MANY_REQUESTS);
 
     // Simulate cooldown expiry by aging the in-memory entry directly instead
@@ -182,7 +180,8 @@ async fn test_fetch_rate_limit_enforced_and_reset_after_cooldown() {
         let expired_at =
             chrono::Utc::now() - state.rate_limit_cooldown - chrono::Duration::minutes(1);
         info.window_started_at = expired_at;
-        info.last_request = expired_at;
+        info.last_candidate_at = expired_at;
+        info.last_request_at = expired_at;
     }
 
     let response = server
@@ -205,6 +204,6 @@ async fn test_fetch_rate_limit_enforced_and_reset_after_cooldown() {
     let info = identifier_rate_limit
         .get(&identifier_hash(SHA256_111111).unwrap())
         .unwrap();
-    assert_eq!(info.attempts, 1);
-    assert_eq!(info.failed_attempts, 0);
+    assert_eq!(info.candidate_count(), 1);
+    assert_eq!(info.failed_candidates, 0);
 }

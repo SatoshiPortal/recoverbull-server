@@ -35,7 +35,9 @@ pub async fn get_info(State(state): State<AppState>) -> (StatusCode, Json<Value>
         rate_limit_cooldown: state.rate_limit_cooldown.num_minutes() as u64,
         rate_limit_max_attempts: state.rate_limit_max_attempts,
         rate_limit_max_failed_attempts: state.rate_limit_max_attempts,
-        attempts_collection_started_at: truncate_to_hour(state.attempts_collection_started_at),
+        attempts_collection_started_at: truncate_to_hour(
+            *state.attempts_collection_started_at.lock().await,
+        ),
         max_attempt_identifiers: state.rate_limit_max_identifiers,
     };
 

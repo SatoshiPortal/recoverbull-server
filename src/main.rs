@@ -10,7 +10,7 @@ mod schema;
 mod tests;
 mod utils;
 
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{collections::HashMap, future::IntoFuture, sync::Arc, time::Instant};
 
 use axum::body::Bytes;
 use chrono::TimeDelta;
@@ -53,7 +53,7 @@ struct AppState {
     attempts_token_bucket: Arc<Mutex<rate_limit::TokenBucket>>,
     rate_limit_max_identifiers: usize,
     database_semaphore: Arc<Semaphore>,
-    attempts_collection_started_at: chrono::DateTime<chrono::Utc>,
+    attempts_collection_started_at: Arc<Mutex<chrono::DateTime<chrono::Utc>>>,
     attempts_snapshot: Arc<Mutex<Option<AttemptsSnapshotCache>>>,
     attempts_snapshot_ttl: std::time::Duration,
 }
@@ -82,16 +82,33 @@ async fn main() {
     crate::database::init_db(app_state.clone());
 
     crate::rate_limit::spawn_sweeper(app_state.clone());
+    let mut wiper = crate::rate_limit::spawn_production_wiper(app_state.clone());
 
     let app = router::new(app_state.clone());
 
     let listener = tokio::net::TcpListener::bind(&app_state.server_address)
         .await
         .unwrap();
-    axum::serve(listener, app)
+    let server = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
-        .await
-        .unwrap();
+        .into_future();
+    tokio::pin!(server);
+    tokio::select! {
+        result = &mut wiper => {
+            match result {
+                Ok(()) => tracing::error!("production rate-limit wiper exited unexpectedly"),
+                Err(error) => tracing::error!(error = %error, "production rate-limit wiper failed"),
+            }
+            std::process::exit(1);
+        }
+        result = &mut server => {
+            wiper.abort();
+            let _ = wiper.await;
+            if let Err(error) = result {
+                panic!("server failed: {error}");
+            }
+        }
+    }
 }
 
 /// Waits for SIGINT or SIGTERM. Graceful shutdown lets in-flight requests

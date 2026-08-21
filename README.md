@@ -135,9 +135,9 @@ rejections such as `404`, `405`, `413`, and `415` may not be JSON.
 - `failed_attempts`: number of distinct candidates for which no database row existed.
 - `total_requests`: every `/fetch` and `/trash` request attached to this identifier's active entry, including replays; map-capacity rejections for previously unseen identifiers cannot be attributed to an entry. It is telemetry, not candidate budget.
 - `window_started_at` / `last_attempt_at`: hour-truncated timestamps of the current window.
-- `collection_started_at`: hour-truncated start of the in-memory collection (last server boot). When it changes, counters were wiped: clients must reset their baseline.
++ `collection_started_at`: hour-truncated start of the in-memory collection. It changes at startup and after each global 24-hour wipe; clients must reset their baseline.
 
-Identifiers are kept and published hashed, never raw. Entries live in the same in-memory map as the rate-limiter, so they expire with it (cooldown or server reboot): nothing is persisted.
+Identifiers are kept and published hashed, never raw. The entire identifier map, including CandidateTags, is wiped every 24 hours from map startup and the attempt budget resets at that boundary. The cooldown sweep runs earlier for shorter-lived entries; nothing is persisted.
 
 The body is **always gzip-compressed JSON** (`Content-Encoding: gzip`); clients must be gzip-capable. This initial telemetry contract, version `1`, reports distinct-candidate counters plus `total_requests` and never exposes CandidateTags. The snapshot is rebuilt at most once per minute and served as immutable shared bytes with a strong `ETag`: send `If-None-Match` to receive a bodyless `304` when nothing changed. `Cache-Control: public, max-age=<remaining seconds>` reflects the real freshness. A dedicated global token bucket (`ATTEMPTS_RATE_LIMIT_*`) bounds cache-bypass traffic; production deployments must additionally cache and rate-limit this route at the reverse proxy (see Deployment).
 
@@ -164,7 +164,7 @@ map-filling campaigns cheap to monitor.
 A user can store multiple secrets and the server is not able to link any secret to a specific user. Each secret has a random `identifier`. The `secret_id` is built from the hash of the `identifier` and `authentication_key`.
 
 If the `identifier` is found and used by a malicious person, the server is not able to link it to a specific `secret`.
-**To mitigate targeted brute-force on a specific `secret`, the server temporarily caches the bucket `sha256(identifier)` and up to the configured maximum of derived CandidateTags in memory. CandidateTags are not exposed, logged, or snapshotted; all state is wiped after cooldown or restart.** This improves availability and signal for distinct guesses, at the cost of temporarily retaining up to `max` non-exposed derived tags and increasing behavioral state in memory.
+**To mitigate targeted brute-force on a specific `secret`, the server temporarily caches the bucket `sha256(identifier)` and up to the configured maximum of derived CandidateTags in memory. CandidateTags are not exposed, logged, or snapshotted; all state is wiped at the daily global boundary or restart, while the cooldown sweep removes shorter-lived entries sooner.** This improves availability and signal for distinct guesses, at the cost of temporarily retaining up to `max` non-exposed derived tags and increasing behavioral state in memory.
 
 The server cannot read users secrets because they are encrypted client-side using the `encryption_key` derived from `password`, the secret encryption mitigate the risk of database leak, attackers would have access to: `secret_id`, `created_at` and `encrypted_secret`.
 

@@ -5,6 +5,45 @@ use crate::{
 };
 use axum::http::StatusCode;
 use diesel::RunQueryDsl;
+use std::time::Duration;
+
+#[tokio::test]
+async fn test_global_wipe_clears_candidates_resets_timestamp_and_snapshot() {
+    let (server, state) = crate::tests::test_server::new_test_server().await;
+    server.get("/attempts").expect_success().await;
+    let before = *state.attempts_collection_started_at.lock().await;
+    {
+        let mut map = state.identifier_rate_limit.lock().await;
+        let mut info = RateLimitInfo::new(chrono::Utc::now());
+        info.candidates.insert(
+            "candidate-tag".to_owned(),
+            crate::models::CandidateState::Committed,
+        );
+        map.insert(SHA256_111111.to_owned(), info);
+    }
+    crate::rate_limit::wipe_identifier_rate_limit(&state).await;
+    assert!(state.identifier_rate_limit.lock().await.is_empty());
+    assert!(state.attempts_snapshot.lock().await.is_none());
+    assert!(*state.attempts_collection_started_at.lock().await > before);
+}
+
+#[test]
+fn test_global_wiper_first_deadline_is_delayed_by_period() {
+    let now = tokio::time::Instant::now();
+    let period = Duration::from_secs(24 * 60 * 60);
+    assert_eq!(
+        crate::rate_limit::global_wiper_first_deadline(now, period),
+        now + period
+    );
+}
+
+#[test]
+fn test_production_global_wipe_interval_is_24_hours() {
+    assert_eq!(
+        crate::rate_limit::PRODUCTION_GLOBAL_WIPE_INTERVAL,
+        Duration::from_secs(24 * 60 * 60)
+    );
+}
 
 #[tokio::test]
 async fn test_sweep_removes_only_expired_entries() {

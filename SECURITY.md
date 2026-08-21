@@ -82,9 +82,11 @@ legal compulsion of both providers (see the whitepaper for the full list).
 11. **Temporary behavioral state.** The server retains up to the configured
     maximum of derived CandidateTags (`secret_id/key_id`) per bucket in memory.
     A CandidateTag is never raw authentication or password material, and is
-    never logged or snapshotted; Pending/Committed state is wiped on cooldown
-    expiry or restart. This is a privacy trade-off: non-exposed temporary
-    state is larger than the former identifier-only state.
+    never logged or snapshotted; the complete map is wiped every 24 hours from
+    map startup, with the attempt budget reset at the boundary. The cooldown
+    sweep removes shorter-lived entries earlier. This is a privacy trade-off:
+    non-exposed temporary state is larger than the former identifier-only
+    state.
 
 ## Invariants (each guarded by tests)
 
@@ -106,6 +108,7 @@ code, keep the invariant — and run the guarding test.
 | Hex inputs are lowercased before validation and hashing | Case variants would split budgets and records | `test_audit_f12_hex_case_is_canonicalized` |
 | Cheap validation before expensive: length before base64 decode, 1 kB body limit | DoS via decode/parse cost | `test_store_checks_length_before_base64`, `test_store_rejects_oversized_json_before_deserialization` |
 | Snapshot is deterministic (sorted entries, gzip `mtime=0`), hour-truncated, single-flight, initial telemetry contract version 1; counts distinct candidates and all requests but exposes no CandidateTags | Stable ETag; precision gradient; bounded build cost and privacy | `test_attempts_snapshot_rebuild_is_deterministic`, `test_attempts_publish_hashed_identifier_with_counters`, `test_attempts_snapshot_at_full_map_scale`, `test_concurrent_attempts_polls_agree_on_etag`, `test_snapshot_never_contains_secret_material` |
+| Global wipe clears identifiers and CandidateTags every 24 hours, resets the budget timestamp, and invalidates pre-wipe snapshots; the first wipe is delayed until the period elapses | No pre-wipe telemetry survives the boundary and `/info` agrees with `/attempts` | `test_global_wipe_clears_candidates_resets_timestamp_and_snapshot`, `test_global_wiper_first_deadline_is_delayed_by_period`, `test_production_global_wipe_interval_is_24_hours` |
 | Configuration is validated fail-closed at startup (ranges, NaN/∞/≤0 rejected) | A zero or absurd value would silently disable a protection | `src/tests/test_env.rs` |
 | Errors are classified by HTTP status only: `429` = targeted lockout, `503` = global pressure, both with `Retry-After` | Clients must not match on error text | `src/tests/test_contract.rs` |
 

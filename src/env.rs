@@ -404,7 +404,7 @@ pub fn init() -> AppState {
         ))),
         rate_limit_max_identifiers,
         database_semaphore: Arc::new(Semaphore::new(database_max_concurrency)),
-        attempts_collection_started_at: chrono::Utc::now(),
+        attempts_collection_started_at: Arc::new(tokio::sync::Mutex::new(chrono::Utc::now())),
         attempts_snapshot: Arc::new(Mutex::new(None)),
         attempts_snapshot_ttl: std::time::Duration::from_secs(attempts_snapshot_ttl_seconds),
     }

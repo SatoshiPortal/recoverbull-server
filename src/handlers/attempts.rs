@@ -135,9 +135,10 @@ async fn build_snapshot(state: &AppState) -> Result<AttemptsSnapshotCache, Respo
     // require the lock, only a stable snapshot of the data.
     entries.sort_by(|a, b| a.id_hash.cmp(&b.id_hash));
 
+    let collection_started_at = *state.attempts_collection_started_at.lock().await;
     let payload = AttemptsSnapshot {
         version: 1,
-        collection_started_at: truncate_to_hour(state.attempts_collection_started_at),
+        collection_started_at: truncate_to_hour(collection_started_at),
         entries,
     };
 

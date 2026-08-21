@@ -1022,7 +1022,7 @@ async fn test_trash_does_not_reset_the_counter() {
 /// for cheap wipe detection and expects consistency.
 #[tokio::test]
 async fn test_info_and_snapshot_collection_started_at_agree() {
-    let (server, _) = crate::tests::test_server::new_test_server().await;
+    let (server, state) = crate::tests::test_server::new_test_server().await;
 
     let info = server.get("/info").expect_success().await;
     let info_collection = info.json::<serde_json::Value>()["attempts_collection_started_at"]
@@ -1034,6 +1034,19 @@ async fn test_info_and_snapshot_collection_started_at_agree() {
     let body = decode_snapshot(snapshot.as_bytes());
     let snapshot_collection = body["collection_started_at"].as_str().unwrap().to_string();
 
+    assert_eq!(info_collection, snapshot_collection);
+
+    crate::rate_limit::wipe_identifier_rate_limit(&state).await;
+    let info = server.get("/info").expect_success().await;
+    let info_collection = info.json::<serde_json::Value>()["attempts_collection_started_at"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let snapshot = server.get("/attempts").expect_success().await;
+    let snapshot_collection = decode_snapshot(snapshot.as_bytes())["collection_started_at"]
+        .as_str()
+        .unwrap()
+        .to_string();
     assert_eq!(info_collection, snapshot_collection);
 }
 

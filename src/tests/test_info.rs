@@ -30,8 +30,7 @@ async fn test_info_success() {
     assert_eq!(info.attempts_collection_started_at.second(), 0);
     assert_eq!(info.attempts_collection_started_at.nanosecond(), 0);
     assert!(
-        info.attempts_collection_started_at <= state.attempts_collection_started_at,
-        "truncation rounds down"
+        info.attempts_collection_started_at <= *state.attempts_collection_started_at.lock().await
     );
 }
 

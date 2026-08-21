@@ -41,6 +41,46 @@ impl TokenBucket {
 /// How often the sweeper removes expired rate-limit entries.
 const SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(600);
 
+/// Production interval for the global in-memory telemetry wipe.
+pub const PRODUCTION_GLOBAL_WIPE_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(24 * 60 * 60);
+
+/// Clears all identifiers and candidate tags and starts a fresh collection.
+/// The lock order is shared with `/attempts`: snapshot, map, timestamp.
+pub async fn wipe_identifier_rate_limit(state: &AppState) {
+    let mut snapshot = state.attempts_snapshot.lock().await;
+    let mut identifiers = state.identifier_rate_limit.lock().await;
+    let wiped = identifiers.len();
+    identifiers.clear();
+    let mut started_at = state.attempts_collection_started_at.lock().await;
+    *started_at = chrono::Utc::now();
+    *snapshot = None;
+    tracing::info!(wiped, "daily rate-limit wipe");
+}
+
+pub(crate) fn global_wiper_first_deadline(
+    now: tokio::time::Instant,
+    period: std::time::Duration,
+) -> tokio::time::Instant {
+    now + period
+}
+
+pub fn spawn_global_wiper(
+    state: AppState,
+    period: std::time::Duration,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval_at(
+            global_wiper_first_deadline(tokio::time::Instant::now(), period),
+            period,
+        );
+        loop {
+            interval.tick().await;
+            wipe_identifier_rate_limit(&state).await;
+        }
+    })
+}
+
 /// Removes the hashed rate-limit entries whose last candidate is older than the
 /// cooldown. Entries are only meaningful within the cooldown window; keeping
 /// them longer would grow memory unboundedly and retain identifiers for no
@@ -68,4 +108,8 @@ pub fn spawn_sweeper(state: AppState) {
             sweep_expired_identifiers(&state).await;
         }
     });
+}
+
+pub fn spawn_production_wiper(state: AppState) -> tokio::task::JoinHandle<()> {
+    spawn_global_wiper(state, PRODUCTION_GLOBAL_WIPE_INTERVAL)
 }

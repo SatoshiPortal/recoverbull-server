@@ -30,20 +30,16 @@ struct AppState {
     database_url: String,
     #[cfg(test)]
     _test_database_guard: Arc<env::TestDatabaseGuard>,
-    /// Warrant canary captured at startup. Serves as the fallback when the
-    /// dotenv file is unreadable, and as the authoritative value when it
-    /// came from the process environment.
+    /// Warrant canary captured at startup for unavailable-file fallback, or
+    /// as the authoritative value when it came from process environment.
     canary: String,
     /// True when CANARY was provided by the process environment (dotenvy
     /// never overrides it): the file is then ignored at request time.
     canary_from_env: bool,
-    /// Dotenv file the canary is re-read from, so an operator can update or
-    /// remove it without restarting the server.
+    /// Dotenv file re-read for every `/info` request.
     canary_path: std::path::PathBuf,
-    /// Cache of the last dotenv-file canary parse, invalidated by file
-    /// metadata (modification time and length) rather than on every
-    /// request, since `/info` is deliberately not rate-limited.
-    canary_cache: Arc<Mutex<Option<env::CachedCanary>>>,
+    /// Serializes dotenv reads so `/info` cannot exhaust Tokio's blocking pool.
+    canary_read_semaphore: Arc<Semaphore>,
     rate_limit_cooldown: TimeDelta,
     identifier_rate_limit: Arc<Mutex<HashMap<String, models::RateLimitInfo>>>,
     secret_max_length: usize,

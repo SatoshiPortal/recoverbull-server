@@ -135,7 +135,7 @@ rejections such as `404`, `405`, `413`, and `415` may not be JSON.
 - `failed_attempts`: number of distinct candidates for which no database row existed.
 - `total_requests`: every `/fetch` and `/trash` request attached to this identifier's active entry, including replays; map-capacity rejections for previously unseen identifiers cannot be attributed to an entry. It is telemetry, not candidate budget.
 - `window_started_at` / `last_attempt_at`: hour-truncated timestamps of the current window.
-+ `collection_started_at`: hour-truncated start of the in-memory collection. It changes at startup and after each global 24-hour wipe; clients must reset their baseline.
+- `collection_started_at`: hour-truncated start of the in-memory collection. It changes at startup and after each global 24-hour wipe; clients must reset their baseline.
 
 Identifiers are kept and published hashed, never raw. The entire identifier map, including CandidateTags, is wiped every 24 hours from map startup and the attempt budget resets at that boundary. The cooldown sweep runs earlier for shorter-lived entries; nothing is persisted.
 
@@ -156,6 +156,37 @@ snapshot — a cheap wipe check during the existing connection check) and
 compute the snapshot fullness ratio and warn when the service is under
 pressure). `/info` never exposes a live identifier count: that would make
 map-filling campaigns cheap to monitor.
+
+The canary from the dotenv file is read on a blocking worker for every `/info`
+request, without cache metadata. File reads are serialized by a dedicated
+permit to protect Tokio's bounded blocking pool; nginx/Tor limits remain
+necessary. A readable file without CANARY returns an empty string; an
+unavailable file falls back to startup. A process-environment `CANARY` is
+authoritative and skips file access.
+
+The global wipe is a process-memory boundary, not guaranteed erasure: a
+suspended process, swap, or core dump may retain old pages. The 24-hour timer
+does not advance while the process is stopped or suspended; restart begins a
+new collection.
+
+### Sensitive POST response floor
+
+`POST /store`, `POST /fetch`, and `POST /trash` share a production response
+floor of 500 ms. The floor timer starts when routing hands the request to the
+matched route, before JSON extraction and parsing, so fast validation and body
+or extractor rejections on these three routes are covered too. It targets a
+minimum server-side time until the response is ready (TTFB); it cannot equalize
+network transfer, client timing, request-body upload time, or proxy/Tor delay.
+If processing already takes at least 500 ms, the server adds no sleep. Longer
+processing remains observable and is not hidden by delaying or caching a
+database operation. `/info`, `/attempts`, 404s, 405s, and all other routes are
+excluded, and no timing header or sensitive timing data is emitted.
+
+The extra response wait can increase concurrent connections during a flood.
+Production deployments compensate with the store/lookup token buckets and the
+nginx/Tor connection, request, and DoS defenses described below; it is not a
+replacement for those limits. The invariant and dedicated timing tests are
+listed in [SECURITY.md](SECURITY.md).
 
 
 
@@ -266,9 +297,10 @@ service account only (`chmod 600 .env`, same `0700` directory discipline as
 the database volume).
 
 `CANARY` is the warrant canary served by `/info`. When it is provided by
-this file (the common case), `/info` checks the file metadata on every request
-and re-reads it whenever it changes, following the whitepaper's warrant-canary
-workflow without a restart:
+this file (the common case), `/info` re-reads the file on every request,
+following the whitepaper's warrant-canary workflow without a restart. Reads
+are serialized to protect Tokio's bounded blocking pool; nginx/Tor limits
+remain necessary:
 
 - **Edit the value** → the new value is served immediately.
 - **Remove the `CANARY` line** → an **empty** canary is served: this is the

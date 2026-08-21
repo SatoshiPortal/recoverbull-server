@@ -87,6 +87,14 @@ legal compulsion of both providers (see the whitepaper for the full list).
     sweep removes shorter-lived entries earlier. This is a privacy trade-off:
     non-exposed temporary state is larger than the former identifier-only
     state.
+12. **Minimum response floor is not exact timing.** `/store`, `/fetch`, and
+    `/trash` wait until at least the configured server-side floor when their
+    processing is faster (500 ms in production). Body upload, network and
+    proxy/Tor transfer time are not equalized; processing that already exceeds
+    the floor remains observable. The wait is outside database permits and
+    mutexes, but can increase concurrent connections during a flood. Token
+    buckets plus nginx/Tor connection, request, and DoS defenses bound that
+    amplification.
 
 ## Invariants (each guarded by tests)
 
@@ -111,6 +119,8 @@ code, keep the invariant — and run the guarding test.
 | Global wipe clears identifiers and CandidateTags every 24 hours, resets the budget timestamp, and invalidates pre-wipe snapshots; the first wipe is delayed until the period elapses | No pre-wipe telemetry survives the boundary and `/info` agrees with `/attempts` | `test_global_wipe_clears_candidates_resets_timestamp_and_snapshot`, `test_global_wiper_first_deadline_is_delayed_by_period`, `test_production_global_wipe_interval_is_24_hours` |
 | Configuration is validated fail-closed at startup (ranges, NaN/∞/≤0 rejected) | A zero or absurd value would silently disable a protection | `src/tests/test_env.rs` |
 | Errors are classified by HTTP status only: `429` = targeted lockout, `503` = global pressure, both with `Retry-After` | Clients must not match on error text | `src/tests/test_contract.rs` |
+| POST requests matching `/store`, `/fetch`, and `/trash` have a uniform minimum server-side response time, including extractor rejections; `/info`, `/attempts`, 404s, 405s, other routes, and already-slow processing are excluded | Reduce fast success/failure timing differences without holding database resources or pretending to equalize network time | `src/tests/test_timing.rs` |
+| Dotenv CANARY is read for every `/info` without cache metadata; process-env CANARY is authoritative, missing CANARY is empty, and unavailable files use startup fallback | Operators can signal edits immediately without stale cache state | `test_info_rereads_same_length_canary_when_file_metadata_is_restored`, `test_info_rereads_canary_from_file_with_startup_fallback`, `test_info_env_canary_is_authoritative_over_file` |
 
 ## Test-writing traps
 

@@ -228,7 +228,7 @@ async fn test_attempts_snapshot_rebuild_is_deterministic() {
     // force a rebuild on every request
     state.attempts_snapshot_ttl = std::time::Duration::ZERO;
     crate::database::init_db(state.clone());
-    let server = axum_test::TestServer::new(crate::router::new(state)).unwrap();
+    let server = axum_test::TestServer::new(crate::router::new_for_tests(state)).unwrap();
 
     // unchanged activity: the ETag survives rebuilds
     let first = server.get("/attempts").expect_success().await;
@@ -298,7 +298,7 @@ async fn test_attempts_omit_entries_after_cooldown_without_waiting_for_sweeper()
             },
         );
     }
-    let server = axum_test::TestServer::new(crate::router::new(state)).unwrap();
+    let server = axum_test::TestServer::new(crate::router::new_for_tests(state)).unwrap();
 
     let response = server.get("/attempts").expect_success().await;
     let (_, snapshot) = decode_gzip(response.as_bytes());
@@ -312,7 +312,7 @@ async fn test_attempts_rate_limit_bucket() {
         crate::rate_limit::TokenBucket::new(1.0, 0.0),
     ));
     crate::database::init_db(state.clone());
-    let server = axum_test::TestServer::new(crate::router::new(state)).unwrap();
+    let server = axum_test::TestServer::new(crate::router::new_for_tests(state)).unwrap();
 
     server.get("/attempts").expect_success().await;
     let response = server.get("/attempts").await;

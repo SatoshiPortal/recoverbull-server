@@ -95,7 +95,7 @@ async fn test_new_identifiers_fail_closed_when_rate_limit_map_is_full() {
     let mut state = crate::env::init();
     state.rate_limit_max_identifiers = 1;
     crate::database::init_db(state.clone());
-    let server = axum_test::TestServer::new(crate::router::new(state)).unwrap();
+    let server = axum_test::TestServer::new(crate::router::new_for_tests(state)).unwrap();
 
     let first = server
         .post("/fetch")
@@ -121,7 +121,7 @@ async fn test_database_concurrency_rejection_refunds_lookup_attempt() {
     let mut state = crate::env::init();
     state.database_semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
     crate::database::init_db(state.clone());
-    let server = axum_test::TestServer::new(crate::router::new(state.clone())).unwrap();
+    let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone())).unwrap();
 
     let response = server
         .post("/fetch")

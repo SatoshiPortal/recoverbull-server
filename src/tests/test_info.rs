@@ -65,7 +65,7 @@ async fn test_info_rereads_canary_from_file_with_startup_fallback() {
     ));
     state.canary_path = canary_path.clone();
     crate::database::init_db(state.clone());
-    let server = axum_test::TestServer::new(crate::router::new(state.clone())).unwrap();
+    let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone())).unwrap();
 
     // the file value wins over the startup value
     std::fs::write(&canary_path, "CANARY='🐦‍⬛'\n").unwrap();

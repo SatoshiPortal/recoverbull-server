@@ -91,7 +91,7 @@ async fn test_store_is_not_counted_in_attempts() {
     let mut state = crate::env::init();
     state.attempts_snapshot_ttl = std::time::Duration::ZERO;
     crate::database::init_db(state.clone());
-    let server = axum_test::TestServer::new(crate::router::new(state.clone())).unwrap();
+    let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone())).unwrap();
 
     let store = &StoreSecret {
         identifier: SHA256_111111.to_string(),
@@ -263,7 +263,7 @@ async fn test_503_responses_have_no_machine_code() {
     let mut state = crate::env::init();
     state.rate_limit_max_identifiers = 1;
     crate::database::init_db(state.clone());
-    let server = axum_test::TestServer::new(crate::router::new(state.clone())).unwrap();
+    let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone())).unwrap();
 
     server
         .post("/fetch")
@@ -293,7 +293,7 @@ async fn test_503_responses_have_no_machine_code() {
     let mut state = crate::env::init();
     state.database_semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
     crate::database::init_db(state.clone());
-    let server = axum_test::TestServer::new(crate::router::new(state.clone())).unwrap();
+    let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone())).unwrap();
 
     let response = server
         .post("/fetch")

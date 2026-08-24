@@ -301,6 +301,24 @@ async fn test_cancelled_trash_after_sqlite_start_keeps_attempt_reserved() {
         "detached trash operation did not finish in time"
     );
 
+    let mut lookup_accepted = 0;
+    let mut trash_hit = 0;
+    let mut trash_miss = 0;
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let counters = state.security_counters.flush();
+            lookup_accepted += counters.lookup_accepted;
+            trash_hit += counters.trash_hit;
+            trash_miss += counters.trash_miss;
+            if trash_hit >= 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("detached trash counters did not finish in time");
+
     let identifier_rate_limit = state.identifier_rate_limit.lock().await;
     assert_eq!(
         identifier_rate_limit
@@ -309,10 +327,9 @@ async fn test_cancelled_trash_after_sqlite_start_keeps_attempt_reserved() {
         Some(1),
         "once SQLite has started, cancelling HTTP must not refund the committed attempt"
     );
-    let counters = state.security_counters.flush();
-    assert_eq!(counters.lookup_accepted, 1);
-    assert_eq!(counters.trash_hit, 1);
-    assert_eq!(counters.trash_miss, 0);
+    assert_eq!(lookup_accepted, 1);
+    assert_eq!(trash_hit, 1);
+    assert_eq!(trash_miss, 0);
 }
 
 #[tokio::test]

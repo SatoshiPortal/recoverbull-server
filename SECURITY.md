@@ -23,12 +23,13 @@ risks that are **accepted by design** (do not re-report them), the
 **invariants** the code must keep (each guarded by tests), the traps already
 stepped into, and a checklist for future reviews.
 
-Application log guarantees do not cover nginx, journald, or Tor logs unless the
+Application log guarantees do not cover nginx or Caddy, journald, or Tor logs unless the
 README runbook is applied: those logs may contain request metadata and require
 strict levels, private permissions, and short retention. Five-minute global
 counters retain coarse activity metadata and require the same access controls.
 
-For deployment guardrails (single-instance, nginx, Tor onion), see the
+For deployment guardrails (single-instance, the exclusive nginx/Caddy choice,
+and Tor onion), see the
 README and [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) — they are part of the
 security model, not optional hardening. Tor and single-instance operation are
 required by the model but are not enforced by the binary; a public bind only
@@ -111,10 +112,10 @@ Operators are responsible for retention of those copies.
    fabricate or suppress counters, and the warrant canary has the classic
    limits (an operator under compulsion may keep serving it). Clients must
    warn, never act automatically.
-10. **Global buckets can deny service to everyone.** Behind an onion service
-    per-IP limiting is useless, so buckets are global; an attacker can
-    exhaust them (`503` for all). Bounded by nginx/Tor defenses at the
-    deployment layer.
+ 10. **Global buckets can deny service to everyone.** Behind an onion service
+     per-IP limiting is useless, so buckets are global; an attacker can
+     exhaust them (`503` for all). Bounded by the selected reverse proxy and
+     Tor defenses at the deployment layer.
 11. **Temporary behavioral state.** The server retains up to the configured
     maximum of derived CandidateTags (`secret_id/key_id`) per bucket in memory.
     A CandidateTag is never raw authentication or password material, and is
@@ -138,9 +139,9 @@ Operators are responsible for retention of those copies.
     processing is faster (500 ms in production). Body upload, network and
     proxy/Tor transfer time are not equalized; processing that already exceeds
     the floor remains observable. The wait is outside database permits and
-    mutexes, but can increase concurrent connections during a flood. Token
-    buckets plus nginx/Tor connection, request, and DoS defenses bound that
-    amplification.
+     mutexes, but can increase concurrent connections during a flood. Token
+     buckets plus the selected reverse proxy and Tor connection, request, and
+     DoS defenses bound that amplification.
 
 ## Invariants (each guarded by tests)
 

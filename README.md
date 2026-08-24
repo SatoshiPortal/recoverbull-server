@@ -162,7 +162,7 @@ rejections such as `404`, `405`, `413`, and `415` may not be JSON.
 
 Identifiers are kept and published hashed, never raw. The entire identifier map, including CandidateTags, is wiped every 24 hours from map startup and the attempt budget resets at that boundary. The cooldown sweep runs earlier for shorter-lived entries; nothing is persisted.
 
-The body is **always gzip-compressed JSON** (`Content-Encoding: gzip`); clients must be gzip-capable. This initial telemetry contract, version `1`, reports distinct-candidate counters plus `total_requests` and never exposes CandidateTags. The snapshot is rebuilt at most once per minute and served as immutable shared bytes with a strong `ETag`: send `If-None-Match` to receive a bodyless `304` when nothing changed. `Cache-Control: public, max-age=<remaining seconds>` reflects the real freshness. A dedicated global token bucket (`ATTEMPTS_RATE_LIMIT_*`) bounds cache-bypass traffic; production deployments must additionally cache and rate-limit this route at the reverse proxy (see Deployment).
+The body is **always gzip-compressed JSON** (`Content-Encoding: gzip`); clients must be gzip-capable. This initial telemetry contract, version `1`, reports distinct-candidate counters plus `total_requests` and never exposes CandidateTags. The snapshot is rebuilt at most once per minute and served as immutable shared bytes with a strong `ETag`: send `If-None-Match` to receive a bodyless `304` when nothing changed. `Cache-Control: public, max-age=<remaining seconds>` reflects the real freshness. A dedicated global token bucket (`ATTEMPTS_RATE_LIMIT_*`) bounds cache-bypass traffic; production deployments must additionally cache and rate-limit this route at the reverse proxy (see Deployment). Nginx is the reference template; Caddy is a conditional, mutually exclusive alternative under `deploy/caddy/`.
 
 Detection semantics a client should implement:
 - **Poll `/attempts` proactively** (e.g. at app start, no more often than the snapshot freshness): if your identifier hash appears with attempts you did not make, someone is probing your backup.
@@ -182,7 +182,7 @@ map-filling campaigns cheap to monitor.
 
 The canary from the dotenv file is read on a blocking worker for every `/info`
 request, without cache metadata. File reads are serialized by a dedicated
-permit to protect Tokio's bounded blocking pool; nginx/Tor limits remain
+permit to protect Tokio's bounded blocking pool; the selected reverse-proxy/Tor limits remain
 necessary. A readable file without CANARY returns an empty string; an
 unavailable file falls back to startup. A process-environment `CANARY` is
 authoritative and skips file access.
@@ -207,7 +207,8 @@ excluded, and no timing header or sensitive timing data is emitted.
 
 The extra response wait can increase concurrent connections during a flood.
 Production deployments compensate with the store/lookup token buckets and the
-nginx/Tor connection, request, and DoS defenses described below; it is not a
+selected reverse-proxy and Tor connection, request, and DoS defenses described
+below; it is not a
 replacement for those limits. The invariant and dedicated timing tests are
 listed in [SECURITY.md](SECURITY.md).
 
@@ -251,8 +252,12 @@ hours. An exceptional restart starts a new budget and collection and must not
 overlap the old instance.
 
 Use the maintained templates rather than copying this overview:
-`deploy/systemd/recoverbull.service`, `deploy/nginx/recoverbull.conf`,
+`deploy/systemd/recoverbull.service`, `deploy/nginx/recoverbull.conf` (the
+reference proxy),
 `deploy/tor/recoverbull.torrc.example`, and `deploy/logrotate/recoverbull`.
+The conditional Caddy alternative is documented in `deploy/caddy/README.md`;
+choose exactly one proxy, and admit Caddy only after its build, validation, and
+specific smokes succeed.
 
 1. Keep Axum on a private loopback port: `SERVER_ADDRESS=127.0.0.1:3001`
 2. Configure nginx on `127.0.0.1:3000` with strict header/body timeouts and connection limits:
@@ -344,8 +349,8 @@ the database volume).
 `CANARY` is the warrant canary served by `/info`. When it is provided by
 this file (the common case), `/info` re-reads the file on every request,
 following the whitepaper's warrant-canary workflow without a restart. Reads
-are serialized to protect Tokio's bounded blocking pool; nginx/Tor limits
-remain necessary:
+are serialized to protect Tokio's bounded blocking pool; selected reverse-proxy
+and Tor limits remain necessary:
 
 - **Edit the value** → the new value is served immediately.
 - **Remove the `CANARY` line** → an **empty** canary is served: this is the

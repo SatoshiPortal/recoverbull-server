@@ -1,7 +1,8 @@
 # Retention and recovery template
 
 There is no universal retention duration. The operator must select and record
-durations for application logs, nginx/Tor/journald logs, SQLite backups, WAL,
+durations for application logs, selected reverse-proxy, Tor, and journald logs,
+SQLite backups, WAL,
 Litestream state, and archived snapshots according to legal, operational, and
 recovery requirements.
 

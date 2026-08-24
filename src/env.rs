@@ -135,13 +135,14 @@ pub fn validate_capacity(
 
 /// Validates a token-bucket configuration (burst capacity and refill rate).
 ///
-/// The burst must be finite and strictly positive, or the bucket could never
-/// hold any token. The refill rate must be finite and non-negative (zero
-/// disables refilling but is otherwise a valid, deliberately strict bucket).
+/// The burst must be finite and at least one token. It must also survive the
+/// first subtraction in f64 without rounding back to the original capacity.
+/// The refill rate must be finite and non-negative (zero disables refilling but
+/// is otherwise a valid, deliberately strict bucket).
 pub fn validate_token_bucket(name: &str, burst: f64, refill: f64) -> Result<(), String> {
-    if !burst.is_finite() || burst <= 0.0 {
+    if !burst.is_finite() || burst < 1.0 || burst - 1.0 == burst {
         return Err(format!(
-            "{name}_RATE_LIMIT_BURST must be finite and > 0, got {burst}"
+            "{name}_RATE_LIMIT_BURST must be finite, represent at least one token, and change after consuming one token, got {burst}"
         ));
     }
     if !refill.is_finite() || refill < 0.0 {

@@ -118,6 +118,16 @@ fn test_validate_token_bucket_accepts_valid_values() {
 }
 
 #[test]
+fn test_validate_token_bucket_rejects_sub_token_bursts() {
+    assert!(validate_token_bucket("STORE", 0.5, 0.0).is_err());
+}
+
+#[test]
+fn test_validate_token_bucket_rejects_f64_max() {
+    assert!(validate_token_bucket("STORE", f64::MAX, 0.0).is_err());
+}
+
+#[test]
 fn test_validate_token_bucket_rejects_zero_burst() {
     // a zero burst means the bucket can never hold a single token
     assert!(validate_token_bucket("STORE", 0.0, 2.0).is_err());

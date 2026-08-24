@@ -55,7 +55,7 @@ pub async fn get_attempts(State(state): State<AppState>, headers: HeaderMap) -> 
     {
         match build_snapshot(&state).await {
             Ok(snapshot) => *cached = Some(snapshot),
-            Err(response) => return response,
+            Err(response) => return *response,
         }
     }
 
@@ -104,7 +104,7 @@ pub async fn get_attempts(State(state): State<AppState>, headers: HeaderMap) -> 
 /// and compresses on a blocking thread after releasing it. flate2 writes a
 /// zero mtime in the gzip header, so identical content produces identical
 /// bytes and a stable ETag across rebuilds.
-async fn build_snapshot(state: &AppState) -> Result<AttemptsSnapshotCache, Response> {
+async fn build_snapshot(state: &AppState) -> Result<AttemptsSnapshotCache, Box<Response>> {
     let now = chrono::Utc::now();
     let mut entries: Vec<AttemptEntry> = {
         let mut identifier_rate_limit = state.identifier_rate_limit.lock().await;
@@ -157,16 +157,20 @@ async fn build_snapshot(state: &AppState) -> Result<AttemptsSnapshotCache, Respo
 
     match built {
         Ok(Ok(snapshot)) => Ok(snapshot),
-        Ok(Err(_error)) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(error_body("Internal server error")),
-        )
-            .into_response()),
-        Err(_error) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(error_body("Internal server error")),
-        )
-            .into_response()),
+        Ok(Err(_error)) => Err(Box::new(
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(error_body("Internal server error")),
+            )
+                .into_response(),
+        )),
+        Err(_error) => Err(Box::new(
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(error_body("Internal server error")),
+            )
+                .into_response(),
+        )),
     }
 }
 

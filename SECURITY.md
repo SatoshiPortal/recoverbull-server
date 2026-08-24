@@ -23,6 +23,11 @@ risks that are **accepted by design** (do not re-report them), the
 **invariants** the code must keep (each guarded by tests), the traps already
 stepped into, and a checklist for future reviews.
 
+Application log guarantees do not cover nginx, journald, or Tor logs unless the
+README runbook is applied: those logs may contain request metadata and require
+strict levels, private permissions, and short retention. Five-minute global
+counters retain coarse activity metadata and require the same access controls.
+
 For deployment guardrails (single-instance, nginx, Tor onion), see the
 README — they are part of the security model, not optional hardening.
 
@@ -145,6 +150,8 @@ code, keep the invariant — and run the guarding test.
 | Snapshot is deterministic (sorted entries, gzip `mtime=0`), hour-truncated, single-flight, initial telemetry contract version 1; counts distinct candidates and all requests but exposes no CandidateTags | Stable ETag; precision gradient; bounded build cost and privacy | `test_attempts_snapshot_rebuild_is_deterministic`, `test_attempts_publish_hashed_identifier_with_counters`, `test_attempts_snapshot_at_full_map_scale`, `test_concurrent_attempts_polls_agree_on_etag`, `test_snapshot_never_contains_secret_material` |
 | Global wipe clears identifiers and CandidateTags every 24 hours, resets the budget timestamp, and invalidates pre-wipe snapshots; the first wipe is delayed until the period elapses | No pre-wipe telemetry survives the boundary and `/info` agrees with `/attempts` | `test_global_wipe_clears_candidates_resets_timestamp_and_snapshot`, `test_global_wiper_first_deadline_is_delayed_by_period`, `test_production_global_wipe_interval_is_24_hours` |
 | Configuration is validated fail-closed at startup (ranges, NaN/∞/≤0 rejected) | A zero or absurd value would silently disable a protection | `src/tests/test_env.rs` |
+| Token bursts are finite, contain at least one representable token, and subtracting one changes the `f64` | Numerically ineffective capacities would silently disable a bucket | `src/tests/test_env.rs` |
+| SQLite is bundled at least 3.51.3; startup verifies runtime version and WAL, while every connection verifies WAL and secure deletion | Reproducible WAL-reset fix and deletion invariant without a per-connection version query | `src/tests/test_secure_delete.rs` |
 | Errors are classified by HTTP status only: `429` = targeted lockout, `503` = global pressure, both with `Retry-After` | Clients must not match on error text | `src/tests/test_contract.rs` |
 | POST requests matching `/store`, `/fetch`, and `/trash` have a uniform minimum server-side response time, including extractor rejections; `/info`, `/attempts`, 404s, 405s, other routes, and already-slow processing are excluded | Reduce fast success/failure timing differences without holding database resources or pretending to equalize network time | `src/tests/test_timing.rs` |
 | Dotenv CANARY is read for every `/info` without cache metadata; process-env CANARY is authoritative, missing CANARY is empty, and unavailable files use startup fallback | Operators can signal edits immediately without stale cache state | `test_info_rereads_same_length_canary_when_file_metadata_is_restored`, `test_info_rereads_canary_from_file_with_startup_fallback`, `test_info_env_canary_is_authoritative_over_file` |

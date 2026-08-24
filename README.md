@@ -251,6 +251,8 @@ proxy_cache_path /var/cache/nginx/recoverbull levels=1:2 keys_zone=recoverbull_c
 
 server {
     listen 127.0.0.1:3000;
+    access_log off;
+    error_log /var/log/nginx/recoverbull-error.log crit;
     client_max_body_size 1k;
     client_header_timeout 10s;
     client_body_timeout 10s;
@@ -277,6 +279,15 @@ server {
     }
 }
 ```
+
+Keep the error log readable only by service administrators, for example with
+owner `root:adm` and mode `0640`, and configure logrotate (or an equivalent
+collector) with an operator-selected short retention policy. `crit` reduces
+volume but does not guarantee that request metadata is absent. Apply the same
+level, permission, and explicitly configured retention policy to journald and
+Tor logs. Application log guarantees do not cover reverse-proxy or system logs
+unless this runbook is applied. The five-minute global counters retain coarse
+activity metadata and also require restricted access and retention.
 
 All Tor connections reach nginx from loopback, so these connection and request limits are intentionally global. The backend already serves `/attempts` precompressed: nginx caches that exact body instead of recompressing per request. `limit_rate` caps per-connection throughput; multiplied by the connection limit it bounds aggregate snapshot egress. The proxy is also what lets slow clients take their time: with default `proxy_buffering`, nginx drains Axum quickly (within its 30s route timeout) and feeds the client at its own pace.
 
@@ -385,6 +396,16 @@ Both capacities are range-checked at startup: `RATE_LIMIT_MAX_IDENTIFIERS`
 must be in `[1, 10000000]` and `DATABASE_MAX_CONCURRENCY` in `[1, 1024]` —
 a zero or an absurdly large value would silently disable the protection, so
 the server refuses to start instead.
+Token bursts are validated mathematically: they must be finite, contain at
+least one token, and `burst - 1.0` must differ from `burst` in `f64`. This
+rejects numerically ineffective values without an arbitrary throughput cap.
+The identifier maximum is unchanged; operators must set a memory gate with
+headroom or lower capacity.
+The release bundles SQLite 3.51.3 through `libsqlite3-sys`, the upstream WAL
+reset fix. Startup verifies the runtime version and exactly
+`journal_mode=wal`; every application connection verifies exactly
+`journal_mode=wal` and `secure_delete=1`. The runtime version is immutable for
+the bundled process and is not re-queried on every request connection.
 > `SECRET_MAX_LENGTH=128` represents the size of a 96 octets encrypted secret encoded using base64
 > 96 octets =  `nonce` (16 octets) | `ciphertext` (32 octets) | `hmac` (32 octets) + 16 octets padding to round up to 32 octets blocks
 
@@ -406,6 +427,20 @@ filesystem or project quota. Keep the directory private (`0700`, process umask
 WAL checkpoints and replication. Do not automatically delete recovery secrets:
 when the quota is reached, new stores must fail closed until the operator adds
 capacity or applies an explicit retention policy.
+
+### Pre-deploy privacy and recovery gates
+
+Before activation verify one systemd instance, a loopback bind, a `0700`
+deployment directory, `.env` mode `0600`, and service `umask 0077`. Set
+`LimitCORE=0` and configure swap/crash handling. Define retention for the
+database, WAL, and Litestream copies; test restore and rollback, including the
+WAL. Run canary/wipe and store/fetch/trash smoke checks before admitting traffic.
+Debug logging is temporary only and must be disabled before canary exposure.
+
+At the default `RATE_LIMIT_MAX_IDENTIFIERS=100000`, a dynamic audit measured
+22.1 MB JSON, 4.01 MB gzip, and about 254 MiB peak RSS on one host. These are
+measurements, not a universal guarantee: set service memory and capacity with
+headroom or lower the capacity.
 
 ### Run the app
 

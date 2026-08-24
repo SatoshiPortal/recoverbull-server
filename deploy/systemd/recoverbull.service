@@ -1,0 +1,25 @@
+[Unit]
+Description=RecoverBull keychain server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=recoverbull
+Group=recoverbull
+WorkingDirectory=/var/lib/recoverbull
+ExecStart=/opt/recoverbull/bin/keychain
+Restart=no
+TimeoutStopSec=40s
+LimitCORE=0
+UMask=0077
+MemoryMax=512M
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+ReadWritePaths=/var/lib/recoverbull
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

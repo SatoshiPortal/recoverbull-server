@@ -1,0 +1,13 @@
+# Reference policy only; adapt these periods and document the selected
+# retention according to docs/RETENTION.md and local operational requirements.
+/var/log/nginx/recoverbull-error.log {
+    weekly
+    rotate 4
+    compress
+    missingok
+    notifempty
+    create 0640 root adm
+    postrotate
+        systemctl reload nginx >/dev/null 2>&1 || true
+    endscript
+}

@@ -4,6 +4,8 @@ The server provides secret storage without relying on traditional credentials sy
 
 For the threat model, the risks accepted by design, the security invariants
 guarded by tests and the reviewer checklist, see [SECURITY.md](SECURITY.md).
+Operational templates are in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) and
+[docs/RETENTION.md](docs/RETENTION.md), with versioned files under `deploy/`.
 
 ## Description
 
@@ -41,7 +43,7 @@ are never logged.
 
  1. On the client side, generate a random secure `identifier`, that you can store securely in a file, and let the user define a `password`.
 
- 2. Since the `password` is probably weak, we use a password hashing function such as Argon2 to derive a 64 octets (512 bits) key splitted in two keys:
+  2. If the user's password/PIN has low entropy, use a password hashing function such as Argon2 to slow offline guesses while deriving a 64 octets (512 bits) key split in two keys. The cloud and database together permit offline validation, so security ultimately depends on the user's secret entropy:
 - `authentication_key` the first 32 octets (256bits)
 - `encryption_key` the remaining 32 octets to encrypt/decrypt the secret
 > Argon2 `salt` is stored alongside the `identifier`. Other params used to derive keys from the password should be the same to derive the exact same keys.
@@ -155,7 +157,7 @@ rejections such as `404`, `405`, `413`, and `415` may not be JSON.
 - `total_attempts`: number of distinct candidates admitted in the current cooldown window.
 - `failed_attempts`: number of distinct candidates for which no database row existed.
 - `total_requests`: every `/fetch` and `/trash` request attached to this identifier's active entry, including replays; map-capacity rejections for previously unseen identifiers cannot be attributed to an entry. It is telemetry, not candidate budget.
-- `window_started_at` / `last_attempt_at`: hour-truncated timestamps of the current window.
+- `window_started_at` / `last_attempt_at`: hour-truncated timestamps of the current window; `last_attempt_at` is the last distinct candidate timestamp, not the latest replay request. The JSON field name is retained for compatibility.
 - `collection_started_at`: hour-truncated start of the in-memory collection. It changes at startup and after each global 24-hour wipe; clients must reset their baseline.
 
 Identifiers are kept and published hashed, never raw. The entire identifier map, including CandidateTags, is wiped every 24 hours from map startup and the attempt budget resets at that boundary. The cooldown sweep runs earlier for shorter-lived entries; nothing is persisted.
@@ -164,7 +166,7 @@ The body is **always gzip-compressed JSON** (`Content-Encoding: gzip`); clients 
 
 Detection semantics a client should implement:
 - **Poll `/attempts` proactively** (e.g. at app start, no more often than the snapshot freshness): if your identifier hash appears with attempts you did not make, someone is probing your backup.
-- **Treat a `429` as an alarm**: global service pressure uses `503` instead. See [Error responses](#error-responses) for the full table; do not match on the `error` text.
+- **Treat a `429` or unexpected snapshot activity as an alarm**: global service pressure uses `503` instead. If the wallet is still accessible, rotate/transfer immediately; otherwise recovery availability depends on a **previously exported** Backup Key or a second independent server. See [Error responses](#error-responses) for the full table; do not match on the `error` text.
 - **`attempt_status` on a successful fetch is the freshest signal**: it needs no extra request and stays available even when `/attempts` is overloaded. Failures older than the cooldown expire (entries are swept and forgotten), but a success never resets the counters early.
 - **Telemetry is advisory**: the server cannot distinguish an attacker from the user or another of the user's devices, and a compromised server can fabricate or suppress counters. Clients must warn, never act automatically.
 
@@ -239,7 +241,18 @@ Protocol roadmap: escalating backoff (delay without permanent denial), client pr
 
 The server is designed to be reached exclusively through a **Tor onion service**: it protects the transport confidentiality of the `authentication_key` and the IP anonymity of clients. **Never expose it directly on a public interface** — the server refuses to stay silent about it and prints a startup warning when `SERVER_ADDRESS` is not loopback. Production deployments must put a reverse proxy between Tor and Axum because Axum's route timeout starts after HTTP headers have been read.
 
-The supported deployment is **single-instance**: rate limits, token buckets, the cache, and the collection marker are in memory. Load balancing or rolling overlap would multiply budgets and make telemetry inconsistent. Drain and stop the old instance before activating a new one.
+The supported deployment is **strictly single-instance**: rate limits, token
+buckets, the cache, and the collection marker are in memory. The binary does
+not enforce Tor or single-instance operation; a non-loopback bind only emits a
+startup warning. Load balancing or rolling overlap would multiply budgets and
+make telemetry inconsistent. Stop the old instance before activating a new
+one; no daily restart is needed. The internal collection wipe occurs every 24
+hours. An exceptional restart starts a new budget and collection and must not
+overlap the old instance.
+
+Use the maintained templates rather than copying this overview:
+`deploy/systemd/recoverbull.service`, `deploy/nginx/recoverbull.conf`,
+`deploy/tor/recoverbull.torrc.example`, and `deploy/logrotate/recoverbull`.
 
 1. Keep Axum on a private loopback port: `SERVER_ADDRESS=127.0.0.1:3001`
 2. Configure nginx on `127.0.0.1:3000` with strict header/body timeouts and connection limits:

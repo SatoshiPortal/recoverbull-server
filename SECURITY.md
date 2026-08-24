@@ -45,6 +45,16 @@ legal compulsion of both providers (see the whitepaper for the full list).
 
 ## Accepted risks and design tensions (do not re-report)
 
+## Deletion and SQLite/WAL retention
+
+`/trash` transactionally removes the active row. The application explicitly
+forces SQLite `secure_delete=ON` on every connection, covering pages rewritten
+by the deletion; it does not depend on a Debian compile flag. In WAL mode, the
+main database file or a copy may retain pre-checkpoint state. Backups,
+Litestream replicas, and historical snapshots are not purged. A coherent
+backup must include both the database and WAL, or use SQLite's backup API.
+Operators are responsible for retention of those copies.
+
 1. **Targeted lockout (audit F2).** An attacker holding the Backup File can
    submit three distinct candidates and consume the victim's candidate budget,
    delaying or preventing recovery. The bucket is always `sha256(identifier)`

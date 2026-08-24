@@ -363,6 +363,14 @@ warning; when both are present, the canonical variable wins. The
 `remaining_attempts` field of `attempt_status` derives from it.
 The lookup bucket is a separate global safety limit for `/fetch` and `/trash`.
 
+`/trash` removes the active row transactionally. SQLite `secure_delete` is
+forced on every application connection, so pages rewritten by that deletion
+are scrubbed. With WAL enabled, the main database file (or a copy of it) may
+still contain pre-checkpoint state; backups, Litestream replicas, and
+historical snapshots are not purged. A consistent backup must include the
+database and WAL, or use SQLite's backup API. Operators must define retention
+and deletion policies for those copies.
+
 The attempts bucket is a third global limit for `GET /attempts`, sized for
 direct cache-bypass traffic; the reverse-proxy cache absorbs normal reads.
 `ATTEMPTS_SNAPSHOT_TTL_SECONDS` controls how long a snapshot is reused

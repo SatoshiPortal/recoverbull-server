@@ -11,6 +11,7 @@ pub mod test_info;
 pub mod test_logging;
 pub mod test_migrations;
 pub mod test_rate_limit;
+pub mod test_secure_delete;
 pub mod test_server;
 pub mod test_store;
 pub mod test_timing;

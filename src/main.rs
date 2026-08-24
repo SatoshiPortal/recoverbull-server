@@ -80,7 +80,7 @@ async fn main() {
     }
 
     crate::database::init_db(app_state.clone());
-    tracing::info!(target: "security", counter_window_seconds = 300, "security controls enabled");
+    tracing::info!(target: "security", secure_delete = true, counter_window_seconds = 300, "security controls enabled");
     crate::security_counters::spawn_reporter(
         app_state.clone(),
         std::time::Duration::from_secs(300),

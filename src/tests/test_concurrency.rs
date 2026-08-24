@@ -13,10 +13,11 @@ async fn spawn_server() -> (std::net::SocketAddr, crate::AppState) {
     app_state.lookup_token_bucket = std::sync::Arc::new(tokio::sync::Mutex::new(
         crate::rate_limit::TokenBucket::new(10_000.0, 10_000.0),
     ));
-    crate::database::init_db(app_state.clone());
+    crate::database::try_init_db(app_state.clone()).unwrap();
     let app = crate::router::new_for_tests(app_state.clone());
 
-    let mut connection = crate::database::establish_connection(app_state.clone().database_url);
+    let mut connection =
+        crate::database::establish_connection(app_state.clone().database_url).unwrap();
     crate::tests::test_server::clear_table_secret(&mut connection).await;
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -198,7 +199,7 @@ async fn test_concurrent_identical_store_is_idempotent() {
         "every concurrent identical store must return 201, got: {other:?}"
     );
 
-    let mut connection = crate::database::establish_connection(app_state.database_url);
+    let mut connection = crate::database::establish_connection(app_state.database_url).unwrap();
     let rows: i64 = crate::schema::secret::table
         .count()
         .get_result(&mut connection)

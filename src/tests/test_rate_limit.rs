@@ -133,7 +133,7 @@ async fn test_fetch_expires_sub_threshold_entry_after_cooldown() {
 async fn test_new_identifiers_fail_closed_when_rate_limit_map_is_full() {
     let mut state = crate::env::init();
     state.rate_limit_max_identifiers = 1;
-    crate::database::init_db(state.clone());
+    crate::database::try_init_db(state.clone()).unwrap();
     let server = axum_test::TestServer::new(crate::router::new_for_tests(state)).unwrap();
 
     let first = server
@@ -159,7 +159,7 @@ async fn test_new_identifiers_fail_closed_when_rate_limit_map_is_full() {
 async fn test_database_concurrency_rejection_refunds_lookup_attempt() {
     let mut state = crate::env::init();
     state.database_semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
-    crate::database::init_db(state.clone());
+    crate::database::try_init_db(state.clone()).unwrap();
     let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone())).unwrap();
 
     let response = server
@@ -193,7 +193,7 @@ async fn test_database_concurrency_rejection_refunds_lookup_attempt() {
 async fn test_cancelled_request_does_not_consume_an_attempt() {
     let mut state = crate::env::init();
     state.database_semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
-    crate::database::init_db(state.clone());
+    crate::database::try_init_db(state.clone()).unwrap();
 
     let request = FetchSecret {
         identifier: SHA256_111111.to_string(),
@@ -252,7 +252,8 @@ async fn test_cancelled_trash_after_sqlite_start_keeps_attempt_reserved() {
     server.post("/store").json(&store).expect_success().await;
     state.security_counters.flush();
 
-    let mut lock_connection = crate::database::establish_connection(state.database_url.clone());
+    let mut lock_connection =
+        crate::database::establish_connection(state.database_url.clone()).unwrap();
     diesel::sql_query("BEGIN IMMEDIATE")
         .execute(&mut lock_connection)
         .expect("test must acquire the SQLite write lock");
@@ -284,7 +285,8 @@ async fn test_cancelled_trash_after_sqlite_start_keeps_attempt_reserved() {
     let secret_id = generate_secret_id(SHA256_111111, SHA256_222222);
     let deletion = tokio::time::timeout(std::time::Duration::from_secs(1), async {
         loop {
-            let mut connection = crate::database::establish_connection(state.database_url.clone());
+            let mut connection =
+                crate::database::establish_connection(state.database_url.clone()).unwrap();
             let remaining = crate::database::read_secret_by_id(&mut connection, &secret_id)
                 .expect("secret lookup must succeed after releasing the test lock");
             if remaining.is_none() {
@@ -316,8 +318,9 @@ async fn test_cancelled_trash_after_sqlite_start_keeps_attempt_reserved() {
 #[tokio::test]
 async fn test_cancelled_store_after_sqlite_start_counts_once() {
     let state = crate::env::init();
-    crate::database::init_db(state.clone());
-    let mut lock_connection = crate::database::establish_connection(state.database_url.clone());
+    crate::database::try_init_db(state.clone()).unwrap();
+    let mut lock_connection =
+        crate::database::establish_connection(state.database_url.clone()).unwrap();
     diesel::sql_query("BEGIN IMMEDIATE")
         .execute(&mut lock_connection)
         .expect("test must acquire the SQLite write lock");
@@ -365,7 +368,7 @@ async fn test_cancelled_store_after_sqlite_start_counts_once() {
 async fn test_concurrent_cancellation_refunds_every_reservation() {
     let mut state = crate::env::init();
     state.database_semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
-    crate::database::init_db(state.clone());
+    crate::database::try_init_db(state.clone()).unwrap();
 
     let request = || FetchSecret {
         identifier: SHA256_111111.to_string(),
@@ -440,7 +443,7 @@ async fn test_concurrent_cancellation_refunds_every_reservation() {
 async fn test_deferred_refund_runs_when_drop_finds_the_lock_contended() {
     let mut state = crate::env::init();
     state.database_semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
-    crate::database::init_db(state.clone());
+    crate::database::try_init_db(state.clone()).unwrap();
 
     let request = FetchSecret {
         identifier: SHA256_111111.to_string(),

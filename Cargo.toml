@@ -16,6 +16,7 @@ dotenvy = "0.15"
 tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "net", "sync", "time", "io-util", "signal"] }
 serde = { version = "1.0.210", features = ["derive"] }
 diesel = { version = "2.3", features = ["sqlite"] }
+libsqlite3-sys = { version = "=0.37.0", features = ["bundled"] }
 diesel_migrations = "2.3"
 chrono = { version = "0.4.38", features = ["serde"] }
 tower-http = { version = "0.6.1", features = ["timeout"] }

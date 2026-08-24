@@ -306,6 +306,39 @@ async fn test_attempts_omit_entries_after_cooldown_without_waiting_for_sweeper()
 }
 
 #[tokio::test]
+async fn test_attempts_last_attempt_at_is_last_distinct_candidate() {
+    let mut state = crate::env::init();
+    state.rate_limit_cooldown = chrono::TimeDelta::hours(24);
+    let now = chrono::Utc::now();
+    let window_started_at = now - chrono::TimeDelta::hours(4);
+    let last_candidate_at = now - chrono::TimeDelta::hours(2);
+    let last_request_at = now - chrono::TimeDelta::hours(1);
+    {
+        let mut entries = state.identifier_rate_limit.lock().await;
+        entries.insert(
+            crate::utils::identifier_hash(SHA256_111111).unwrap(),
+            RateLimitInfo {
+                window_started_at,
+                last_candidate_at,
+                last_request_at,
+                candidates: std::collections::HashMap::new(),
+                failed_candidates: 1,
+                total_requests: 4,
+            },
+        );
+    }
+    let server = axum_test::TestServer::new(crate::router::new_for_tests(state)).unwrap();
+
+    let response = server.get("/attempts").expect_success().await;
+    let (_, snapshot) = decode_gzip(response.as_bytes());
+    assert_eq!(
+        snapshot.entries[0].last_attempt_at,
+        crate::utils::truncate_to_hour(last_candidate_at)
+    );
+    assert_eq!(snapshot.entries[0].total_requests, 4);
+}
+
+#[tokio::test]
 async fn test_attempts_rate_limit_bucket() {
     let mut state = crate::env::init();
     state.attempts_token_bucket = std::sync::Arc::new(tokio::sync::Mutex::new(

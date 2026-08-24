@@ -119,7 +119,7 @@ async fn build_snapshot(state: &AppState) -> Result<AttemptsSnapshotCache, Respo
                 failed_attempts: info.failed_candidates,
                 total_requests: info.total_requests,
                 window_started_at: truncate_to_hour(info.window_started_at),
-                last_attempt_at: truncate_to_hour(info.last_request_at),
+                last_attempt_at: truncate_to_hour(info.last_candidate_at),
             })
             .collect()
         // lock dropped here

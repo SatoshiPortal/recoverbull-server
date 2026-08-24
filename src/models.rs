@@ -146,6 +146,8 @@ pub struct AttemptEntry {
     pub total_requests: u64,
     /// Hour-truncated: exact timestamps would ease correlation.
     pub window_started_at: chrono::DateTime<chrono::Utc>,
+    /// Compatibility field name; this is the hour-truncated last distinct
+    /// candidate timestamp, never the timestamp of a replay request.
     pub last_attempt_at: chrono::DateTime<chrono::Utc>,
 }
 

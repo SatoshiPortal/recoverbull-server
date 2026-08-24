@@ -35,6 +35,7 @@ pub fn init_db(state: AppState) {
     sql_query("PRAGMA journal_mode = WAL;")
         .execute(&mut connection)
         .expect("Failed to enable WAL mode");
+    tracing::info!(target: "security", "database initialized");
 }
 
 /// Runs embedded migrations, adopting an exact pre-Diesel `secret` table when
@@ -120,6 +121,18 @@ pub fn establish_connection(database_url: String) -> SqliteConnection {
     sql_query("PRAGMA busy_timeout = 5000;")
         .execute(&mut connection)
         .expect("Failed to set busy_timeout");
+    sql_query("PRAGMA secure_delete = ON;")
+        .execute(&mut connection)
+        .expect("Failed to enable secure_delete");
+    #[derive(QueryableByName)]
+    struct PragmaValue {
+        #[diesel(sql_type = diesel::sql_types::Integer)]
+        value: i32,
+    }
+    let secure_delete = sql_query("SELECT secure_delete AS value FROM pragma_secure_delete")
+        .get_result::<PragmaValue>(&mut connection)
+        .expect("Failed to verify secure_delete");
+    assert_eq!(secure_delete.value, 1, "secure_delete was not enabled");
     connection
 }
 

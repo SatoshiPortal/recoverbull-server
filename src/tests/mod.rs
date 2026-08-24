@@ -8,10 +8,13 @@ pub mod test_distinct_candidates;
 pub mod test_env;
 pub mod test_fetch;
 pub mod test_info;
+pub mod test_logging;
 pub mod test_migrations;
 pub mod test_rate_limit;
+pub mod test_secure_delete;
 pub mod test_server;
 pub mod test_store;
+pub mod test_timing;
 pub mod test_trash;
 
 static SHA256_111111: &str = "bcb15f821479b4d5772bd0ca866c00ad5f926e3580720659cc80d39c9d09802a";

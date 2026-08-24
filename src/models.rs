@@ -152,8 +152,8 @@ pub struct AttemptEntry {
 #[derive(Serialize, Deserialize)]
 pub struct AttemptsSnapshot {
     pub version: u8,
-    /// Hour-truncated start of the in-memory collection (last server boot).
-    /// A changed value tells clients to reset their baseline.
+    /// Hour-truncated start of the in-memory collection. A changed value
+    /// tells clients to reset their baseline after startup or global wipe.
     pub collection_started_at: chrono::DateTime<chrono::Utc>,
     pub entries: Vec<AttemptEntry>,
 }

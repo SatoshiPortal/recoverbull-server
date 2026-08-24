@@ -14,7 +14,7 @@ async fn spawn_server() -> (std::net::SocketAddr, crate::AppState) {
         crate::rate_limit::TokenBucket::new(10_000.0, 10_000.0),
     ));
     crate::database::init_db(app_state.clone());
-    let app = crate::router::new(app_state.clone());
+    let app = crate::router::new_for_tests(app_state.clone());
 
     let mut connection = crate::database::establish_connection(app_state.clone().database_url);
     crate::tests::test_server::clear_table_secret(&mut connection).await;

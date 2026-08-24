@@ -16,6 +16,27 @@ guarded by tests and the reviewer checklist, see [SECURITY.md](SECURITY.md).
 - `secret_id` = `hash(identifier + authentication_key)` Unique record key in the server’s database. Concretely: **SHA-256 over the concatenation of the two lowercase hex *strings*** (128 ASCII bytes) — not over the decoded raw bytes. This differs from the `/attempts` `id_hash`, which hashes the raw identifier bytes; client implementations must not mix the two.
 - `encrypted_secret` = `encrypt(private_key: encryption_key, payload: secret)` The ciphertext of the secret using `encryption_key`.
 
+### Request diagnostics and security counters
+
+Every response includes a server-generated `X-Request-ID`. Client-provided
+`x-request-id` headers are removed before routing and are never reused. The
+security counter reporter emits one aggregate summary every five minutes at
+`info`, including the saturating `diagnostic_logs_emitted` and
+`diagnostic_logs_suppressed` counters.
+
+Detailed request events are disabled at the normal `info` level. For temporary
+diagnosis, enable `RUST_LOG=info,request_diagnostics=debug`; debug logging must not
+be left enabled during normal operation. It is globally quota-limited per
+class to a burst of 10 events with a refill rate of 1 event per second. The
+only request-event fields are the generated `request_id`, static route enum
+(`store`, `fetch`, `trash`, `info`, `attempts`, `other`), static method enum,
+numeric HTTP `status`, static category enum, and static duration bucket enum.
+Categories are `success`, `client_error`, `overload`, or `server_error`; duration
+buckets are `lt500ms`, `500ms_1s`, `1s_5s`, or `gte5s`.
+Raw URIs, query strings, headers, bodies, remote addresses, database paths,
+identifiers, hashes, tags, keys, ciphertexts, canary values, and raw errors
+are never logged.
+
 ### Store
 
  1. On the client side, generate a random secure `identifier`, that you can store securely in a file, and let the user define a `password`.
@@ -135,9 +156,9 @@ rejections such as `404`, `405`, `413`, and `415` may not be JSON.
 - `failed_attempts`: number of distinct candidates for which no database row existed.
 - `total_requests`: every `/fetch` and `/trash` request attached to this identifier's active entry, including replays; map-capacity rejections for previously unseen identifiers cannot be attributed to an entry. It is telemetry, not candidate budget.
 - `window_started_at` / `last_attempt_at`: hour-truncated timestamps of the current window.
-- `collection_started_at`: hour-truncated start of the in-memory collection (last server boot). When it changes, counters were wiped: clients must reset their baseline.
+- `collection_started_at`: hour-truncated start of the in-memory collection. It changes at startup and after each global 24-hour wipe; clients must reset their baseline.
 
-Identifiers are kept and published hashed, never raw. Entries live in the same in-memory map as the rate-limiter, so they expire with it (cooldown or server reboot): nothing is persisted.
+Identifiers are kept and published hashed, never raw. The entire identifier map, including CandidateTags, is wiped every 24 hours from map startup and the attempt budget resets at that boundary. The cooldown sweep runs earlier for shorter-lived entries; nothing is persisted.
 
 The body is **always gzip-compressed JSON** (`Content-Encoding: gzip`); clients must be gzip-capable. This initial telemetry contract, version `1`, reports distinct-candidate counters plus `total_requests` and never exposes CandidateTags. The snapshot is rebuilt at most once per minute and served as immutable shared bytes with a strong `ETag`: send `If-None-Match` to receive a bodyless `304` when nothing changed. `Cache-Control: public, max-age=<remaining seconds>` reflects the real freshness. A dedicated global token bucket (`ATTEMPTS_RATE_LIMIT_*`) bounds cache-bypass traffic; production deployments must additionally cache and rate-limit this route at the reverse proxy (see Deployment).
 
@@ -157,6 +178,37 @@ compute the snapshot fullness ratio and warn when the service is under
 pressure). `/info` never exposes a live identifier count: that would make
 map-filling campaigns cheap to monitor.
 
+The canary from the dotenv file is read on a blocking worker for every `/info`
+request, without cache metadata. File reads are serialized by a dedicated
+permit to protect Tokio's bounded blocking pool; nginx/Tor limits remain
+necessary. A readable file without CANARY returns an empty string; an
+unavailable file falls back to startup. A process-environment `CANARY` is
+authoritative and skips file access.
+
+The global wipe is a process-memory boundary, not guaranteed erasure: a
+suspended process, swap, or core dump may retain old pages. The 24-hour timer
+does not advance while the process is stopped or suspended; restart begins a
+new collection.
+
+### Sensitive POST response floor
+
+`POST /store`, `POST /fetch`, and `POST /trash` share a production response
+floor of 500 ms. The floor timer starts when routing hands the request to the
+matched route, before JSON extraction and parsing, so fast validation and body
+or extractor rejections on these three routes are covered too. It targets a
+minimum server-side time until the response is ready (TTFB); it cannot equalize
+network transfer, client timing, request-body upload time, or proxy/Tor delay.
+If processing already takes at least 500 ms, the server adds no sleep. Longer
+processing remains observable and is not hidden by delaying or caching a
+database operation. `/info`, `/attempts`, 404s, 405s, and all other routes are
+excluded, and no timing header or sensitive timing data is emitted.
+
+The extra response wait can increase concurrent connections during a flood.
+Production deployments compensate with the store/lookup token buckets and the
+nginx/Tor connection, request, and DoS defenses described below; it is not a
+replacement for those limits. The invariant and dedicated timing tests are
+listed in [SECURITY.md](SECURITY.md).
+
 
 
 ### Privacy and security goals
@@ -164,7 +216,7 @@ map-filling campaigns cheap to monitor.
 A user can store multiple secrets and the server is not able to link any secret to a specific user. Each secret has a random `identifier`. The `secret_id` is built from the hash of the `identifier` and `authentication_key`.
 
 If the `identifier` is found and used by a malicious person, the server is not able to link it to a specific `secret`.
-**To mitigate targeted brute-force on a specific `secret`, the server temporarily caches the bucket `sha256(identifier)` and up to the configured maximum of derived CandidateTags in memory. CandidateTags are not exposed, logged, or snapshotted; all state is wiped after cooldown or restart.** This improves availability and signal for distinct guesses, at the cost of temporarily retaining up to `max` non-exposed derived tags and increasing behavioral state in memory.
+**To mitigate targeted brute-force on a specific `secret`, the server temporarily caches the bucket `sha256(identifier)` and up to the configured maximum of derived CandidateTags in memory. CandidateTags are not exposed, logged, or snapshotted; all state is wiped at the daily global boundary or restart, while the cooldown sweep removes shorter-lived entries sooner.** This improves availability and signal for distinct guesses, at the cost of temporarily retaining up to `max` non-exposed derived tags and increasing behavioral state in memory.
 
 The server cannot read users secrets because they are encrypted client-side using the `encryption_key` derived from `password`, the secret encryption mitigate the risk of database leak, attackers would have access to: `secret_id`, `created_at` and `encrypted_secret`.
 
@@ -266,9 +318,10 @@ service account only (`chmod 600 .env`, same `0700` directory discipline as
 the database volume).
 
 `CANARY` is the warrant canary served by `/info`. When it is provided by
-this file (the common case), `/info` checks the file metadata on every request
-and re-reads it whenever it changes, following the whitepaper's warrant-canary
-workflow without a restart:
+this file (the common case), `/info` re-reads the file on every request,
+following the whitepaper's warrant-canary workflow without a restart. Reads
+are serialized to protect Tokio's bounded blocking pool; nginx/Tor limits
+remain necessary:
 
 - **Edit the value** → the new value is served immediately.
 - **Remove the `CANARY` line** → an **empty** canary is served: this is the
@@ -309,6 +362,15 @@ slot. If the canonical variable is absent, the server accepts
 warning; when both are present, the canonical variable wins. The
 `remaining_attempts` field of `attempt_status` derives from it.
 The lookup bucket is a separate global safety limit for `/fetch` and `/trash`.
+
+`/trash` removes the active row transactionally. SQLite `secure_delete` is
+forced on every application connection, so pages rewritten by that deletion
+are scrubbed. With WAL enabled, the main database file (or a copy of it) may
+still contain pre-checkpoint state; backups, Litestream replicas, and
+historical snapshots are not purged. A consistent backup must include the
+database and WAL, or use SQLite's backup API. Operators must define retention
+and deletion policies for those copies.
+
 The attempts bucket is a third global limit for `GET /attempts`, sized for
 direct cache-bypass traffic; the reverse-proxy cache absorbs normal reads.
 `ATTEMPTS_SNAPSHOT_TTL_SECONDS` controls how long a snapshot is reused

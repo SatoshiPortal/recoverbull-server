@@ -5,6 +5,45 @@ use crate::{
 };
 use axum::http::StatusCode;
 use diesel::RunQueryDsl;
+use std::time::Duration;
+
+#[tokio::test]
+async fn test_global_wipe_clears_candidates_resets_timestamp_and_snapshot() {
+    let (server, state) = crate::tests::test_server::new_test_server().await;
+    server.get("/attempts").expect_success().await;
+    let before = *state.attempts_collection_started_at.lock().await;
+    {
+        let mut map = state.identifier_rate_limit.lock().await;
+        let mut info = RateLimitInfo::new(chrono::Utc::now());
+        info.candidates.insert(
+            "candidate-tag".to_owned(),
+            crate::models::CandidateState::Committed,
+        );
+        map.insert(SHA256_111111.to_owned(), info);
+    }
+    crate::rate_limit::wipe_identifier_rate_limit(&state).await;
+    assert!(state.identifier_rate_limit.lock().await.is_empty());
+    assert!(state.attempts_snapshot.lock().await.is_none());
+    assert!(*state.attempts_collection_started_at.lock().await > before);
+}
+
+#[test]
+fn test_global_wiper_first_deadline_is_delayed_by_period() {
+    let now = tokio::time::Instant::now();
+    let period = Duration::from_secs(24 * 60 * 60);
+    assert_eq!(
+        crate::rate_limit::global_wiper_first_deadline(now, period),
+        now + period
+    );
+}
+
+#[test]
+fn test_production_global_wipe_interval_is_24_hours() {
+    assert_eq!(
+        crate::rate_limit::PRODUCTION_GLOBAL_WIPE_INTERVAL,
+        Duration::from_secs(24 * 60 * 60)
+    );
+}
 
 #[tokio::test]
 async fn test_sweep_removes_only_expired_entries() {
@@ -95,7 +134,7 @@ async fn test_new_identifiers_fail_closed_when_rate_limit_map_is_full() {
     let mut state = crate::env::init();
     state.rate_limit_max_identifiers = 1;
     crate::database::init_db(state.clone());
-    let server = axum_test::TestServer::new(crate::router::new(state)).unwrap();
+    let server = axum_test::TestServer::new(crate::router::new_for_tests(state)).unwrap();
 
     let first = server
         .post("/fetch")
@@ -121,7 +160,7 @@ async fn test_database_concurrency_rejection_refunds_lookup_attempt() {
     let mut state = crate::env::init();
     state.database_semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
     crate::database::init_db(state.clone());
-    let server = axum_test::TestServer::new(crate::router::new(state.clone())).unwrap();
+    let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone())).unwrap();
 
     let response = server
         .post("/fetch")
@@ -211,6 +250,7 @@ async fn test_cancelled_trash_after_sqlite_start_keeps_attempt_reserved() {
         encrypted_secret: BASE64_ENCRYPTED_SECRET.to_string(),
     };
     server.post("/store").json(&store).expect_success().await;
+    state.security_counters.flush();
 
     let mut lock_connection = crate::database::establish_connection(state.database_url.clone());
     diesel::sql_query("BEGIN IMMEDIATE")
@@ -267,6 +307,53 @@ async fn test_cancelled_trash_after_sqlite_start_keeps_attempt_reserved() {
         Some(1),
         "once SQLite has started, cancelling HTTP must not refund the committed attempt"
     );
+    let counters = state.security_counters.flush();
+    assert_eq!(counters.lookup_accepted, 1);
+    assert_eq!(counters.trash_hit, 1);
+    assert_eq!(counters.trash_miss, 0);
+}
+
+#[tokio::test]
+async fn test_cancelled_store_after_sqlite_start_counts_once() {
+    let state = crate::env::init();
+    crate::database::init_db(state.clone());
+    let mut lock_connection = crate::database::establish_connection(state.database_url.clone());
+    diesel::sql_query("BEGIN IMMEDIATE")
+        .execute(&mut lock_connection)
+        .expect("test must acquire the SQLite write lock");
+
+    let request = StoreSecret {
+        identifier: SHA256_111111.to_string(),
+        authentication_key: SHA256_222222.to_string(),
+        encrypted_secret: BASE64_ENCRYPTED_SECRET.to_string(),
+    };
+    let outcome = tokio::time::timeout(
+        Duration::from_millis(100),
+        crate::handlers::store::store_secret(
+            axum::extract::State(state.clone()),
+            axum::Json(request),
+        ),
+    )
+    .await;
+    assert!(outcome.is_err(), "store should still be waiting on SQLite");
+
+    diesel::sql_query("COMMIT")
+        .execute(&mut lock_connection)
+        .expect("test must release the SQLite write lock");
+
+    let counted = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let snapshot = state.security_counters.flush();
+            if snapshot.store_accepted == 1 {
+                break snapshot;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("detached store operation did not report in time");
+    assert_eq!(counted.store_accepted, 1);
+    assert_eq!(state.security_counters.flush().store_accepted, 0);
 }
 
 /// 20 concurrent requests on the same identifier, all cancelled while parked

@@ -192,65 +192,6 @@ pub fn canary_file_state(path: &std::path::Path) -> CanaryFileState {
     CanaryFileState::Removed
 }
 
-/// Cached result of the last successful `canary_file_state` parse, keyed by
-/// the file metadata it was read under. `value` mirrors `CanaryFileState`,
-/// collapsed to an `Option` since `Unavailable` is never cached (there is
-/// nothing stable to key it on, and it must always fall back to the
-/// startup value rather than to stale cached content).
-pub struct CachedCanary {
-    modified: std::time::SystemTime,
-    len: u64,
-    value: Option<String>,
-}
-
-/// Same contract as `canary_file_state`, but skips re-parsing the dotenv
-/// file when its metadata (modification time and length) is unchanged since
-/// the last read. `/info` has no rate limit by design, so without this cache
-/// every request would re-read and re-parse the file from disk.
-pub fn canary_file_state_cached(
-    path: &std::path::Path,
-    cache: &mut Option<CachedCanary>,
-) -> CanaryFileState {
-    let Ok(metadata) = std::fs::metadata(path) else {
-        return CanaryFileState::Unavailable;
-    };
-    let modified = metadata
-        .modified()
-        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-    let len = metadata.len();
-
-    if let Some(cached) = cache.as_ref() {
-        if cached.modified == modified && cached.len == len {
-            return match &cached.value {
-                Some(value) => CanaryFileState::Value(value.clone()),
-                None => CanaryFileState::Removed,
-            };
-        }
-    }
-
-    let state = canary_file_state(path);
-    match &state {
-        CanaryFileState::Value(value) => {
-            *cache = Some(CachedCanary {
-                modified,
-                len,
-                value: Some(value.clone()),
-            });
-        }
-        CanaryFileState::Removed => {
-            *cache = Some(CachedCanary {
-                modified,
-                len,
-                value: None,
-            });
-        }
-        // The file vanished or became unreadable between the metadata call
-        // above and the parse: leave the previous cache entry untouched.
-        CanaryFileState::Unavailable => {}
-    }
-    state
-}
-
 pub fn init() -> AppState {
     // Whether CANARY comes from the process environment must be known before
     // dotenv loads the file: dotenvy never overrides an existing variable.
@@ -385,7 +326,7 @@ pub fn init() -> AppState {
         canary,
         canary_from_env,
         canary_path: dotenv_path.unwrap_or_else(|| std::path::PathBuf::from(".env")),
-        canary_cache: Arc::new(Mutex::new(None)),
+        canary_read_semaphore: Arc::new(Semaphore::new(1)),
         rate_limit_cooldown: Duration::minutes(rate_limit_cooldown as i64),
         identifier_rate_limit: Arc::new(Mutex::new(HashMap::new())),
         secret_max_length,
@@ -404,8 +345,10 @@ pub fn init() -> AppState {
         ))),
         rate_limit_max_identifiers,
         database_semaphore: Arc::new(Semaphore::new(database_max_concurrency)),
-        attempts_collection_started_at: chrono::Utc::now(),
+        attempts_collection_started_at: Arc::new(tokio::sync::Mutex::new(chrono::Utc::now())),
         attempts_snapshot: Arc::new(Mutex::new(None)),
         attempts_snapshot_ttl: std::time::Duration::from_secs(attempts_snapshot_ttl_seconds),
+        security_counters: Arc::new(crate::security_counters::SecurityCounters::default()),
+        diagnostic_logs: crate::diagnostic::new_quota(),
     }
 }

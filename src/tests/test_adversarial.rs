@@ -292,7 +292,7 @@ async fn test_full_map_does_not_evict_protected_identifier() {
     let mut state = crate::env::init();
     state.rate_limit_max_identifiers = 1;
     crate::database::init_db(state.clone());
-    let server = axum_test::TestServer::new(crate::router::new(state.clone())).unwrap();
+    let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone())).unwrap();
 
     // lock out the first identifier
     for index in 0..state.rate_limit_max_attempts as usize {
@@ -1022,7 +1022,7 @@ async fn test_trash_does_not_reset_the_counter() {
 /// for cheap wipe detection and expects consistency.
 #[tokio::test]
 async fn test_info_and_snapshot_collection_started_at_agree() {
-    let (server, _) = crate::tests::test_server::new_test_server().await;
+    let (server, state) = crate::tests::test_server::new_test_server().await;
 
     let info = server.get("/info").expect_success().await;
     let info_collection = info.json::<serde_json::Value>()["attempts_collection_started_at"]
@@ -1034,6 +1034,19 @@ async fn test_info_and_snapshot_collection_started_at_agree() {
     let body = decode_snapshot(snapshot.as_bytes());
     let snapshot_collection = body["collection_started_at"].as_str().unwrap().to_string();
 
+    assert_eq!(info_collection, snapshot_collection);
+
+    crate::rate_limit::wipe_identifier_rate_limit(&state).await;
+    let info = server.get("/info").expect_success().await;
+    let info_collection = info.json::<serde_json::Value>()["attempts_collection_started_at"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let snapshot = server.get("/attempts").expect_success().await;
+    let snapshot_collection = decode_snapshot(snapshot.as_bytes())["collection_started_at"]
+        .as_str()
+        .unwrap()
+        .to_string();
     assert_eq!(info_collection, snapshot_collection);
 }
 
@@ -1555,7 +1568,7 @@ async fn test_attempts_counter_does_not_overflow_at_u8_max() {
     let mut state = crate::env::init();
     state.rate_limit_max_attempts = 255;
     crate::database::init_db(state.clone());
-    let server = axum_test::TestServer::new(crate::router::new(state.clone())).unwrap();
+    let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone())).unwrap();
 
     // seed the map at 254 so only two requests are needed
     {
@@ -1617,7 +1630,7 @@ async fn test_attempts_counter_does_not_overflow_at_u8_max() {
 async fn test_concurrent_attempts_polls_agree_on_etag() {
     let app_state = crate::env::init();
     crate::database::init_db(app_state.clone());
-    let app = crate::router::new(app_state.clone());
+    let app = crate::router::new_for_tests(app_state.clone());
     let mut connection = crate::database::establish_connection(app_state.clone().database_url);
     crate::tests::test_server::clear_table_secret(&mut connection).await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

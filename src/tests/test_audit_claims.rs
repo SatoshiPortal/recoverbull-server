@@ -30,7 +30,7 @@ async fn test_audit_f1_store_gives_no_existence_signal() {
         crate::rate_limit::TokenBucket::new(12.0, 0.0),
     ));
     crate::database::init_db(app_state.clone());
-    let app = crate::router::new(app_state.clone());
+    let app = crate::router::new_for_tests(app_state.clone());
     let mut connection = crate::database::establish_connection(app_state.clone().database_url);
     crate::tests::test_server::clear_table_secret(&mut connection).await;
     let server = axum_test::TestServer::new(app).unwrap();
@@ -175,7 +175,7 @@ async fn test_audit_f9_store_writes_are_token_bucketed() {
         crate::rate_limit::TokenBucket::new(3.0, 0.0),
     ));
     crate::database::init_db(app_state.clone());
-    let app = crate::router::new(app_state.clone());
+    let app = crate::router::new_for_tests(app_state.clone());
     let mut connection = crate::database::establish_connection(app_state.clone().database_url);
     crate::tests::test_server::clear_table_secret(&mut connection).await;
     let server = axum_test::TestServer::new(app).unwrap();
@@ -206,7 +206,7 @@ async fn test_lookup_flood_is_globally_token_bucketed() {
         crate::rate_limit::TokenBucket::new(1.0, 0.0),
     ));
     crate::database::init_db(state.clone());
-    let server = axum_test::TestServer::new(crate::router::new(state)).unwrap();
+    let server = axum_test::TestServer::new(crate::router::new_for_tests(state)).unwrap();
 
     let first = server
         .post("/fetch")

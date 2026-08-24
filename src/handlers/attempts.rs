@@ -39,7 +39,7 @@ pub async fn get_attempts(State(state): State<AppState>, headers: HeaderMap) -> 
     {
         let mut bucket = state.attempts_token_bucket.lock().await;
         if !bucket.try_consume() {
-            tracing::warn!("attempts telemetry rate-limit exceeded");
+            state.security_counters.attempts_rate_limited();
             return retry_after_response(
                 StatusCode::SERVICE_UNAVAILABLE,
                 GLOBAL_OVERLOAD_RETRY_AFTER_SECS,
@@ -135,9 +135,10 @@ async fn build_snapshot(state: &AppState) -> Result<AttemptsSnapshotCache, Respo
     // require the lock, only a stable snapshot of the data.
     entries.sort_by(|a, b| a.id_hash.cmp(&b.id_hash));
 
+    let collection_started_at = *state.attempts_collection_started_at.lock().await;
     let payload = AttemptsSnapshot {
         version: 1,
-        collection_started_at: truncate_to_hour(state.attempts_collection_started_at),
+        collection_started_at: truncate_to_hour(collection_started_at),
         entries,
     };
 
@@ -156,22 +157,16 @@ async fn build_snapshot(state: &AppState) -> Result<AttemptsSnapshotCache, Respo
 
     match built {
         Ok(Ok(snapshot)) => Ok(snapshot),
-        Ok(Err(error)) => {
-            tracing::error!(error = %error, "failed to compress attempts snapshot");
-            Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(error_body("Internal server error")),
-            )
-                .into_response())
-        }
-        Err(error) => {
-            tracing::error!(error = %error, "attempts snapshot task panicked");
-            Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(error_body("Internal server error")),
-            )
-                .into_response())
-        }
+        Ok(Err(_error)) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(error_body("Internal server error")),
+        )
+            .into_response()),
+        Err(_error) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(error_body("Internal server error")),
+        )
+            .into_response()),
     }
 }
 

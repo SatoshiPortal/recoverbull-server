@@ -1,10 +1,12 @@
 mod database;
+mod diagnostic;
 mod env;
 mod handlers;
 mod models;
 mod rate_limit;
 mod router;
 mod schema;
+mod security_counters;
 
 #[cfg(test)]
 mod tests;
@@ -52,6 +54,8 @@ struct AppState {
     attempts_collection_started_at: Arc<Mutex<chrono::DateTime<chrono::Utc>>>,
     attempts_snapshot: Arc<Mutex<Option<AttemptsSnapshotCache>>>,
     attempts_snapshot_ttl: std::time::Duration,
+    security_counters: Arc<security_counters::SecurityCounters>,
+    diagnostic_logs: Arc<diagnostic::LogQuota>,
 }
 
 #[tokio::main]
@@ -76,6 +80,11 @@ async fn main() {
     }
 
     crate::database::init_db(app_state.clone());
+    tracing::info!(target: "security", counter_window_seconds = 300, "security controls enabled");
+    crate::security_counters::spawn_reporter(
+        app_state.clone(),
+        std::time::Duration::from_secs(300),
+    );
 
     crate::rate_limit::spawn_sweeper(app_state.clone());
     let mut wiper = crate::rate_limit::spawn_production_wiper(app_state.clone());
@@ -93,7 +102,7 @@ async fn main() {
         result = &mut wiper => {
             match result {
                 Ok(()) => tracing::error!("production rate-limit wiper exited unexpectedly"),
-                Err(error) => tracing::error!(error = %error, "production rate-limit wiper failed"),
+                Err(_error) => tracing::error!("production rate-limit wiper failed"),
             }
             std::process::exit(1);
         }
@@ -111,7 +120,7 @@ async fn main() {
 /// finish instead of being killed mid-handler: `/trash` commits its database
 /// transaction before sending the response, so an abrupt process kill
 /// between the commit and the response would make the caller retry (or give
-/// up on) a backup that was, in fact, already permanently deleted.
+/// up on) a backup that was, in fact, already removed from the active table.
 async fn shutdown_signal() {
     let ctrl_c = async {
         tokio::signal::ctrl_c()

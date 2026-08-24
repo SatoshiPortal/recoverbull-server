@@ -5,7 +5,10 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use std::time::{Duration, Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use crate::{
     handlers::{attempts, fetch, info, store},
@@ -31,6 +34,7 @@ pub(crate) fn new_with_response_delay(app_state: AppState, response_delay: Durat
     // dribbling its request byte by byte (slow-loris) sees it expire.
     // Header reads happen before the service and remain a proxy concern.
     let timeout = tower_http::timeout::TimeoutLayer::new(Duration::from_secs(30));
+    let security_counters = app_state.security_counters.clone();
 
     let sensitive_routes = Router::new()
         .route("/store", post(store::store_secret))
@@ -49,14 +53,14 @@ pub(crate) fn new_with_response_delay(app_state: AppState, response_delay: Durat
         // route_layer limits this middleware to matched routes. The method
         // check additionally keeps GET/HEAD 405 responses out of the floor.
         .route_layer(from_fn(move |request, next| {
-            minimum_response_delay(request, next, response_delay)
+            minimum_response_delay(request, next, response_delay, security_counters.clone())
         }))
         .with_state(app_state.clone());
 
     let public_routes = Router::new()
         .route("/info", get(info::get_info))
         .route("/attempts", get(attempts::get_attempts))
-        .with_state(app_state);
+        .with_state(app_state.clone());
 
     sensitive_routes
         .merge(public_routes)
@@ -64,6 +68,9 @@ pub(crate) fn new_with_response_delay(app_state: AppState, response_delay: Durat
         // while rejecting oversized bodies before deserialization.
         .layer(DefaultBodyLimit::max(1024))
         .layer(timeout)
+        .layer(from_fn(move |request, next| {
+            crate::diagnostic::middleware(app_state.clone(), request, next)
+        }))
 }
 
 #[cfg(test)]
@@ -71,14 +78,23 @@ pub(crate) fn new_for_tests(app_state: AppState) -> Router {
     new_with_response_delay(app_state, Duration::ZERO)
 }
 
-async fn minimum_response_delay(request: Request, next: Next, floor: Duration) -> Response {
+async fn minimum_response_delay(
+    request: Request,
+    next: Next,
+    floor: Duration,
+    security_counters: Arc<crate::security_counters::SecurityCounters>,
+) -> Response {
     if request.method() != axum::http::Method::POST {
         return next.run(request).await;
     }
 
     let started = Instant::now();
     let response = next.run(request).await;
-    tokio::time::sleep(floor.saturating_sub(started.elapsed())).await;
+    let elapsed = started.elapsed();
+    if elapsed > floor {
+        security_counters.timing_floor_overrun();
+    }
+    tokio::time::sleep(floor.saturating_sub(elapsed)).await;
     #[cfg(test)]
     let mut response = response;
     #[cfg(test)]

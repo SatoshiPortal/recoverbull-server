@@ -250,6 +250,7 @@ async fn test_cancelled_trash_after_sqlite_start_keeps_attempt_reserved() {
         encrypted_secret: BASE64_ENCRYPTED_SECRET.to_string(),
     };
     server.post("/store").json(&store).expect_success().await;
+    state.security_counters.flush();
 
     let mut lock_connection = crate::database::establish_connection(state.database_url.clone());
     diesel::sql_query("BEGIN IMMEDIATE")
@@ -306,6 +307,53 @@ async fn test_cancelled_trash_after_sqlite_start_keeps_attempt_reserved() {
         Some(1),
         "once SQLite has started, cancelling HTTP must not refund the committed attempt"
     );
+    let counters = state.security_counters.flush();
+    assert_eq!(counters.lookup_accepted, 1);
+    assert_eq!(counters.trash_hit, 1);
+    assert_eq!(counters.trash_miss, 0);
+}
+
+#[tokio::test]
+async fn test_cancelled_store_after_sqlite_start_counts_once() {
+    let state = crate::env::init();
+    crate::database::init_db(state.clone());
+    let mut lock_connection = crate::database::establish_connection(state.database_url.clone());
+    diesel::sql_query("BEGIN IMMEDIATE")
+        .execute(&mut lock_connection)
+        .expect("test must acquire the SQLite write lock");
+
+    let request = StoreSecret {
+        identifier: SHA256_111111.to_string(),
+        authentication_key: SHA256_222222.to_string(),
+        encrypted_secret: BASE64_ENCRYPTED_SECRET.to_string(),
+    };
+    let outcome = tokio::time::timeout(
+        Duration::from_millis(100),
+        crate::handlers::store::store_secret(
+            axum::extract::State(state.clone()),
+            axum::Json(request),
+        ),
+    )
+    .await;
+    assert!(outcome.is_err(), "store should still be waiting on SQLite");
+
+    diesel::sql_query("COMMIT")
+        .execute(&mut lock_connection)
+        .expect("test must release the SQLite write lock");
+
+    let counted = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let snapshot = state.security_counters.flush();
+            if snapshot.store_accepted == 1 {
+                break snapshot;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("detached store operation did not report in time");
+    assert_eq!(counted.store_accepted, 1);
+    assert_eq!(state.security_counters.flush().store_accepted, 0);
 }
 
 /// 20 concurrent requests on the same identifier, all cancelled while parked

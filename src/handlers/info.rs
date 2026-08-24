@@ -28,7 +28,10 @@ pub async fn get_info(State(state): State<AppState>) -> (StatusCode, Json<Value>
         match file_state {
             crate::env::CanaryFileState::Value(value) => value,
             crate::env::CanaryFileState::Removed => String::new(),
-            crate::env::CanaryFileState::Unavailable => state.canary.clone(),
+            crate::env::CanaryFileState::Unavailable => {
+                state.security_counters.canary_unavailable();
+                state.canary.clone()
+            }
         }
     };
 

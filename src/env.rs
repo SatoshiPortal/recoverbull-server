@@ -348,5 +348,7 @@ pub fn init() -> AppState {
         attempts_collection_started_at: Arc::new(tokio::sync::Mutex::new(chrono::Utc::now())),
         attempts_snapshot: Arc::new(Mutex::new(None)),
         attempts_snapshot_ttl: std::time::Duration::from_secs(attempts_snapshot_ttl_seconds),
+        security_counters: Arc::new(crate::security_counters::SecurityCounters::default()),
+        diagnostic_logs: crate::diagnostic::new_quota(),
     }
 }

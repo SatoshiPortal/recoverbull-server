@@ -8,6 +8,7 @@ pub mod test_distinct_candidates;
 pub mod test_env;
 pub mod test_fetch;
 pub mod test_info;
+pub mod test_logging;
 pub mod test_migrations;
 pub mod test_rate_limit;
 pub mod test_server;

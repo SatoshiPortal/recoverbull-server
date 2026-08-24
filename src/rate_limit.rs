@@ -50,12 +50,15 @@ pub const PRODUCTION_GLOBAL_WIPE_INTERVAL: std::time::Duration =
 pub async fn wipe_identifier_rate_limit(state: &AppState) {
     let mut snapshot = state.attempts_snapshot.lock().await;
     let mut identifiers = state.identifier_rate_limit.lock().await;
-    let wiped = identifiers.len();
+    let count = identifiers.len();
     identifiers.clear();
     let mut started_at = state.attempts_collection_started_at.lock().await;
     *started_at = chrono::Utc::now();
     *snapshot = None;
-    tracing::info!(wiped, "daily rate-limit wipe");
+    drop(started_at);
+    drop(identifiers);
+    drop(snapshot);
+    tracing::info!(target: "security", count, "daily telemetry wipe completed");
 }
 
 pub(crate) fn global_wiper_first_deadline(
@@ -88,13 +91,9 @@ pub fn spawn_global_wiper(
 pub async fn sweep_expired_identifiers(state: &AppState) {
     let now = chrono::Utc::now();
     let mut identifier_rate_limit = state.identifier_rate_limit.lock().await;
-    let before = identifier_rate_limit.len();
     identifier_rate_limit.retain(|_, info| {
         now.signed_duration_since(info.last_candidate_at) <= state.rate_limit_cooldown
     });
-    let remaining = identifier_rate_limit.len();
-    // Log discipline: counts only, never identifiers.
-    tracing::info!(swept = before - remaining, remaining, "rate-limit sweep");
 }
 
 /// Spawns the background task that sweeps expired rate-limit entries, so

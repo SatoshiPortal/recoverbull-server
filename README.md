@@ -16,6 +16,27 @@ guarded by tests and the reviewer checklist, see [SECURITY.md](SECURITY.md).
 - `secret_id` = `hash(identifier + authentication_key)` Unique record key in the server’s database. Concretely: **SHA-256 over the concatenation of the two lowercase hex *strings*** (128 ASCII bytes) — not over the decoded raw bytes. This differs from the `/attempts` `id_hash`, which hashes the raw identifier bytes; client implementations must not mix the two.
 - `encrypted_secret` = `encrypt(private_key: encryption_key, payload: secret)` The ciphertext of the secret using `encryption_key`.
 
+### Request diagnostics and security counters
+
+Every response includes a server-generated `X-Request-ID`. Client-provided
+`x-request-id` headers are removed before routing and are never reused. The
+security counter reporter emits one aggregate summary every five minutes at
+`info`, including the saturating `diagnostic_logs_emitted` and
+`diagnostic_logs_suppressed` counters.
+
+Detailed request events are disabled at the normal `info` level. For temporary
+diagnosis, enable `RUST_LOG=info,request_diagnostics=debug`; debug logging must not
+be left enabled during normal operation. It is globally quota-limited per
+class to a burst of 10 events with a refill rate of 1 event per second. The
+only request-event fields are the generated `request_id`, static route enum
+(`store`, `fetch`, `trash`, `info`, `attempts`, `other`), static method enum,
+numeric HTTP `status`, static category enum, and static duration bucket enum.
+Categories are `success`, `client_error`, `overload`, or `server_error`; duration
+buckets are `lt500ms`, `500ms_1s`, `1s_5s`, or `gte5s`.
+Raw URIs, query strings, headers, bodies, remote addresses, database paths,
+identifiers, hashes, tags, keys, ciphertexts, canary values, and raw errors
+are never logged.
+
 ### Store
 
  1. On the client side, generate a random secure `identifier`, that you can store securely in a file, and let the user define a `password`.
@@ -341,6 +362,7 @@ slot. If the canonical variable is absent, the server accepts
 warning; when both are present, the canonical variable wins. The
 `remaining_attempts` field of `attempt_status` derives from it.
 The lookup bucket is a separate global safety limit for `/fetch` and `/trash`.
+
 The attempts bucket is a third global limit for `GET /attempts`, sized for
 direct cache-bypass traffic; the reverse-proxy cache absorbs normal reads.
 `ATTEMPTS_SNAPSHOT_TTL_SECONDS` controls how long a snapshot is reused

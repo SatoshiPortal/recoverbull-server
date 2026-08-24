@@ -35,6 +35,7 @@ pub fn init_db(state: AppState) {
     sql_query("PRAGMA journal_mode = WAL;")
         .execute(&mut connection)
         .expect("Failed to enable WAL mode");
+    tracing::info!(target: "security", "database initialized");
 }
 
 /// Runs embedded migrations, adopting an exact pre-Diesel `secret` table when

@@ -124,7 +124,7 @@ fn rate_limited(
     requested_at: chrono::DateTime<chrono::Utc>,
     state: &AppState,
 ) -> Response {
-    tracing::warn!("rate-limit lockout");
+    state.security_counters.lookup_target_lockout();
     let retry_after_secs = (last_candidate_at + state.rate_limit_cooldown - requested_at)
         .num_seconds()
         .max(1) as u64;
@@ -219,7 +219,7 @@ pub async fn fetch_secret(
     {
         let mut bucket = state.lookup_token_bucket.lock().await;
         if !bucket.try_consume() {
-            tracing::warn!("global lookup rate-limit exceeded");
+            state.security_counters.lookup_rate_limited();
             return retry_after_response(
                 StatusCode::SERVICE_UNAVAILABLE,
                 GLOBAL_OVERLOAD_RETRY_AFTER_SECS,
@@ -242,6 +242,7 @@ pub async fn fetch_secret(
                     <= state.rate_limit_cooldown
             });
             if map.len() >= state.rate_limit_max_identifiers {
+                state.security_counters.lookup_map_capacity();
                 return retry_after_response(
                     StatusCode::SERVICE_UNAVAILABLE,
                     GLOBAL_OVERLOAD_RETRY_AFTER_SECS,
@@ -293,6 +294,7 @@ pub async fn fetch_secret(
         }
     };
     if matches!(admission, Admission::Pending) {
+        state.security_counters.lookup_rate_limited();
         return retry_after_response(
             StatusCode::SERVICE_UNAVAILABLE,
             GLOBAL_OVERLOAD_RETRY_AFTER_SECS,
@@ -328,7 +330,7 @@ pub async fn fetch_secret(
                 // remains armed and performs the same idempotent cleanup.
                 guard.disarm();
             }
-            tracing::warn!("database concurrency limit exceeded");
+            state.security_counters.database_busy();
             return retry_after_response(
                 StatusCode::SERVICE_UNAVAILABLE,
                 GLOBAL_OVERLOAD_RETRY_AFTER_SECS,
@@ -371,6 +373,28 @@ pub async fn fetch_secret(
             )
             .await;
         }
+        // An accepted lookup is one whose database operation returned Ok,
+        // regardless of whether it found a row. This accounting lives here so
+        // it survives cancellation after the blocking work was transferred.
+        match &final_result {
+            Ok(Some(_)) => {
+                task_state.security_counters.lookup_accepted();
+                if is_trashing_secret {
+                    task_state.security_counters.trash_hit();
+                } else {
+                    task_state.security_counters.fetch_hit();
+                }
+            }
+            Ok(None) => {
+                task_state.security_counters.lookup_accepted();
+                if is_trashing_secret {
+                    task_state.security_counters.trash_miss();
+                } else {
+                    task_state.security_counters.fetch_miss();
+                }
+            }
+            Err(_) => task_state.security_counters.database_error(),
+        }
         final_result
     });
     // The detached task now owns finalization and continues if this handler is
@@ -381,11 +405,11 @@ pub async fn fetch_secret(
 
     let result = match task.await {
         Ok(result) => result,
-        Err(error) => {
+        Err(_error) => {
             if is_new {
                 remove_pending_async(&state, &id_hash, &candidate, generation).await;
             }
-            tracing::error!(error = %error, "database task panicked");
+            state.security_counters.database_error();
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(error_body("Internal server error")),
@@ -395,16 +419,14 @@ pub async fn fetch_secret(
     };
     let result = match result {
         Ok(result) => result,
-        Err(FinalizerError::Database(error)) => {
-            tracing::error!(error = %error, "database error on fetch");
+        Err(FinalizerError::Database(_error)) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(error_body("Internal server error")),
             )
                 .into_response();
         }
-        Err(FinalizerError::Join(error)) => {
-            tracing::error!(error = %error, "database task panicked");
+        Err(FinalizerError::Join(_error)) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(error_body("Internal server error")),
@@ -420,33 +442,20 @@ pub async fn fetch_secret(
             } else {
                 StatusCode::OK
             };
-            tracing::info!(
-                attempts = attempt_status.total_attempts,
-                failed_attempts = attempt_status.failed_attempts,
-                is_trash = is_trashing_secret,
-                "secret released"
-            );
             let mut body = serde_json::to_value(key).expect("secret is serializable");
             body["attempt_status"] = json!(attempt_status);
             (code, Json(body)).into_response()
         }
-        None => {
-            tracing::info!(
-                attempt_number = attempt_status.total_attempts,
-                failed_attempts = attempt_status.failed_attempts,
-                "failed fetch attempt"
-            );
-            (
-                StatusCode::UNAUTHORIZED,
-                Json(ResponseFailedAttempt {
-                    error: "Invalid identifier/authentication_key".to_owned(),
-                    requested_at,
-                    rate_limit_cooldown: state.rate_limit_cooldown.num_minutes(),
-                    attempts: attempt_status.total_attempts,
-                    total_requests: attempt_status.total_requests,
-                }),
-            )
-                .into_response()
-        }
+        None => (
+            StatusCode::UNAUTHORIZED,
+            Json(ResponseFailedAttempt {
+                error: "Invalid identifier/authentication_key".to_owned(),
+                requested_at,
+                rate_limit_cooldown: state.rate_limit_cooldown.num_minutes(),
+                attempts: attempt_status.total_attempts,
+                total_requests: attempt_status.total_requests,
+            }),
+        )
+            .into_response(),
     }
 }

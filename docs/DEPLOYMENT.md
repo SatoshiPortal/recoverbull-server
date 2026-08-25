@@ -15,6 +15,9 @@ instance before starting a replacement; never overlap them. Do not restart
 daily: the in-memory wipe is internal and runs every 24 hours. An exceptional
 restart resets the budget and collection.
 
+For the SQLite backup, verification, and restore drill, follow
+[deploy/backup/README.md](../deploy/backup/README.md).
+
 The application grace period is 35 seconds. systemd allows 40 seconds for
 stop, and `Restart=no` avoids turning a crash loop into repeated budget resets.
 `LimitCORE=0`, `UMask=0077`, and the SQLite-compatible sandbox are intentional.

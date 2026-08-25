@@ -6,6 +6,7 @@ For the threat model, the risks accepted by design, the security invariants
 guarded by tests and the reviewer checklist, see [SECURITY.md](SECURITY.md).
 Operational templates are in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) and
 [docs/RETENTION.md](docs/RETENTION.md), with versioned files under `deploy/`.
+The SQLite backup and restore procedure is in [deploy/backup/README.md](deploy/backup/README.md).
 
 ## Description
 

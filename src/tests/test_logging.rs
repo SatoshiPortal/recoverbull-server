@@ -116,10 +116,24 @@ fn test_duration_bucket_boundaries_are_deterministic() {
 
 #[test]
 fn test_status_categories_are_deterministic() {
-    assert_eq!(crate::diagnostic::status_category(503), "overload");
-    assert_eq!(crate::diagnostic::status_category(500), "server_error");
-    assert_eq!(crate::diagnostic::status_category(429), "overload");
-    assert_eq!(crate::diagnostic::status_category(400), "client_error");
+    use crate::diagnostic::StatusCategory;
+
+    assert_eq!(
+        crate::diagnostic::status_category(503),
+        StatusCategory::Overload
+    );
+    assert_eq!(
+        crate::diagnostic::status_category(500),
+        StatusCategory::ServerError
+    );
+    assert_eq!(
+        crate::diagnostic::status_category(429),
+        StatusCategory::Overload
+    );
+    assert_eq!(
+        crate::diagnostic::status_category(400),
+        StatusCategory::ClientError
+    );
 }
 
 #[tokio::test]

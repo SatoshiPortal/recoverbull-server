@@ -120,13 +120,32 @@ pub(crate) fn duration_bucket(duration: Duration) -> &'static str {
     }
 }
 
-pub(crate) fn status_category(status: u16) -> &'static str {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StatusCategory {
+    Success,
+    ClientError,
+    Overload,
+    ServerError,
+}
+
+impl StatusCategory {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::ClientError => "client_error",
+            Self::Overload => "overload",
+            Self::ServerError => "server_error",
+        }
+    }
+}
+
+pub(crate) fn status_category(status: u16) -> StatusCategory {
     match status {
-        408 | 429 | 503 => "overload",
-        200..=299 => "success",
-        400..=499 => "client_error",
-        500..=599 => "server_error",
-        _ => "server_error",
+        408 | 429 | 503 => StatusCategory::Overload,
+        200..=299 => StatusCategory::Success,
+        400..=499 => StatusCategory::ClientError,
+        500..=599 => StatusCategory::ServerError,
+        _ => StatusCategory::ServerError,
     }
 }
 
@@ -135,7 +154,7 @@ struct DiagnosticEvent<'a> {
     route: &'static str,
     method: &'static str,
     status: u16,
-    category: &'static str,
+    category: StatusCategory,
     duration: &'static str,
 }
 
@@ -166,7 +185,7 @@ fn emit(
                 route = event.route,
                 method = event.method,
                 status = event.status,
-                category = event.category,
+                category = event.category.as_str(),
                 duration_bucket = event.duration,
                 "request completed"
             ),
@@ -176,7 +195,7 @@ fn emit(
                 route = event.route,
                 method = event.method,
                 status = event.status,
-                category = event.category,
+                category = event.category.as_str(),
                 duration_bucket = event.duration,
                 "request completed"
             ),
@@ -196,10 +215,11 @@ pub(crate) async fn middleware(state: AppState, mut request: Request, next: Next
     let mut response = next.run(request).await;
     let status = response.status().as_u16();
     let category = status_category(status);
-    let class = if category == "server_error" {
-        QuotaClass::ServerError
-    } else {
-        QuotaClass::Detail
+    let class = match category {
+        StatusCategory::ServerError => QuotaClass::ServerError,
+        StatusCategory::Success | StatusCategory::ClientError | StatusCategory::Overload => {
+            QuotaClass::Detail
+        }
     };
     emit(
         &state.diagnostic_logs,

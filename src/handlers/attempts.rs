@@ -48,22 +48,13 @@ pub async fn get_attempts(State(state): State<AppState>, headers: HeaderMap) -> 
         }
     }
 
-    let mut cached = state.attempts_snapshot.lock().await;
-    if cached
-        .as_ref()
-        .is_none_or(|snapshot| snapshot.created_at.elapsed() >= state.attempts_snapshot_ttl)
-    {
-        match build_snapshot(&state).await {
-            Ok(snapshot) => *cached = Some(snapshot),
-            Err(response) => return response,
-        }
-    }
-
-    let snapshot = cached.as_ref().expect("snapshot was initialized");
+    let snapshot = match snapshot_for_request(&state).await {
+        Ok(snapshot) => snapshot,
+        Err(response) => return *response,
+    };
     let etag = snapshot.etag.clone();
     let body = snapshot.gzip_body.as_ref().clone();
     let max_age = remaining_max_age(snapshot.created_at, state.attempts_snapshot_ttl);
-    drop(cached);
 
     let not_modified = headers
         .get(header::IF_NONE_MATCH)
@@ -100,11 +91,73 @@ pub async fn get_attempts(State(state): State<AppState>, headers: HeaderMap) -> 
     response
 }
 
+async fn snapshot_for_request(state: &AppState) -> Result<AttemptsSnapshotCache, Box<Response>> {
+    {
+        let cached = state.attempts_snapshot.lock().await;
+        if let Some(snapshot) = cached.as_ref() {
+            if snapshot.created_at.elapsed() < state.attempts_snapshot_ttl {
+                return Ok(snapshot.clone());
+            }
+        }
+    }
+
+    let mut build_slot = state.attempts_snapshot_build.lock().await;
+    let mut receiver = if let Some(receiver) = build_slot.as_ref() {
+        receiver.clone()
+    } else {
+        let (sender, receiver) = tokio::sync::watch::channel(None);
+        *build_slot = Some(receiver.clone());
+        let worker_state = state.clone();
+        tokio::spawn(async move {
+            let result = build_snapshot(&worker_state).await.map_err(|_| ());
+            if let Ok(snapshot) = &result {
+                *worker_state.attempts_snapshot.lock().await = Some(snapshot.clone());
+            }
+            let _ = sender.send(Some(result));
+            *worker_state.attempts_snapshot_build.lock().await = None;
+        });
+        receiver
+    };
+    drop(build_slot);
+
+    receiver.changed().await.map_err(|_| internal_error())?;
+    let result = receiver.borrow().clone();
+    match result {
+        Some(Ok(snapshot)) => Ok(snapshot),
+        Some(Err(())) | None => Err(internal_error()),
+    }
+}
+
+fn internal_error() -> Box<Response> {
+    Box::new(
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(error_body("Internal server error")),
+        )
+            .into_response(),
+    )
+}
+
 /// Collects the current entries under the rate-limit lock, then serializes
 /// and compresses on a blocking thread after releasing it. flate2 writes a
 /// zero mtime in the gzip header, so identical content produces identical
 /// bytes and a stable ETag across rebuilds.
-async fn build_snapshot(state: &AppState) -> Result<AttemptsSnapshotCache, Response> {
+async fn build_snapshot(state: &AppState) -> Result<AttemptsSnapshotCache, Box<Response>> {
+    #[cfg(test)]
+    {
+        use std::sync::atomic::Ordering;
+
+        state
+            .attempts_build_probe
+            .started
+            .fetch_add(1, Ordering::SeqCst);
+        state.attempts_build_probe.started_notify.notify_one();
+        if state.attempts_build_probe.hold.load(Ordering::SeqCst)
+            && !state.attempts_build_probe.released.load(Ordering::SeqCst)
+        {
+            state.attempts_build_probe.release.notified().await;
+        }
+    }
     let now = chrono::Utc::now();
     let mut entries: Vec<AttemptEntry> = {
         let mut identifier_rate_limit = state.identifier_rate_limit.lock().await;
@@ -119,7 +172,7 @@ async fn build_snapshot(state: &AppState) -> Result<AttemptsSnapshotCache, Respo
                 failed_attempts: info.failed_candidates,
                 total_requests: info.total_requests,
                 window_started_at: truncate_to_hour(info.window_started_at),
-                last_attempt_at: truncate_to_hour(info.last_request_at),
+                last_attempt_at: truncate_to_hour(info.last_candidate_at),
             })
             .collect()
         // lock dropped here
@@ -157,16 +210,8 @@ async fn build_snapshot(state: &AppState) -> Result<AttemptsSnapshotCache, Respo
 
     match built {
         Ok(Ok(snapshot)) => Ok(snapshot),
-        Ok(Err(_error)) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(error_body("Internal server error")),
-        )
-            .into_response()),
-        Err(_error) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(error_body("Internal server error")),
-        )
-            .into_response()),
+        Ok(Err(_error)) => Err(internal_error()),
+        Err(_error) => Err(internal_error()),
     }
 }
 

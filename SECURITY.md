@@ -23,15 +23,24 @@ risks that are **accepted by design** (do not re-report them), the
 **invariants** the code must keep (each guarded by tests), the traps already
 stepped into, and a checklist for future reviews.
 
-For deployment guardrails (single-instance, nginx, Tor onion), see the
-README — they are part of the security model, not optional hardening.
+Application log guarantees do not cover nginx or Caddy, journald, or Tor logs unless the
+README runbook is applied: those logs may contain request metadata and require
+strict levels, private permissions, and short retention. Five-minute global
+counters retain coarse activity metadata and require the same access controls.
+
+For deployment guardrails (single-instance, the exclusive nginx/Caddy choice,
+and Tor onion), see the
+README and [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) — they are part of the
+security model, not optional hardening. Tor and single-instance operation are
+required by the model but are not enforced by the binary; a public bind only
+produces a warning.
 
 ## Threat model (summary)
 
 The server stores `encrypted_secret` values keyed by
 `secret_id = SHA-256(identifier_hex + authentication_key_hex)`. It never sees
 the password, the encryption key, or the cleartext secret. Because the user
-password is weak by design (a memorable PIN), the **only** server-side
+when password/PIN entropy is low, the **only** server-side
 control against password brute-force is the per-identifier distinct-candidate budget
 (3 attempts per cooldown in the documented `.env` and CI; the variable is
 mandatory — there is no code default). Everything else
@@ -39,7 +48,7 @@ mandatory — there is no code default). Everything else
 to keep that control meaningful and the server unlinkable to users.
 
 Attacker capabilities considered: holding a victim's Backup File
-(`identifier` + `salt`, no ciphertext); a malicious or compromised Key
+(`identifier`, `salt`, encrypted mnemonic ciphertext, and metadata); a malicious or compromised Key
 Server; a database leak; a malicious cloud storage provider; collusion or
 legal compulsion of both providers (see the whitepaper for the full list).
 
@@ -94,34 +103,49 @@ Operators are responsible for retention of those copies.
    (fail-closed); active entries are never evicted by new identifiers. The
    attack and the alarm are the same event: probing creates the victim's
    warning entry.
-8. **Offline PIN brute-force with a database leak.** A leak of
-   `encrypted_secret` + the Backup File's `salt` reduces security to the PIN
-   (Argon2id slows but does not prevent this). Inherent to the protocol;
-   client-side key rotation is the mitigation.
+ 8. **Offline PIN brute-force with a database leak.** A leak of
+    `encrypted_secret` plus the Backup File's `salt` reduces security to the
+    user's password/PIN entropy. Cloud storage plus the database permits
+    offline validation; Argon2id slows guesses but does not create entropy.
+    Inherent to the protocol; client-side key rotation is the mitigation.
 9. **Server trust.** Telemetry is advisory: a compromised server can
    fabricate or suppress counters, and the warrant canary has the classic
    limits (an operator under compulsion may keep serving it). Clients must
    warn, never act automatically.
-10. **Global buckets can deny service to everyone.** Behind an onion service
-    per-IP limiting is useless, so buckets are global; an attacker can
-    exhaust them (`503` for all). Bounded by nginx/Tor defenses at the
-    deployment layer.
+ 10. **Global buckets can deny service to everyone.** Behind an onion service
+     per-IP limiting is useless, so buckets are global; an attacker can
+     exhaust them (`503` for all). Bounded by the selected reverse proxy and
+     Tor defenses at the deployment layer. Caddy adapts its plugin's internal
+     global-bucket `429` to this standard `503`; it does not adapt an Axum
+     lockout `429`. Caddy's lack of a native connection-count cap is accepted
+     only with its 10-second header timeout, Tor defenses, and an
+     operator-managed FD/process budget.
 11. **Temporary behavioral state.** The server retains up to the configured
     maximum of derived CandidateTags (`secret_id/key_id`) per bucket in memory.
     A CandidateTag is never raw authentication or password material, and is
     never logged or snapshotted; the complete map is wiped every 24 hours from
     map startup, with the attempt budget reset at the boundary. The cooldown
     sweep removes shorter-lived entries earlier. This is a privacy trade-off:
-    non-exposed temporary state is larger than the former identifier-only
-    state.
-12. **Minimum response floor is not exact timing.** `/store`, `/fetch`, and
+     non-exposed temporary state is larger than the former identifier-only
+     state.
+12. **Operational trade-offs.** Strict single-instance operation is required:
+     the internal wipe is 24 hours and no daily restart is needed. A restart
+     resets budget and collection, so it must be exceptional and non-overlapping.
+     A hash protects a public observer from learning an identifier, but a Backup
+     File holder already knows that identifier; `/attempts` reveals only activity
+     and counters to that holder. This detection trade-off is accepted. Caches or
+     archives may be used, but must not expose the Backup File. A `429` or an
+     unexpected snapshot entry is an alarm: rotate/transfer while the wallet is
+     accessible, rotate/transfer immediately; otherwise recovery availability
+     depends on a previously exported Backup Key or a second independent server.
+13. **Minimum response floor is not exact timing.** `/store`, `/fetch`, and
     `/trash` wait until at least the configured server-side floor when their
     processing is faster (500 ms in production). Body upload, network and
     proxy/Tor transfer time are not equalized; processing that already exceeds
     the floor remains observable. The wait is outside database permits and
-    mutexes, but can increase concurrent connections during a flood. Token
-    buckets plus nginx/Tor connection, request, and DoS defenses bound that
-    amplification.
+     mutexes, but can increase concurrent connections during a flood. Token
+     buckets plus the selected reverse proxy and Tor connection, request, and
+     DoS defenses bound that amplification.
 
 ## Invariants (each guarded by tests)
 
@@ -145,6 +169,8 @@ code, keep the invariant — and run the guarding test.
 | Snapshot is deterministic (sorted entries, gzip `mtime=0`), hour-truncated, single-flight, initial telemetry contract version 1; counts distinct candidates and all requests but exposes no CandidateTags | Stable ETag; precision gradient; bounded build cost and privacy | `test_attempts_snapshot_rebuild_is_deterministic`, `test_attempts_publish_hashed_identifier_with_counters`, `test_attempts_snapshot_at_full_map_scale`, `test_concurrent_attempts_polls_agree_on_etag`, `test_snapshot_never_contains_secret_material` |
 | Global wipe clears identifiers and CandidateTags every 24 hours, resets the budget timestamp, and invalidates pre-wipe snapshots; the first wipe is delayed until the period elapses | No pre-wipe telemetry survives the boundary and `/info` agrees with `/attempts` | `test_global_wipe_clears_candidates_resets_timestamp_and_snapshot`, `test_global_wiper_first_deadline_is_delayed_by_period`, `test_production_global_wipe_interval_is_24_hours` |
 | Configuration is validated fail-closed at startup (ranges, NaN/∞/≤0 rejected) | A zero or absurd value would silently disable a protection | `src/tests/test_env.rs` |
+| Token bursts are finite, contain at least one representable token, and subtracting one changes the `f64` | Numerically ineffective capacities would silently disable a bucket | `src/tests/test_env.rs` |
+| SQLite is bundled at least 3.51.3; startup verifies runtime version and WAL, while every connection verifies WAL and secure deletion | Reproducible WAL-reset fix and deletion invariant without a per-connection version query | `src/tests/test_secure_delete.rs` |
 | Errors are classified by HTTP status only: `429` = targeted lockout, `503` = global pressure, both with `Retry-After` | Clients must not match on error text | `src/tests/test_contract.rs` |
 | POST requests matching `/store`, `/fetch`, and `/trash` have a uniform minimum server-side response time, including extractor rejections; `/info`, `/attempts`, 404s, 405s, other routes, and already-slow processing are excluded | Reduce fast success/failure timing differences without holding database resources or pretending to equalize network time | `src/tests/test_timing.rs` |
 | Dotenv CANARY is read for every `/info` without cache metadata; process-env CANARY is authoritative, missing CANARY is empty, and unavailable files use startup fallback | Operators can signal edits immediately without stale cache state | `test_info_rereads_same_length_canary_when_file_metadata_is_restored`, `test_info_rereads_canary_from_file_with_startup_fallback`, `test_info_env_canary_is_authoritative_over_file` |

@@ -135,13 +135,14 @@ pub fn validate_capacity(
 
 /// Validates a token-bucket configuration (burst capacity and refill rate).
 ///
-/// The burst must be finite and strictly positive, or the bucket could never
-/// hold any token. The refill rate must be finite and non-negative (zero
-/// disables refilling but is otherwise a valid, deliberately strict bucket).
+/// The burst must be finite and at least one token. It must also survive the
+/// first subtraction in f64 without rounding back to the original capacity.
+/// The refill rate must be finite and non-negative (zero disables refilling but
+/// is otherwise a valid, deliberately strict bucket).
 pub fn validate_token_bucket(name: &str, burst: f64, refill: f64) -> Result<(), String> {
-    if !burst.is_finite() || burst <= 0.0 {
+    if !burst.is_finite() || burst < 1.0 || burst - 1.0 == burst {
         return Err(format!(
-            "{name}_RATE_LIMIT_BURST must be finite and > 0, got {burst}"
+            "{name}_RATE_LIMIT_BURST must be finite, represent at least one token, and change after consuming one token, got {burst}"
         ));
     }
     if !refill.is_finite() || refill < 0.0 {
@@ -347,6 +348,9 @@ pub fn init() -> AppState {
         database_semaphore: Arc::new(Semaphore::new(database_max_concurrency)),
         attempts_collection_started_at: Arc::new(tokio::sync::Mutex::new(chrono::Utc::now())),
         attempts_snapshot: Arc::new(Mutex::new(None)),
+        attempts_snapshot_build: Arc::new(Mutex::new(None)),
+        #[cfg(test)]
+        attempts_build_probe: Arc::new(crate::AttemptsBuildProbe::default()),
         attempts_snapshot_ttl: std::time::Duration::from_secs(attempts_snapshot_ttl_seconds),
         security_counters: Arc::new(crate::security_counters::SecurityCounters::default()),
         diagnostic_logs: crate::diagnostic::new_quota(),

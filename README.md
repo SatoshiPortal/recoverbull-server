@@ -4,6 +4,9 @@ The server provides secret storage without relying on traditional credentials sy
 
 For the threat model, the risks accepted by design, the security invariants
 guarded by tests and the reviewer checklist, see [SECURITY.md](SECURITY.md).
+Operational templates are in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) and
+[docs/RETENTION.md](docs/RETENTION.md), with versioned files under `deploy/`.
+The SQLite backup and restore procedure is in [deploy/backup/README.md](deploy/backup/README.md).
 
 ## Description
 
@@ -41,7 +44,7 @@ are never logged.
 
  1. On the client side, generate a random secure `identifier`, that you can store securely in a file, and let the user define a `password`.
 
- 2. Since the `password` is probably weak, we use a password hashing function such as Argon2 to derive a 64 octets (512 bits) key splitted in two keys:
+  2. If the user's password/PIN has low entropy, use a password hashing function such as Argon2 to slow offline guesses while deriving a 64 octets (512 bits) key split in two keys. The cloud and database together permit offline validation, so security ultimately depends on the user's secret entropy:
 - `authentication_key` the first 32 octets (256bits)
 - `encryption_key` the remaining 32 octets to encrypt/decrypt the secret
 > Argon2 `salt` is stored alongside the `identifier`. Other params used to derive keys from the password should be the same to derive the exact same keys.
@@ -155,16 +158,16 @@ rejections such as `404`, `405`, `413`, and `415` may not be JSON.
 - `total_attempts`: number of distinct candidates admitted in the current cooldown window.
 - `failed_attempts`: number of distinct candidates for which no database row existed.
 - `total_requests`: every `/fetch` and `/trash` request attached to this identifier's active entry, including replays; map-capacity rejections for previously unseen identifiers cannot be attributed to an entry. It is telemetry, not candidate budget.
-- `window_started_at` / `last_attempt_at`: hour-truncated timestamps of the current window.
+- `window_started_at` / `last_attempt_at`: hour-truncated timestamps of the current window; `last_attempt_at` is the last distinct candidate timestamp, not the latest replay request. The JSON field name is retained for compatibility.
 - `collection_started_at`: hour-truncated start of the in-memory collection. It changes at startup and after each global 24-hour wipe; clients must reset their baseline.
 
 Identifiers are kept and published hashed, never raw. The entire identifier map, including CandidateTags, is wiped every 24 hours from map startup and the attempt budget resets at that boundary. The cooldown sweep runs earlier for shorter-lived entries; nothing is persisted.
 
-The body is **always gzip-compressed JSON** (`Content-Encoding: gzip`); clients must be gzip-capable. This initial telemetry contract, version `1`, reports distinct-candidate counters plus `total_requests` and never exposes CandidateTags. The snapshot is rebuilt at most once per minute and served as immutable shared bytes with a strong `ETag`: send `If-None-Match` to receive a bodyless `304` when nothing changed. `Cache-Control: public, max-age=<remaining seconds>` reflects the real freshness. A dedicated global token bucket (`ATTEMPTS_RATE_LIMIT_*`) bounds cache-bypass traffic; production deployments must additionally cache and rate-limit this route at the reverse proxy (see Deployment).
+The body is **always gzip-compressed JSON** (`Content-Encoding: gzip`); clients must be gzip-capable. This initial telemetry contract, version `1`, reports distinct-candidate counters plus `total_requests` and never exposes CandidateTags. The snapshot is rebuilt at most once per minute and served as immutable shared bytes with a strong `ETag`: send `If-None-Match` to receive a bodyless `304` when nothing changed. `Cache-Control: public, max-age=<remaining seconds>` reflects the real freshness. A dedicated global token bucket (`ATTEMPTS_RATE_LIMIT_*`) bounds cache-bypass traffic; production deployments must additionally cache and rate-limit this route at the reverse proxy (see Deployment). Nginx is the reference template; Caddy is a conditional, mutually exclusive alternative under `deploy/caddy/`.
 
 Detection semantics a client should implement:
 - **Poll `/attempts` proactively** (e.g. at app start, no more often than the snapshot freshness): if your identifier hash appears with attempts you did not make, someone is probing your backup.
-- **Treat a `429` as an alarm**: global service pressure uses `503` instead. See [Error responses](#error-responses) for the full table; do not match on the `error` text.
+- **Treat a `429` or unexpected snapshot activity as an alarm**: global service pressure uses `503` instead. If the wallet is still accessible, rotate/transfer immediately; otherwise recovery availability depends on a **previously exported** Backup Key or a second independent server. See [Error responses](#error-responses) for the full table; do not match on the `error` text.
 - **`attempt_status` on a successful fetch is the freshest signal**: it needs no extra request and stays available even when `/attempts` is overloaded. Failures older than the cooldown expire (entries are swept and forgotten), but a success never resets the counters early.
 - **Telemetry is advisory**: the server cannot distinguish an attacker from the user or another of the user's devices, and a compromised server can fabricate or suppress counters. Clients must warn, never act automatically.
 
@@ -180,7 +183,7 @@ map-filling campaigns cheap to monitor.
 
 The canary from the dotenv file is read on a blocking worker for every `/info`
 request, without cache metadata. File reads are serialized by a dedicated
-permit to protect Tokio's bounded blocking pool; nginx/Tor limits remain
+permit to protect Tokio's bounded blocking pool; the selected reverse-proxy/Tor limits remain
 necessary. A readable file without CANARY returns an empty string; an
 unavailable file falls back to startup. A process-environment `CANARY` is
 authoritative and skips file access.
@@ -205,7 +208,8 @@ excluded, and no timing header or sensitive timing data is emitted.
 
 The extra response wait can increase concurrent connections during a flood.
 Production deployments compensate with the store/lookup token buckets and the
-nginx/Tor connection, request, and DoS defenses described below; it is not a
+selected reverse-proxy and Tor connection, request, and DoS defenses described
+below; it is not a
 replacement for those limits. The invariant and dedicated timing tests are
 listed in [SECURITY.md](SECURITY.md).
 
@@ -239,7 +243,29 @@ Protocol roadmap: escalating backoff (delay without permanent denial), client pr
 
 The server is designed to be reached exclusively through a **Tor onion service**: it protects the transport confidentiality of the `authentication_key` and the IP anonymity of clients. **Never expose it directly on a public interface** — the server refuses to stay silent about it and prints a startup warning when `SERVER_ADDRESS` is not loopback. Production deployments must put a reverse proxy between Tor and Axum because Axum's route timeout starts after HTTP headers have been read.
 
-The supported deployment is **single-instance**: rate limits, token buckets, the cache, and the collection marker are in memory. Load balancing or rolling overlap would multiply budgets and make telemetry inconsistent. Drain and stop the old instance before activating a new one.
+The supported deployment is **strictly single-instance**: rate limits, token
+buckets, the cache, and the collection marker are in memory. The binary does
+not enforce Tor or single-instance operation; a non-loopback bind only emits a
+startup warning. Load balancing or rolling overlap would multiply budgets and
+make telemetry inconsistent. Stop the old instance before activating a new
+one; no daily restart is needed. The internal collection wipe occurs every 24
+hours. An exceptional restart starts a new budget and collection and must not
+overlap the old instance.
+
+Use the maintained templates rather than copying this overview:
+`deploy/systemd/recoverbull.service`, `deploy/nginx/recoverbull.conf` (the
+reference proxy),
+`deploy/tor/recoverbull.torrc.example`, and `deploy/logrotate/recoverbull`.
+The conditional Caddy alternative is documented in `deploy/caddy/README.md`;
+choose exactly one proxy, and admit Caddy only after its build, validation, and
+specific smokes succeed.
+
+The HTTP status contract is shared by both maintained proxy templates: `429` is
+exclusively a targeted Axum lockout, while all shared pressure is `503` with
+`Retry-After`. Clients classify by standard status only; they must not depend
+on custom status codes or error text. Caddy has no native connection-count cap:
+its 10-second header timeout and Tor defenses are compensating controls, so
+operators must budget and monitor file descriptors and processes for the host.
 
 1. Keep Axum on a private loopback port: `SERVER_ADDRESS=127.0.0.1:3001`
 2. Configure nginx on `127.0.0.1:3000` with strict header/body timeouts and connection limits:
@@ -251,6 +277,8 @@ proxy_cache_path /var/cache/nginx/recoverbull levels=1:2 keys_zone=recoverbull_c
 
 server {
     listen 127.0.0.1:3000;
+    access_log off;
+    error_log /var/log/nginx/recoverbull-error.log crit;
     client_max_body_size 1k;
     client_header_timeout 10s;
     client_body_timeout 10s;
@@ -277,6 +305,15 @@ server {
     }
 }
 ```
+
+Keep the error log readable only by service administrators, for example with
+owner `root:adm` and mode `0640`, and configure logrotate (or an equivalent
+collector) with an operator-selected short retention policy. `crit` reduces
+volume but does not guarantee that request metadata is absent. Apply the same
+level, permission, and explicitly configured retention policy to journald and
+Tor logs. Application log guarantees do not cover reverse-proxy or system logs
+unless this runbook is applied. The five-minute global counters retain coarse
+activity metadata and also require restricted access and retention.
 
 All Tor connections reach nginx from loopback, so these connection and request limits are intentionally global. The backend already serves `/attempts` precompressed: nginx caches that exact body instead of recompressing per request. `limit_rate` caps per-connection throughput; multiplied by the connection limit it bounds aggregate snapshot egress. The proxy is also what lets slow clients take their time: with default `proxy_buffering`, nginx drains Axum quickly (within its 30s route timeout) and feeds the client at its own pace.
 
@@ -320,8 +357,8 @@ the database volume).
 `CANARY` is the warrant canary served by `/info`. When it is provided by
 this file (the common case), `/info` re-reads the file on every request,
 following the whitepaper's warrant-canary workflow without a restart. Reads
-are serialized to protect Tokio's bounded blocking pool; nginx/Tor limits
-remain necessary:
+are serialized to protect Tokio's bounded blocking pool; selected reverse-proxy
+and Tor limits remain necessary:
 
 - **Edit the value** → the new value is served immediately.
 - **Remove the `CANARY` line** → an **empty** canary is served: this is the
@@ -385,6 +422,16 @@ Both capacities are range-checked at startup: `RATE_LIMIT_MAX_IDENTIFIERS`
 must be in `[1, 10000000]` and `DATABASE_MAX_CONCURRENCY` in `[1, 1024]` —
 a zero or an absurdly large value would silently disable the protection, so
 the server refuses to start instead.
+Token bursts are validated mathematically: they must be finite, contain at
+least one token, and `burst - 1.0` must differ from `burst` in `f64`. This
+rejects numerically ineffective values without an arbitrary throughput cap.
+The identifier maximum is unchanged; operators must set a memory gate with
+headroom or lower capacity.
+The release bundles SQLite 3.51.3 through `libsqlite3-sys`, the upstream WAL
+reset fix. Startup verifies the runtime version and exactly
+`journal_mode=wal`; every application connection verifies exactly
+`journal_mode=wal` and `secure_delete=1`. The runtime version is immutable for
+the bundled process and is not re-queried on every request connection.
 > `SECRET_MAX_LENGTH=128` represents the size of a 96 octets encrypted secret encoded using base64
 > 96 octets =  `nonce` (16 octets) | `ciphertext` (32 octets) | `hmac` (32 octets) + 16 octets padding to round up to 32 octets blocks
 
@@ -395,7 +442,7 @@ legacy database that has `secret` but no `__diesel_schema_migrations` ledger is
 adopted only when its schema exactly matches migration `0001`; adoption creates
 the ledger entry without creating or modifying any `secret` row. An incompatible
 legacy schema stops startup. This temporary bridge can be removed after all
-databases have been adopted. The project requires Rust 1.97.0 (see
+databases have been adopted. The project requires Rust 1.98.0 (see
 `rust-toolchain.toml`).
 
 ### Storage quota
@@ -406,6 +453,20 @@ filesystem or project quota. Keep the directory private (`0700`, process umask
 WAL checkpoints and replication. Do not automatically delete recovery secrets:
 when the quota is reached, new stores must fail closed until the operator adds
 capacity or applies an explicit retention policy.
+
+### Pre-deploy privacy and recovery gates
+
+Before activation verify one systemd instance, a loopback bind, a `0700`
+deployment directory, `.env` mode `0600`, and service `umask 0077`. Set
+`LimitCORE=0` and configure swap/crash handling. Define retention for the
+database, WAL, and Litestream copies; test restore and rollback, including the
+WAL. Run canary/wipe and store/fetch/trash smoke checks before admitting traffic.
+Debug logging is temporary only and must be disabled before canary exposure.
+
+At the default `RATE_LIMIT_MAX_IDENTIFIERS=100000`, a dynamic audit measured
+22.1 MB JSON, 4.01 MB gzip, and about 254 MiB peak RSS on one host. These are
+measurements, not a universal guarantee: set service memory and capacity with
+headroom or lower the capacity.
 
 ### Run the app
 

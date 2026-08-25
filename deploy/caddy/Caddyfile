@@ -1,0 +1,103 @@
+{
+	auto_https off
+	admin off
+	persist_config off
+	grace_period 35s
+	log {
+		output stderr
+		format json
+		level ERROR
+	}
+	servers {
+		protocols h1
+		max_header_size 8KiB
+		timeouts {
+			read_header 10s
+			read_body 10s
+			write 35s
+			idle 35s
+		}
+	}
+}
+
+# Host-agnostic is safe only with this loopback bind. Never activate with nginx.
+http://:3000 {
+	bind 127.0.0.1
+	request_body {
+		max_size 1KiB
+	}
+
+	handle_errors 429 {
+		header Content-Type application/json
+		respond `{"error":"Service unavailable"}` 503
+	}
+
+	@attempts {
+		method GET
+		path /attempts
+	}
+
+	route @attempts {
+		rate_limit {
+			zone attempts_burst {
+				key static
+				events 20
+				window 1s
+			}
+			zone attempts_sustained {
+				key static
+				events 300
+				window 1m
+			}
+			disable_metrics
+		}
+		cache {
+			allowed_http_verbs GET
+			ttl 30s
+			default_cache_control no-store
+			mode strict
+			log_level ERROR
+			max_cacheable_body_bytes 8388608
+			otter {
+				configuration {
+					size 16
+				}
+			}
+			key {
+				disable_host
+				disable_query
+				disable_body
+				disable_scheme
+				hash
+				hide
+			}
+		}
+		intercept {
+			@uncacheable status 4xx 5xx
+			handle_response @uncacheable {
+				header Cache-Control "no-store"
+			}
+		}
+		reverse_proxy 127.0.0.1:3001 {
+			transport http {
+				versions 1.1
+				dial_timeout 2s
+				response_header_timeout 35s
+				read_timeout 35s
+				write_timeout 35s
+			}
+		}
+	}
+
+	route {
+		reverse_proxy 127.0.0.1:3001 {
+			transport http {
+				versions 1.1
+				dial_timeout 2s
+				response_header_timeout 35s
+				read_timeout 35s
+				write_timeout 35s
+			}
+		}
+	}
+}

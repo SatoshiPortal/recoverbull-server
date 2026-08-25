@@ -12,6 +12,18 @@ use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!();
 const INITIAL_MIGRATION_VERSION: &str = "0001";
+pub const MINIMUM_SQLITE_VERSION: &str = "3.51.3";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ConnectionSetupError {
+    Open,
+    Version,
+    BusyTimeout,
+    SecureDelete,
+    SecureDeleteVerification,
+    Wal,
+    Migration,
+}
 
 #[derive(QueryableByName)]
 struct SecretColumn {
@@ -27,15 +39,26 @@ struct SecretColumn {
     default_value: Option<String>,
 }
 
-pub fn init_db(state: AppState) {
-    let mut connection = establish_connection(state.database_url);
-    run_migrations(&mut connection).expect("Failed to initialize database migrations");
+pub fn try_init_db(state: AppState) -> Result<(), ConnectionSetupError> {
+    let mut connection = establish_connection_without_wal_check(state.database_url)?;
+    verify_sqlite_runtime(&mut connection)?;
+    run_migrations(&mut connection).map_err(|_| ConnectionSetupError::Migration)?;
 
     // enable WAL mode to allow replication with litestream
     sql_query("PRAGMA journal_mode = WAL;")
         .execute(&mut connection)
-        .expect("Failed to enable WAL mode");
+        .map_err(|_| ConnectionSetupError::Wal)?;
+    let journal_mode = sql_query("SELECT journal_mode AS value FROM pragma_journal_mode")
+        .load::<PragmaText>(&mut connection)
+        .map_err(|_| ConnectionSetupError::Wal)?
+        .into_iter()
+        .next()
+        .ok_or(ConnectionSetupError::Wal)?;
+    if journal_mode.value != "wal" {
+        return Err(ConnectionSetupError::Wal);
+    }
     tracing::info!(target: "security", "database initialized");
+    Ok(())
 }
 
 /// Runs embedded migrations, adopting an exact pre-Diesel `secret` table when
@@ -113,17 +136,54 @@ fn table_exists(
     )
 }
 
-pub fn establish_connection(database_url: String) -> SqliteConnection {
+#[derive(QueryableByName)]
+struct PragmaText {
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    value: String,
+}
+
+fn sqlite_version_at_least(version: &str, minimum: &str) -> bool {
+    let parse = |value: &str| {
+        value
+            .split('.')
+            .map(|part| part.parse::<u32>().ok())
+            .collect::<Option<Vec<_>>>()
+    };
+    let (Some(actual), Some(required)) = (parse(version), parse(minimum)) else {
+        return false;
+    };
+    actual.cmp(&required) != std::cmp::Ordering::Less
+}
+
+fn verify_sqlite_runtime(connection: &mut SqliteConnection) -> Result<(), ConnectionSetupError> {
+    let version = sql_query("SELECT sqlite_version() AS value")
+        .get_result::<PragmaText>(connection)
+        .map_err(|_| ConnectionSetupError::Version)?;
+    if sqlite_version_at_least(&version.value, MINIMUM_SQLITE_VERSION) {
+        Ok(())
+    } else {
+        Err(ConnectionSetupError::Version)
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn sqlite_version_at_least_for_test(version: &str) -> bool {
+    sqlite_version_at_least(version, MINIMUM_SQLITE_VERSION)
+}
+
+fn establish_connection_without_wal_check(
+    database_url: String,
+) -> Result<SqliteConnection, ConnectionSetupError> {
     let mut connection =
-        SqliteConnection::establish(&database_url).expect("Error connecting to database");
+        SqliteConnection::establish(&database_url).map_err(|_| ConnectionSetupError::Open)?;
     // busy_timeout is per-connection: without it, concurrent writers in WAL
     // mode fail immediately with SQLITE_BUSY instead of waiting.
     sql_query("PRAGMA busy_timeout = 5000;")
         .execute(&mut connection)
-        .expect("Failed to set busy_timeout");
+        .map_err(|_| ConnectionSetupError::BusyTimeout)?;
     sql_query("PRAGMA secure_delete = ON;")
         .execute(&mut connection)
-        .expect("Failed to enable secure_delete");
+        .map_err(|_| ConnectionSetupError::SecureDelete)?;
     #[derive(QueryableByName)]
     struct PragmaValue {
         #[diesel(sql_type = diesel::sql_types::Integer)]
@@ -131,12 +191,33 @@ pub fn establish_connection(database_url: String) -> SqliteConnection {
     }
     let secure_delete = sql_query("SELECT secure_delete AS value FROM pragma_secure_delete")
         .get_result::<PragmaValue>(&mut connection)
-        .expect("Failed to verify secure_delete");
-    assert_eq!(secure_delete.value, 1, "secure_delete was not enabled");
-    connection
+        .map_err(|_| ConnectionSetupError::SecureDeleteVerification)?;
+    if secure_delete.value != 1 {
+        return Err(ConnectionSetupError::SecureDeleteVerification);
+    }
+    Ok(connection)
 }
 
-pub fn write(connection: &mut SqliteConnection, new_secret: &Secret) -> bool {
+pub fn establish_connection(
+    database_url: String,
+) -> Result<SqliteConnection, ConnectionSetupError> {
+    let mut connection = establish_connection_without_wal_check(database_url)?;
+    let journal_mode = sql_query("SELECT journal_mode AS value FROM pragma_journal_mode")
+        .load::<PragmaText>(&mut connection)
+        .map_err(|_| ConnectionSetupError::Wal)?
+        .into_iter()
+        .next()
+        .ok_or(ConnectionSetupError::Wal)?;
+    if journal_mode.value != "wal" {
+        return Err(ConnectionSetupError::Wal);
+    }
+    Ok(connection)
+}
+
+pub fn write(
+    connection: &mut SqliteConnection,
+    new_secret: &Secret,
+) -> Result<(), diesel::result::Error> {
     // ON CONFLICT DO NOTHING: storing is idempotent. The response must not
     // reveal whether the secret_id already exists, otherwise /store becomes
     // an unthrottled authentication_key oracle (a 403 would confirm a
@@ -145,7 +226,7 @@ pub fn write(connection: &mut SqliteConnection, new_secret: &Secret) -> bool {
         .values(new_secret)
         .on_conflict_do_nothing()
         .execute(connection)
-        .is_ok()
+        .map(|_| ())
 }
 
 pub fn read_secret_by_id(

@@ -152,7 +152,8 @@ enum Admission {
 }
 
 enum FinalizerError {
-    Database(diesel::result::Error),
+    Connection,
+    Database,
     Join(tokio::task::JoinError),
 }
 
@@ -351,16 +352,18 @@ pub async fn fetch_secret(
             #[cfg(test)]
             let _test_database_guard = test_database_guard;
             let _database_permit = permit;
-            let mut connection = establish_connection(database_url);
+            let mut connection =
+                establish_connection(database_url).map_err(|_| FinalizerError::Connection)?;
             if is_trashing_secret {
                 read_and_trash_secret_by_id(&mut connection, &key_id)
+                    .map_err(|_| FinalizerError::Database)
             } else {
-                read_secret_by_id(&mut connection, &key_id)
+                read_secret_by_id(&mut connection, &key_id).map_err(|_| FinalizerError::Database)
             }
         })
         .await;
         let final_result = match database_result {
-            Ok(result) => result.map_err(FinalizerError::Database),
+            Ok(result) => result,
             Err(error) => Err(FinalizerError::Join(error)),
         };
         if is_new {
@@ -419,7 +422,7 @@ pub async fn fetch_secret(
     };
     let result = match result {
         Ok(result) => result,
-        Err(FinalizerError::Database(_error)) => {
+        Err(FinalizerError::Connection) | Err(FinalizerError::Database) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(error_body("Internal server error")),

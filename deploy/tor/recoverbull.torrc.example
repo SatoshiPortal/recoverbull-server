@@ -1,0 +1,4 @@
+HiddenServiceDir /var/lib/tor/recoverbull/
+HiddenServicePort 80 127.0.0.1:3000
+HiddenServiceEnableIntroDoSDefense 1
+HiddenServicePoWDefensesEnabled 1

@@ -139,7 +139,7 @@ async fn test_store_database_error_returns_coherent_body() {
     let (server, state) = crate::tests::test_server::new_test_server().await;
 
     // Force the write to fail: drop the table out from under the server.
-    let mut connection = crate::database::establish_connection(state.clone().database_url);
+    let mut connection = crate::database::establish_connection(state.clone().database_url).unwrap();
     diesel::sql_query("DROP TABLE secret")
         .execute(&mut connection)
         .expect("failed to drop table");

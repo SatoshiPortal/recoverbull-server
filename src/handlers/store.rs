@@ -115,8 +115,10 @@ pub async fn store_secret(
         #[cfg(test)]
         let _test_database_guard = test_database_guard;
         let _database_permit = database_permit;
-        let mut connection = establish_connection(database_url);
-        let is_stored = crate::database::write(&mut connection, &key);
+        let is_stored = match establish_connection(database_url) {
+            Ok(mut connection) => crate::database::write(&mut connection, &key).is_ok(),
+            Err(_) => false,
+        };
         if is_stored {
             security_counters.store_accepted();
         } else {

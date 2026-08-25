@@ -244,7 +244,8 @@ async fn test_pending_duplicate_trash_is_rejected_without_a_second_reservation()
     // or unknown, Pending or Committed — must receive the same 429.
     state.rate_limit_max_attempts = 3;
 
-    let mut lock_connection = crate::database::establish_connection(state.database_url.clone());
+    let mut lock_connection =
+        crate::database::establish_connection(state.database_url.clone()).unwrap();
     diesel::sql_query("BEGIN IMMEDIATE")
         .execute(&mut lock_connection)
         .expect("test must acquire the SQLite write lock");
@@ -296,7 +297,8 @@ async fn test_pending_distinct_candidates_consume_the_attempt_budget() {
             .await;
     }
 
-    let mut lock_connection = crate::database::establish_connection(state.database_url.clone());
+    let mut lock_connection =
+        crate::database::establish_connection(state.database_url.clone()).unwrap();
     diesel::sql_query("BEGIN IMMEDIATE")
         .execute(&mut lock_connection)
         .expect("test must acquire the SQLite write lock");
@@ -329,7 +331,8 @@ async fn test_pending_distinct_candidates_consume_the_attempt_budget() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_old_trash_completion_cannot_update_a_replaced_rate_limit_window() {
     let (_server, state) = crate::tests::test_server::new_test_server().await;
-    let mut lock_connection = crate::database::establish_connection(state.database_url.clone());
+    let mut lock_connection =
+        crate::database::establish_connection(state.database_url.clone()).unwrap();
     diesel::sql_query("BEGIN IMMEDIATE")
         .execute(&mut lock_connection)
         .expect("test must acquire the SQLite write lock");
@@ -386,7 +389,8 @@ async fn test_concurrent_trash_hit_does_not_count_the_losing_miss_as_a_guess() {
         .expect_success()
         .await;
 
-    let mut lock_connection = crate::database::establish_connection(state.database_url.clone());
+    let mut lock_connection =
+        crate::database::establish_connection(state.database_url.clone()).unwrap();
     diesel::sql_query("BEGIN IMMEDIATE")
         .execute(&mut lock_connection)
         .expect("test must acquire the SQLite write lock");

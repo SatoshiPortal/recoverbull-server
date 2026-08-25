@@ -6,6 +6,7 @@ use crate::{
 use axum::http::StatusCode;
 use chrono::Timelike;
 use std::io::Read;
+use std::sync::atomic::Ordering;
 
 fn decode_gzip(body: &[u8]) -> (String, AttemptsSnapshot) {
     let mut decoder = flate2::read::GzDecoder::new(body);
@@ -246,6 +247,58 @@ async fn test_attempts_snapshot_rebuild_is_deterministic() {
         .await;
     let third = server.get("/attempts").expect_success().await;
     assert_ne!(first.header("etag"), third.header("etag"));
+}
+
+/// A cancelled initiator must not cancel the single snapshot rebuild. The
+/// explicit worker gate makes the cancellation happen after build start and
+/// makes a second build observable on the unfixed implementation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_cancelled_attempts_request_keeps_single_rebuild_in_flight() {
+    let (_server, mut state) = crate::tests::test_server::new_test_server().await;
+    state.attempts_snapshot_ttl = std::time::Duration::ZERO;
+    state
+        .attempts_build_probe
+        .hold
+        .store(true, Ordering::SeqCst);
+    let first_state = state.clone();
+    let first = tokio::spawn(async move {
+        crate::handlers::attempts::get_attempts(
+            axum::extract::State(first_state),
+            axum::http::HeaderMap::new(),
+        )
+        .await
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        state.attempts_build_probe.started_notify.notified(),
+    )
+    .await
+    .expect("snapshot worker did not start within 5 seconds");
+    first.abort();
+
+    let second_state = state.clone();
+    let second = tokio::spawn(async move {
+        crate::handlers::attempts::get_attempts(
+            axum::extract::State(second_state),
+            axum::http::HeaderMap::new(),
+        )
+        .await
+    });
+    state
+        .attempts_build_probe
+        .released
+        .store(true, Ordering::SeqCst);
+    state.attempts_build_probe.release.notify_one();
+    let response = tokio::time::timeout(std::time::Duration::from_secs(5), second)
+        .await
+        .expect("joined snapshot request did not complete within 5 seconds")
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let builds_started = state.attempts_build_probe.started.load(Ordering::SeqCst);
+    assert_eq!(
+        builds_started, 1,
+        "the second request must join the rebuild started by the cancelled request"
+    );
 }
 
 #[tokio::test]

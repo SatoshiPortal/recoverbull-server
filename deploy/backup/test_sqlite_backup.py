@@ -12,6 +12,8 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent
+SCHEMA = ROOT.parent.parent / "migrations" / "0001_schema" / "up.sql"
+sys.dont_write_bytecode = True
 SPEC = importlib.util.spec_from_file_location("sqlite_backup", ROOT / "sqlite_backup.py")
 assert SPEC and SPEC.loader
 backup_tool = importlib.util.module_from_spec(SPEC)
@@ -44,35 +46,35 @@ def main() -> None:
         with sqlite3.connect(source) as connection:
             connection.execute("PRAGMA journal_mode=WAL")
             connection.execute("PRAGMA wal_autocheckpoint=0")
+            connection.executescript(SCHEMA.read_text(encoding="utf-8"))
             connection.executescript(
-                "CREATE TABLE secrets (id TEXT PRIMARY KEY, value BLOB);"
                 "CREATE TABLE __diesel_schema_migrations (version TEXT PRIMARY KEY);"
                 "INSERT INTO __diesel_schema_migrations VALUES ('00000000000000');"
             )
             connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            connection.execute("INSERT INTO secrets VALUES ('wal-row', X'01')")
+            connection.execute("INSERT INTO secret VALUES ('wal-row', '2026-08-25T00:00:00Z', 'ciphertext')")
             connection.commit()
         assert Path(f"{source}-wal").exists(), "fixture transaction must remain in WAL"
 
         shutil.copyfile(source, naive)
         with sqlite3.connect(naive) as connection:
-            assert connection.execute("SELECT id FROM secrets").fetchone() is None
+            assert connection.execute("SELECT id FROM secret").fetchone() is None
 
         run_cli("backup", str(source), str(backup))
         run_cli("verify", str(backup))
         with sqlite3.connect(backup) as connection:
-            assert connection.execute("SELECT value FROM secrets WHERE id='wal-row'").fetchone() == (b"\x01",)
+            assert connection.execute("SELECT encrypted_secret FROM secret WHERE id='wal-row'").fetchone() == ("ciphertext",)
         assert oct(backup.stat().st_mode & 0o777) == "0o600"
 
         replace_destination = root / "replace.sqlite3"
         with sqlite3.connect(replace_destination) as connection:
             connection.execute("PRAGMA journal_mode=WAL")
             connection.execute("PRAGMA wal_autocheckpoint=0")
+            connection.executescript(SCHEMA.read_text(encoding="utf-8"))
             connection.executescript(
-                "CREATE TABLE secrets (id TEXT PRIMARY KEY, value BLOB);"
                 "CREATE TABLE __diesel_schema_migrations (version TEXT PRIMARY KEY);"
                 "INSERT INTO __diesel_schema_migrations VALUES ('00000000000000');"
-                "INSERT INTO secrets VALUES ('old-row', X'02');"
+                "INSERT INTO secret VALUES ('old-row', '2026-08-25T00:00:00Z', 'old-ciphertext');"
             )
             connection.commit()
         replace_wal = Path(f"{replace_destination}-wal")
@@ -106,7 +108,7 @@ def main() -> None:
         run_cli("restore", str(backup), str(restored))
         run_cli("verify", str(restored))
         with sqlite3.connect(restored) as connection:
-            assert connection.execute("SELECT id FROM secrets").fetchone() == ("wal-row",)
+            assert connection.execute("SELECT id FROM secret").fetchone() == ("wal-row",)
         assert oct(restored.stat().st_mode & 0o777) == "0o600"
         run_cli("restore", str(backup), str(restored), expected=1)
         assert not list(root.glob(".*.tmp"))

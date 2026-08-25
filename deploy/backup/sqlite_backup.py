@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 
-REQUIRED_TABLES = ("secrets", "__diesel_schema_migrations")
+REQUIRED_TABLES = ("secret", "__diesel_schema_migrations")
 
 
 def _readonly(path: Path) -> sqlite3.Connection:

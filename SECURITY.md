@@ -115,7 +115,11 @@ Operators are responsible for retention of those copies.
  10. **Global buckets can deny service to everyone.** Behind an onion service
      per-IP limiting is useless, so buckets are global; an attacker can
      exhaust them (`503` for all). Bounded by the selected reverse proxy and
-     Tor defenses at the deployment layer.
+     Tor defenses at the deployment layer. Caddy adapts its plugin's internal
+     global-bucket `429` to this standard `503`; it does not adapt an Axum
+     lockout `429`. Caddy's lack of a native connection-count cap is accepted
+     only with its 10-second header timeout, Tor defenses, and an
+     operator-managed FD/process budget.
 11. **Temporary behavioral state.** The server retains up to the configured
     maximum of derived CandidateTags (`secret_id/key_id`) per bucket in memory.
     A CandidateTag is never raw authentication or password material, and is

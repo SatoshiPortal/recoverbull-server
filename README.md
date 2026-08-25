@@ -259,6 +259,13 @@ The conditional Caddy alternative is documented in `deploy/caddy/README.md`;
 choose exactly one proxy, and admit Caddy only after its build, validation, and
 specific smokes succeed.
 
+The HTTP status contract is shared by both maintained proxy templates: `429` is
+exclusively a targeted Axum lockout, while all shared pressure is `503` with
+`Retry-After`. Clients classify by standard status only; they must not depend
+on custom status codes or error text. Caddy has no native connection-count cap:
+its 10-second header timeout and Tor defenses are compensating controls, so
+operators must budget and monitor file descriptors and processes for the host.
+
 1. Keep Axum on a private loopback port: `SERVER_ADDRESS=127.0.0.1:3001`
 2. Configure nginx on `127.0.0.1:3000` with strict header/body timeouts and connection limits:
 

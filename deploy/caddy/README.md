@@ -3,6 +3,8 @@
 This directory is an alternative to the reference nginx template, not an
 additional proxy. Activate exactly one of nginx or Caddy on `127.0.0.1:3000`.
 Caddy must be custom-built and validated before it is admitted to onion traffic.
+The audited build module is versioned in `build/`; it is the reproducible source
+of the binary, not the prose xcaddy command below.
 
 ## Exact build pins
 
@@ -23,8 +25,18 @@ Caddy v2.11.4 requires Go >=1.25.1, but Go 1.25.1 is explicitly unsuitable for
 this release build: the measured `govulncheck` v1.7.0 scan reported 55
 binary-mode findings. The verified release environment is Go 1.26.7 with xcaddy
 v0.4.7. The operator must provision that patched/supported toolchain and
-`xcaddy` explicitly; this repository does not install tools or provide a Go
-lockfile. Any future Go upgrade requires a fresh audit.
+`xcaddy` explicitly; this repository does not install tools. The versioned
+`build/go.mod` and `build/go.sum` graph is the canonical build input. Any future
+Go upgrade requires a fresh audit.
+
+The canonical reproducible build is:
+
+```sh
+cd deploy/caddy/build
+go build -mod=readonly -trimpath -o caddy
+```
+
+The xcaddy command remains a controlled regeneration recipe only:
 
 ```sh
 xcaddy build v2.11.4 \
@@ -47,7 +59,11 @@ pinned primary modules, and all runtime replacements above. `x/mod` is a build
 dependency and may not appear in the runtime binary's build-info; confirm it
 from the retained build module instead.
 From that retained build-module directory, run govulncheck v1.7.0 or newer in
-source and binary modes, plus OSV Scanner v2.5.1 or newer with Go call analysis:
+source and binary modes, plus OSV Scanner v2.5.1 or newer with Go call analysis.
+These are release gates, not per-PR CI checks. Any change to `build/go.mod` or
+`build/go.sum` requires fresh source, binary, and OSV audits and a new audited
+release-binary hash; a CI-built binary is not publishable merely because the
+build and smoke pass:
 
 ```sh
 govulncheck -mode=source ./...
@@ -82,6 +98,7 @@ and journald routing are operator-managed.
 ./caddy list-modules | grep -E 'cache|otter|rate_limit'
 ./caddy adapt --config deploy/caddy/Caddyfile --adapter caddyfile --validate
 ./caddy validate --config deploy/caddy/Caddyfile --adapter caddyfile
+python3 deploy/caddy/smoke.py ./caddy
 ```
 
 With `admin off`, there is no reload API. Stop and start the selected service
@@ -105,22 +122,30 @@ Before the cache decides whether to store a response, the `intercept` handler
 forces upstream `4xx` and `5xx` responses to `Cache-Control: no-store` while
 leaving their status and body unchanged.
 
-The native `handle_errors 429` route avoids a CEL matcher and applies only to
-Caddy's internal rate-limit error; it does not touch 429 responses from the
-Axum backend. The rate-limit module's internal 429 must become generic JSON 503
-while preserving its `Retry-After`; this preservation is required and must be
-verified by the smoke protocol below. Axum's proxied 429 remains an Axum 429
-because backend responses do not enter Caddy error routes. No Caddy compression
-is enabled.
+The HTTP contract is deliberately standard: **429 is exclusively targeted
+Axum lockout; 503 is all shared pressure**. The plugin emits 429 internally for
+its global bucket, and `handle_errors 429` adapts that local error to JSON 503
+while preserving `Retry-After`; it never intercepts an upstream Axum 429. Do
+not introduce 418, 423, or other custom statuses: clients classify by standard
+status only. Nginx `limit_req` emits 503 natively by default, so this adapter
+keeps the deployment contracts aligned. No Caddy compression is enabled; the
+smoke preserves and verifies Axum's deterministic precompressed gzip response.
+
+Caddy has no native connection-count cap. Its 10-second read-header timeout and
+Tor defenses reduce exposure, but operators must set and monitor a file-descriptor
+and process budget appropriate for the host. Do not substitute a supposedly
+portable nftables rule; connection budgeting is host and deployment specific.
 
 ## Required smoke protocol
 
 Before switching from nginx, exercise the onion endpoint through Caddy and
 record the results:
 
-1. `GET /attempts` twice: verify cache miss/hit through `Cache-Status`, and
-   verify `ETag`, gzip, and conditional `304` behavior. If the operator can
-   instrument Axum, the hit must also correspond to no second backend call.
+1. Run `python3 deploy/caddy/smoke.py /path/to/caddy`. It validates the config,
+   required modules and build-info pins, then verifies deterministic gzip bytes,
+   cache miss/hit through `Cache-Status`, stable `ETag`, conditional `304`
+   without a second backend call, and host/query normalization with a local
+   backend.
 2. Exercise non-cache `store`, `fetch`, `trash`, and `info` requests; they must
    reach Axum without cache state or edge rate limiting.
 3. Confirm an Axum-generated `429` remains `429` with its `Retry-After`.

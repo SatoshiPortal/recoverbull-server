@@ -15,6 +15,12 @@ use crate::AppState;
 const DATABASE_PERMIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 const GLOBAL_OVERLOAD_RETRY_AFTER_SECS: u64 = 1;
 
+#[derive(Clone, Copy)]
+pub(crate) enum LookupOperation {
+    Fetch,
+    Trash,
+}
+
 fn remove_pending(
     map: &mut HashMap<String, RateLimitInfo>,
     id_hash: &str,
@@ -146,8 +152,14 @@ fn rate_limited(
 }
 
 enum Admission {
-    New(AttemptStatus, chrono::DateTime<chrono::Utc>),
-    Replay(AttemptStatus, chrono::DateTime<chrono::Utc>),
+    New {
+        attempt_status: AttemptStatus,
+        generation: chrono::DateTime<chrono::Utc>,
+    },
+    Replay {
+        attempt_status: AttemptStatus,
+        generation: chrono::DateTime<chrono::Utc>,
+    },
     Pending,
 }
 
@@ -200,10 +212,10 @@ async fn finalize(
     }
 }
 
-pub async fn fetch_secret(
+pub async fn lookup_secret(
     State(state): State<AppState>,
     Json(request): Json<FetchSecret>,
-    is_trashing_secret: bool,
+    operation: LookupOperation,
 ) -> Response {
     let identifier = request.identifier.to_lowercase();
     let authentication_key = request.authentication_key.to_lowercase();
@@ -268,29 +280,29 @@ pub async fn fetch_secret(
         }
         match info.candidates.get(&candidate).copied() {
             Some(CandidateState::Pending) => Admission::Pending,
-            Some(CandidateState::Committed) => Admission::Replay(
-                attempt_status(
+            Some(CandidateState::Committed) => Admission::Replay {
+                attempt_status: attempt_status(
                     info,
                     state.rate_limit_max_attempts,
                     None,
                     state.rate_limit_cooldown,
                 ),
-                info.window_started_at,
-            ),
+                generation: info.window_started_at,
+            },
             None => {
                 let previous = (info.candidate_count() > 0).then_some(info.last_candidate_at);
                 info.candidates
                     .insert(candidate.clone(), CandidateState::Pending);
                 info.last_candidate_at = requested_at;
-                Admission::New(
-                    attempt_status(
+                Admission::New {
+                    attempt_status: attempt_status(
                         info,
                         state.rate_limit_max_attempts,
                         previous,
                         state.rate_limit_cooldown,
                     ),
-                    info.window_started_at,
-                )
+                    generation: info.window_started_at,
+                }
             }
         }
     };
@@ -302,12 +314,19 @@ pub async fn fetch_secret(
             "Candidate lookup pending, retry later",
         );
     }
-    let (attempt_status, generation, is_new) = match admission {
-        Admission::New(status, generation) => (status, generation, true),
-        Admission::Replay(status, generation) => (status, generation, false),
+    let candidate_was_reserved = matches!(admission, Admission::New { .. });
+    let (attempt_status, generation) = match admission {
+        Admission::New {
+            attempt_status,
+            generation,
+        }
+        | Admission::Replay {
+            attempt_status,
+            generation,
+        } => (attempt_status, generation),
         Admission::Pending => unreachable!("pending admission returned above"),
     };
-    let mut pending_guard = is_new.then(|| {
+    let mut pending_guard = candidate_was_reserved.then(|| {
         PendingGuard::new(
             state.clone(),
             id_hash.clone(),
@@ -354,11 +373,11 @@ pub async fn fetch_secret(
             let _database_permit = permit;
             let mut connection =
                 establish_connection(database_url).map_err(|_| FinalizerError::Connection)?;
-            if is_trashing_secret {
-                read_and_trash_secret_by_id(&mut connection, &key_id)
-                    .map_err(|_| FinalizerError::Database)
-            } else {
-                read_secret_by_id(&mut connection, &key_id).map_err(|_| FinalizerError::Database)
+            match operation {
+                LookupOperation::Fetch => read_secret_by_id(&mut connection, &key_id)
+                    .map_err(|_| FinalizerError::Database),
+                LookupOperation::Trash => read_and_trash_secret_by_id(&mut connection, &key_id)
+                    .map_err(|_| FinalizerError::Database),
             }
         })
         .await;
@@ -366,7 +385,7 @@ pub async fn fetch_secret(
             Ok(result) => result,
             Err(error) => Err(FinalizerError::Join(error)),
         };
-        if is_new {
+        if candidate_was_reserved {
             finalize(
                 &task_state,
                 &task_id_hash,
@@ -382,18 +401,16 @@ pub async fn fetch_secret(
         match &final_result {
             Ok(Some(_)) => {
                 task_state.security_counters.lookup_accepted();
-                if is_trashing_secret {
-                    task_state.security_counters.trash_hit();
-                } else {
-                    task_state.security_counters.fetch_hit();
+                match operation {
+                    LookupOperation::Fetch => task_state.security_counters.fetch_hit(),
+                    LookupOperation::Trash => task_state.security_counters.trash_hit(),
                 }
             }
             Ok(None) => {
                 task_state.security_counters.lookup_accepted();
-                if is_trashing_secret {
-                    task_state.security_counters.trash_miss();
-                } else {
-                    task_state.security_counters.fetch_miss();
+                match operation {
+                    LookupOperation::Fetch => task_state.security_counters.fetch_miss(),
+                    LookupOperation::Trash => task_state.security_counters.trash_miss(),
                 }
             }
             Err(_) => task_state.security_counters.database_error(),
@@ -409,7 +426,7 @@ pub async fn fetch_secret(
     let result = match task.await {
         Ok(result) => result,
         Err(_error) => {
-            if is_new {
+            if candidate_was_reserved {
                 remove_pending_async(&state, &id_hash, &candidate, generation).await;
             }
             state.security_counters.database_error();
@@ -440,10 +457,9 @@ pub async fn fetch_secret(
 
     match result {
         Some(key) => {
-            let code = if is_trashing_secret {
-                StatusCode::ACCEPTED
-            } else {
-                StatusCode::OK
+            let code = match operation {
+                LookupOperation::Fetch => StatusCode::OK,
+                LookupOperation::Trash => StatusCode::ACCEPTED,
             };
             let mut body = serde_json::to_value(key).expect("secret is serializable");
             body["attempt_status"] = json!(attempt_status);

@@ -11,7 +11,11 @@ use std::{
 };
 
 use crate::{
-    handlers::{attempts, fetch, info, store},
+    handlers::{
+        attempts,
+        fetch::{self, LookupOperation},
+        info, store,
+    },
     models::FetchSecret,
     AppState,
 };
@@ -41,13 +45,13 @@ pub(crate) fn new_with_response_delay(app_state: AppState, response_delay: Durat
         .route(
             "/fetch",
             post(|state: State<AppState>, json: Json<FetchSecret>| {
-                fetch::fetch_secret(state, json, false)
+                fetch::lookup_secret(state, json, LookupOperation::Fetch)
             }),
         )
         .route(
             "/trash",
             post(|state: State<AppState>, json: Json<FetchSecret>| {
-                fetch::fetch_secret(state, json, true)
+                fetch::lookup_secret(state, json, LookupOperation::Trash)
             }),
         )
         // route_layer limits this middleware to matched routes. The method

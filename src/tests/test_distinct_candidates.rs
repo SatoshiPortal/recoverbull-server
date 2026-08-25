@@ -26,10 +26,10 @@ async fn wait_for_attempts(state: &crate::AppState, expected: u8) {
 }
 
 async fn trash(state: crate::AppState, authentication_key: &str) -> StatusCode {
-    crate::handlers::fetch::fetch_secret(
+    crate::handlers::fetch::lookup_secret(
         axum::extract::State(state),
         axum::Json(fetch(SHA256_111111, authentication_key)),
-        true,
+        crate::handlers::fetch::LookupOperation::Trash,
     )
     .await
     .status()

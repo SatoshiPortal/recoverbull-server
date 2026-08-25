@@ -209,10 +209,10 @@ async fn test_cancelled_request_does_not_consume_an_attempt() {
     // still parked on the semaphore.
     let outcome = tokio::time::timeout(
         std::time::Duration::from_millis(100),
-        crate::handlers::fetch::fetch_secret(
+        crate::handlers::fetch::lookup_secret(
             axum::extract::State(state.clone()),
             axum::Json(request),
-            false,
+            crate::handlers::fetch::LookupOperation::Fetch,
         ),
     )
     .await;
@@ -264,10 +264,10 @@ async fn test_cancelled_trash_after_sqlite_start_keeps_attempt_reserved() {
     };
     let outcome = tokio::time::timeout(
         std::time::Duration::from_millis(100),
-        crate::handlers::fetch::fetch_secret(
+        crate::handlers::fetch::lookup_secret(
             axum::extract::State(state.clone()),
             axum::Json(request),
-            true,
+            crate::handlers::fetch::LookupOperation::Trash,
         ),
     )
     .await;
@@ -398,10 +398,10 @@ async fn test_concurrent_cancellation_refunds_every_reservation() {
         handles.push(tokio::spawn(async move {
             tokio::time::timeout(
                 std::time::Duration::from_millis(100),
-                crate::handlers::fetch::fetch_secret(
+                crate::handlers::fetch::lookup_secret(
                     axum::extract::State(state),
                     axum::Json(request()),
-                    false,
+                    crate::handlers::fetch::LookupOperation::Fetch,
                 ),
             )
             .await
@@ -438,10 +438,10 @@ async fn test_concurrent_cancellation_refunds_every_reservation() {
     // No phantom budget loss: the identifier must be admitted again. Give the
     // semaphore a permit so the request can reach the (empty) database.
     state.database_semaphore.add_permits(1);
-    let response = crate::handlers::fetch::fetch_secret(
+    let response = crate::handlers::fetch::lookup_secret(
         axum::extract::State(state.clone()),
         axum::Json(request()),
-        false,
+        crate::handlers::fetch::LookupOperation::Fetch,
     )
     .await;
     assert_eq!(
@@ -468,10 +468,10 @@ async fn test_deferred_refund_runs_when_drop_finds_the_lock_contended() {
     };
     let handler_state = state.clone();
     let handle = tokio::spawn(async move {
-        crate::handlers::fetch::fetch_secret(
+        crate::handlers::fetch::lookup_secret(
             axum::extract::State(handler_state),
             axum::Json(request),
-            false,
+            crate::handlers::fetch::LookupOperation::Fetch,
         )
         .await;
     });

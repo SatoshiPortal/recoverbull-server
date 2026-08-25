@@ -1,11 +1,9 @@
-//! Characterization tests reproducing the claims of the external audit
-//! (SECURITY-AUDIT-2026-08-04, multi-model review of commit 38b274f)
-//! against the current code of this branch.
+//! Regression and characterization tests derived from the external audit
+//! (SECURITY-AUDIT-2026-08-04, multi-model review of commit 38b274f).
 //!
-//! These tests document the CURRENT behavior. Each one passes today
-//! *because the vulnerability exists*. When a claim is remediated, the
-//! corresponding test breaks and must be updated to assert the secure
-//! behavior — that breakage is the signal that the fix landed.
+//! Remediated findings assert the secure behavior. Tests for accepted design
+//! tensions preserve the behavior documented in `SECURITY.md` without calling
+//! it a remediated vulnerability.
 
 use crate::{
     models::{FetchSecret, StoreSecret},
@@ -43,7 +41,8 @@ async fn test_audit_f1_store_gives_no_existence_signal() {
     };
     let first = server.post("/store").json(store).await;
 
-    // distinct wrong-key guesses: accepted, never throttled
+    // Distinct wrong-key guesses remain indistinguishable from fresh stores
+    // while they are within the global store bucket.
     for i in 0..10u32 {
         let guess = &StoreSecret {
             identifier: SHA256_111111.to_string(),
@@ -117,9 +116,10 @@ async fn test_audit_f1_planted_rows_cannot_reset_fetch_rate_limit() {
     assert_eq!(response.status_code(), StatusCode::TOO_MANY_REQUESTS);
 }
 
-/// F2 (HIGH): the attempts counter is keyed on the identifier alone and
-/// checked before credentials are verified, so an attacker who knows the
-/// victim's identifier can lock the legitimate owner out of recovery.
+/// F2 (HIGH, accepted design tension): the attempts counter is keyed on the
+/// identifier alone and checked before credentials are verified, so an
+/// attacker who knows the victim's identifier can lock the legitimate owner
+/// out of recovery. See `SECURITY.md` for the rationale and mitigations.
 #[tokio::test]
 async fn test_audit_f2_attacker_failures_deny_legitimate_owner() {
     let (server, _) = crate::tests::test_server::new_test_server().await;
@@ -155,7 +155,7 @@ async fn test_audit_f2_attacker_failures_deny_legitimate_owner() {
     assert_eq!(
         response.status_code(),
         StatusCode::TOO_MANY_REQUESTS,
-        "CURRENT VULNERABLE BEHAVIOR: the owner is locked out by the attacker"
+        "accepted lockout behavior: the shared identifier budget is exhausted"
     );
 }
 

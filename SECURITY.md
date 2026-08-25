@@ -23,6 +23,14 @@ risks that are **accepted by design** (do not re-report them), the
 **invariants** the code must keep (each guarded by tests), the traps already
 stepped into, and a checklist for future reviews.
 
+## Reviewer reading map
+
+1. Start with `src/main.rs` for process lifecycle and shared state, then `src/env.rs` for configuration parsing and capacity validation.
+2. Read `src/router.rs` for the HTTP surface, middleware order, timeouts, body limits, and the sensitive-response floor.
+3. Follow protocol behavior through `src/handlers/store.rs`, `src/handlers/fetch.rs` (both fetch and trash), `src/handlers/info.rs`, and `src/handlers/attempts.rs`.
+4. Use `src/models.rs` for wire and rate-limit state, `src/database.rs` for SQLite invariants, `src/rate_limit.rs` for lifecycle tasks, and `src/diagnostic.rs` plus `src/security_counters.rs` for privacy-safe observability.
+5. Treat the invariants table below as the test index; the corresponding files under `src/tests/` are the executable evidence for each security claim.
+
 Application log guarantees do not cover nginx or Caddy, journald, or Tor logs unless the
 README runbook is applied: those logs may contain request metadata and require
 strict levels, private permissions, and short retention. Five-minute global

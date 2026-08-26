@@ -3,9 +3,13 @@ use axum::response::{IntoResponse, Response};
 use axum::{http::StatusCode, Json};
 use serde_json::Value;
 
-use crate::models::{error_body, retry_after_response, StoreSecret};
+use crate::http::{
+    contract::StoreSecret,
+    error::{error_body, retry_after_response},
+    validation::is_base64,
+};
+use crate::recovery::identifiers::{generate_secret_id, is_256bits_hex_hash};
 use crate::storage::sqlite::{establish_connection, Secret};
-use crate::utils::{generate_secret_id, is_256bits_hex_hash, is_base64};
 use crate::AppState;
 
 const DATABASE_PERMIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);

@@ -1,5 +1,5 @@
 use crate::{
-    models::{FetchSecret, StoreSecret},
+    http::contract::{FetchSecret, StoreSecret},
     tests::{BASE64_ENCRYPTED_SECRET, SHA256_111111, SHA256_222222},
 };
 use axum::http::StatusCode;

@@ -8,7 +8,7 @@
 //! behavior — that breakage is the signal that the fix landed.
 
 use crate::{
-    models::{FetchSecret, StoreSecret},
+    http::contract::{FetchSecret, StoreSecret},
     tests::{BASE64_ENCRYPTED_SECRET, NOT_PASSWORD_HASH, SHA256_111111, SHA256_222222},
 };
 use axum::http::StatusCode;

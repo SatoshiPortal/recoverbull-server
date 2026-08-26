@@ -1,9 +1,11 @@
+mod attempts;
 mod diagnostic;
+mod digest;
 mod env;
 mod handlers;
 mod http;
-mod models;
 mod rate_limit;
+mod recovery;
 mod router;
 mod schema;
 mod security_counters;
@@ -11,7 +13,6 @@ mod storage;
 
 #[cfg(test)]
 mod tests;
-mod utils;
 
 use std::{collections::HashMap, future::IntoFuture, sync::Arc, time::Instant};
 
@@ -101,7 +102,7 @@ struct AppState {
     /// Serializes dotenv reads so `/info` cannot exhaust Tokio's blocking pool.
     canary_read_semaphore: Arc<Semaphore>,
     rate_limit_cooldown: TimeDelta,
-    identifier_rate_limit: Arc<Mutex<HashMap<String, models::RateLimitInfo>>>,
+    identifier_rate_limit: Arc<Mutex<HashMap<String, attempts::ledger::RateLimitInfo>>>,
     secret_max_length: usize,
     rate_limit_max_attempts: u8,
     store_token_bucket: Arc<Mutex<rate_limit::TokenBucket>>,

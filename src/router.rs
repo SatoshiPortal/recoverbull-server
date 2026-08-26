@@ -12,7 +12,7 @@ use std::{
 
 use crate::{
     handlers::{attempts, fetch, info, store},
-    models::FetchSecret,
+    http::contract::FetchSecret,
     AppState,
 };
 

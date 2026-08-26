@@ -2,8 +2,8 @@ use axum::extract::State;
 use axum::{http::StatusCode, Json};
 use serde_json::{json, Value};
 
-use crate::models::Info;
-use crate::utils::truncate_to_hour;
+use crate::attempts::snapshot::truncate_to_hour;
+use crate::http::contract::Info;
 use crate::AppState;
 
 pub async fn get_info(State(state): State<AppState>) -> (StatusCode, Json<Value>) {

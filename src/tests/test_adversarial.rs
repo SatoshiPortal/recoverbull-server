@@ -4,12 +4,12 @@
 //! integrity. They are written to attack the server, not to confirm it.
 
 use crate::{
-    models::{FetchSecret, StoreSecret},
+    http::contract::{FetchSecret, StoreSecret},
+    recovery::identifiers::identifier_hash,
     tests::{
         BASE64_ENCRYPTED_SECRET, NOT_PASSWORD_HASH, SHA256_111111, SHA256_222222,
         SHA256_CONCAT_111111_222222,
     },
-    utils::identifier_hash,
 };
 use axum::http::StatusCode;
 use diesel::RunQueryDsl;
@@ -953,7 +953,7 @@ async fn test_expired_entry_disappears_from_snapshot() {
             chrono::Utc::now() - state.rate_limit_cooldown - chrono::Duration::minutes(1);
         map.insert(
             identifier_hash(SHA256_111111).unwrap(),
-            crate::models::RateLimitInfo {
+            crate::attempts::ledger::RateLimitInfo {
                 window_started_at: expired_at,
                 last_candidate_at: expired_at,
                 last_request_at: expired_at,
@@ -1309,7 +1309,7 @@ async fn test_encrypted_secret_length_boundary() {
 #[test]
 fn test_secret_id_and_id_hash_are_distinct_algorithms() {
     // generate_secret_id: sha256 over the concatenated hex strings
-    let secret_id = crate::utils::generate_secret_id(SHA256_111111, SHA256_222222);
+    let secret_id = crate::recovery::identifiers::generate_secret_id(SHA256_111111, SHA256_222222);
     assert_eq!(secret_id, SHA256_CONCAT_111111_222222);
 
     // id_hash: sha256 over the raw identifier bytes (shared client vector)
@@ -1326,7 +1326,7 @@ fn test_secret_id_and_id_hash_are_distinct_algorithms() {
         hex::decode(SHA256_222222).unwrap(),
     ]
     .concat();
-    let raw_concat_hash = crate::utils::sha256_hex(&raw_concat);
+    let raw_concat_hash = crate::digest::sha256_hex(&raw_concat);
     assert_ne!(
         raw_concat_hash, secret_id,
         "secret_id is over the hex strings, not the raw bytes"
@@ -1576,7 +1576,7 @@ async fn test_attempts_counter_does_not_overflow_at_u8_max() {
         let mut map = state.identifier_rate_limit.lock().await;
         map.insert(
             identifier_hash(SHA256_111111).unwrap(),
-            crate::models::RateLimitInfo {
+            crate::attempts::ledger::RateLimitInfo {
                 window_started_at: chrono::Utc::now(),
                 last_candidate_at: chrono::Utc::now(),
                 last_request_at: chrono::Utc::now(),
@@ -1584,7 +1584,7 @@ async fn test_attempts_counter_does_not_overflow_at_u8_max() {
                     .map(|i| {
                         (
                             format!("candidate-{i}"),
-                            crate::models::CandidateState::Committed,
+                            crate::attempts::ledger::CandidateState::Committed,
                         )
                     })
                     .collect(),

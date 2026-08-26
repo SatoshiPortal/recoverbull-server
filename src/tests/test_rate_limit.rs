@@ -1,7 +1,8 @@
 use crate::{
-    models::{FetchSecret, RateLimitInfo, ResponseFailedAttempt, StoreSecret},
+    attempts::ledger::{CandidateState, RateLimitInfo},
+    http::contract::{FetchSecret, ResponseFailedAttempt, StoreSecret},
+    recovery::identifiers::{generate_secret_id, identifier_hash},
     tests::{BASE64_ENCRYPTED_SECRET, NOT_PASSWORD_HASH, SHA256_111111, SHA256_222222},
-    utils::{generate_secret_id, identifier_hash},
 };
 use axum::http::StatusCode;
 use diesel::RunQueryDsl;
@@ -15,10 +16,8 @@ async fn test_global_wipe_clears_candidates_resets_timestamp_and_snapshot() {
     {
         let mut map = state.identifier_rate_limit.lock().await;
         let mut info = RateLimitInfo::new(chrono::Utc::now());
-        info.candidates.insert(
-            "candidate-tag".to_owned(),
-            crate::models::CandidateState::Committed,
-        );
+        info.candidates
+            .insert("candidate-tag".to_owned(), CandidateState::Committed);
         map.insert(SHA256_111111.to_owned(), info);
     }
     crate::rate_limit::wipe_identifier_rate_limit(&state).await;

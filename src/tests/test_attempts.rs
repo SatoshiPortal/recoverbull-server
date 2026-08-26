@@ -1,7 +1,8 @@
 use crate::{
-    models::{AttemptsSnapshot, FetchSecret, RateLimitInfo, StoreSecret},
+    attempts::{ledger::RateLimitInfo, snapshot::AttemptsSnapshot},
+    digest::sha256_hex,
+    http::contract::{FetchSecret, StoreSecret},
     tests::{BASE64_ENCRYPTED_SECRET, NOT_PASSWORD_HASH, SHA256_111111, SHA256_222222},
-    utils::sha256_hex,
 };
 use axum::http::StatusCode;
 use chrono::Timelike;
@@ -70,7 +71,7 @@ async fn test_attempts_publish_hashed_identifier_with_counters() {
 fn test_attempts_id_hash_matches_shared_client_vector() {
     let expected = "f5bb872a08ef929e6744d117a69d4073ee7b5df4f5d7a4ecdd606f30a58f76db";
     assert_eq!(
-        crate::utils::identifier_hash(SHA256_111111).unwrap(),
+        crate::recovery::identifiers::identifier_hash(SHA256_111111).unwrap(),
         expected
     );
 }
@@ -340,7 +341,7 @@ async fn test_attempts_omit_entries_after_cooldown_without_waiting_for_sweeper()
         let window_started_at =
             chrono::Utc::now() - state.rate_limit_cooldown - chrono::Duration::seconds(1);
         entries.insert(
-            crate::utils::identifier_hash(SHA256_111111).unwrap(),
+            crate::recovery::identifiers::identifier_hash(SHA256_111111).unwrap(),
             RateLimitInfo {
                 window_started_at,
                 last_candidate_at: window_started_at,
@@ -369,7 +370,7 @@ async fn test_attempts_last_attempt_at_is_last_distinct_candidate() {
     {
         let mut entries = state.identifier_rate_limit.lock().await;
         entries.insert(
-            crate::utils::identifier_hash(SHA256_111111).unwrap(),
+            crate::recovery::identifiers::identifier_hash(SHA256_111111).unwrap(),
             RateLimitInfo {
                 window_started_at,
                 last_candidate_at,
@@ -386,7 +387,7 @@ async fn test_attempts_last_attempt_at_is_last_distinct_candidate() {
     let (_, snapshot) = decode_gzip(response.as_bytes());
     assert_eq!(
         snapshot.entries[0].last_attempt_at,
-        crate::utils::truncate_to_hour(last_candidate_at)
+        crate::attempts::snapshot::truncate_to_hour(last_candidate_at)
     );
     assert_eq!(snapshot.entries[0].total_requests, 4);
 }
@@ -429,7 +430,7 @@ async fn test_attempts_snapshot_at_full_map_scale() {
         for i in 0..100_000u32 {
             map.insert(
                 format!("{:064x}", i),
-                crate::models::RateLimitInfo {
+                crate::attempts::ledger::RateLimitInfo {
                     window_started_at: now,
                     last_candidate_at: now,
                     last_request_at: now,

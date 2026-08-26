@@ -4,12 +4,13 @@
 //! human-readable error text as a protocol discriminator.
 
 use crate::{
-    models::{FetchSecret, StoreSecret},
+    attempts::snapshot::truncate_to_hour,
+    http::contract::{FetchSecret, StoreSecret},
+    recovery::identifiers::identifier_hash,
     tests::{
         BASE64_ENCRYPTED_SECRET, NOT_PASSWORD_HASH, SHA256_111111, SHA256_222222,
         SHA256_CONCAT_111111_222222,
     },
-    utils::{identifier_hash, truncate_to_hour},
 };
 use axum::http::StatusCode;
 use chrono::Timelike;

@@ -1,7 +1,7 @@
 use crate::{
-    models::{FetchSecret, StoreSecret},
+    http::contract::{FetchSecret, StoreSecret},
+    recovery::identifiers::identifier_hash,
     tests::{BASE64_ENCRYPTED_SECRET, SHA256_111111, SHA256_222222, SHA256_CONCAT_111111_222222},
-    utils::identifier_hash,
 };
 use axum::http::StatusCode;
 

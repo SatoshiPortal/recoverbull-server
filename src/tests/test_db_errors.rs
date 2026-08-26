@@ -1,8 +1,8 @@
 use crate::{
-    models::FetchSecret,
+    http::contract::FetchSecret,
+    recovery::identifiers::identifier_hash,
     storage::sqlite::Secret,
     tests::{SHA256_111111, SHA256_222222},
-    utils::identifier_hash,
 };
 use axum::http::StatusCode;
 use diesel::RunQueryDsl;

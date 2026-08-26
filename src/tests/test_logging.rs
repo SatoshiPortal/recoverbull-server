@@ -9,7 +9,7 @@ use tracing::instrument::WithSubscriber;
 use tracing_subscriber::layer::SubscriberExt;
 
 use crate::{
-    models::{FetchSecret, StoreSecret},
+    http::contract::{FetchSecret, StoreSecret},
     tests::{BASE64_ENCRYPTED_SECRET, SHA256_111111, SHA256_222222, SHA256_CONCAT_111111_222222},
 };
 
@@ -61,10 +61,13 @@ async fn capture<F: Future>(future: F) -> (F::Output, String) {
 }
 
 fn assert_no_sensitive_values(logs: &str, canary: &str) {
-    let id_hash = crate::utils::identifier_hash(SHA256_111111).unwrap();
-    let known_candidate = crate::utils::generate_secret_id(SHA256_111111, SHA256_222222);
-    let miss_candidate =
-        crate::utils::generate_secret_id(SHA256_111111, &crate::tests::distinct_candidate(0));
+    let id_hash = crate::recovery::identifiers::identifier_hash(SHA256_111111).unwrap();
+    let known_candidate =
+        crate::recovery::identifiers::generate_secret_id(SHA256_111111, SHA256_222222);
+    let miss_candidate = crate::recovery::identifiers::generate_secret_id(
+        SHA256_111111,
+        &crate::tests::distinct_candidate(0),
+    );
     for sensitive in [
         SHA256_111111,
         SHA256_222222,

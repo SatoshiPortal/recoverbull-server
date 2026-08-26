@@ -1,4 +1,4 @@
-use crate::models::Info;
+use crate::http::contract::Info;
 use axum::http::StatusCode;
 use chrono::Timelike;
 

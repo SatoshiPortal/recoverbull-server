@@ -10,8 +10,9 @@ use axum::{
 use flate2::{write::GzEncoder, Compression};
 
 use crate::{
-    models::{error_body, retry_after_response, AttemptEntry, AttemptsSnapshot},
-    utils::{sha256_hex, truncate_to_hour},
+    attempts::snapshot::{truncate_to_hour, AttemptEntry, AttemptsSnapshot},
+    digest::sha256_hex,
+    http::error::{error_body, retry_after_response},
     AppState, AttemptsSnapshotCache,
 };
 

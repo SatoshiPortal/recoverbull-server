@@ -4,15 +4,19 @@ use axum::{http::StatusCode, Json};
 use serde_json::json;
 use std::collections::HashMap;
 
-use crate::http::contract::LookupSuccessResponse;
-use crate::models::{
-    error_body, retry_after_response, AttemptStatus, CandidateState, FetchSecret, RateLimitInfo,
-    ResponseFailedAttempt,
+use crate::attempts::{
+    ledger::{CandidateState, RateLimitInfo},
+    AttemptStatus,
 };
+use crate::http::contract::LookupSuccessResponse;
+use crate::http::{
+    contract::{FetchSecret, ResponseFailedAttempt},
+    error::{error_body, retry_after_response},
+};
+use crate::recovery::identifiers::{generate_secret_id, identifier_hash, is_256bits_hex_hash};
 use crate::storage::sqlite::{
     establish_connection, read_and_trash_secret_by_id, read_secret_by_id,
 };
-use crate::utils::{generate_secret_id, identifier_hash, is_256bits_hex_hash};
 use crate::AppState;
 
 const DATABASE_PERMIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);

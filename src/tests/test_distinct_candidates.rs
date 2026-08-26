@@ -1,7 +1,8 @@
 use crate::{
-    models::{FetchSecret, RateLimitInfo, ResponseFailedAttempt, StoreSecret},
+    attempts::ledger::RateLimitInfo,
+    http::contract::{FetchSecret, ResponseFailedAttempt, StoreSecret},
+    recovery::identifiers::identifier_hash,
     tests::{BASE64_ENCRYPTED_SECRET, NOT_PASSWORD_HASH, SHA256_111111, SHA256_222222},
-    utils::identifier_hash,
 };
 use axum::http::StatusCode;
 use diesel::RunQueryDsl;

@@ -12,7 +12,7 @@ async fn wait_for_attempts(state: &crate::AppState, expected: u8) {
         loop {
             if state
                 .identifier_rate_limit
-                .lock()
+                .lock_for_test()
                 .await
                 .get(&identifier_hash(SHA256_111111).unwrap())
                 .is_some_and(|info| info.candidate_count() == expected)
@@ -264,7 +264,7 @@ async fn test_pending_duplicate_trash_is_rejected_without_a_second_reservation()
     assert_eq!(
         state
             .identifier_rate_limit
-            .lock()
+            .lock_for_test()
             .await
             .get(&identifier_hash(SHA256_111111).unwrap())
             .map(|info| info.candidate_count()),
@@ -343,7 +343,7 @@ async fn test_old_trash_completion_cannot_update_a_replaced_rate_limit_window() 
 
     let fresh_at = chrono::Utc::now();
     let id_hash = identifier_hash(SHA256_111111).unwrap();
-    state.identifier_rate_limit.lock().await.insert(
+    state.identifier_rate_limit.lock_for_test().await.insert(
         id_hash.clone(),
         RateLimitInfo {
             window_started_at: fresh_at,
@@ -366,7 +366,7 @@ async fn test_old_trash_completion_cannot_update_a_replaced_rate_limit_window() 
 
     let info = state
         .identifier_rate_limit
-        .lock()
+        .lock_for_test()
         .await
         .get(&id_hash)
         .cloned()
@@ -411,7 +411,7 @@ async fn test_concurrent_trash_hit_does_not_count_the_losing_miss_as_a_guess() {
 
     let info = state
         .identifier_rate_limit
-        .lock()
+        .lock_for_test()
         .await
         .get(&identifier_hash(SHA256_111111).unwrap())
         .cloned()
@@ -447,7 +447,7 @@ async fn test_committed_trash_race_returns_accepted_and_unauthorized_without_fai
     assert!(statuses.contains(&StatusCode::UNAUTHORIZED));
     let info = state
         .identifier_rate_limit
-        .lock()
+        .lock_for_test()
         .await
         .get(&identifier_hash(SHA256_111111).unwrap())
         .cloned()

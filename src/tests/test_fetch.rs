@@ -173,7 +173,7 @@ async fn test_fetch_rate_limit_enforced_and_reset_after_cooldown() {
     // of sleeping for the real cooldown duration: the suite must stay fast
     // and must not depend on wall-clock time.
     {
-        let mut identifier_rate_limit = state.identifier_rate_limit.lock().await;
+        let mut identifier_rate_limit = state.identifier_rate_limit.lock_for_test().await;
         let info = identifier_rate_limit
             .get_mut(&identifier_hash(SHA256_111111).unwrap())
             .unwrap();
@@ -200,7 +200,7 @@ async fn test_fetch_rate_limit_enforced_and_reset_after_cooldown() {
 
     // A successful lookup consumes the first attempt of the new window and
     // must not clear the security counter.
-    let identifier_rate_limit = state.identifier_rate_limit.lock().await;
+    let identifier_rate_limit = state.identifier_rate_limit.lock_for_test().await;
     let info = identifier_rate_limit
         .get(&identifier_hash(SHA256_111111).unwrap())
         .unwrap();

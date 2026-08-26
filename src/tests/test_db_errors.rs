@@ -92,7 +92,7 @@ async fn test_handlers_return_generic_500_when_connection_setup_fails() {
         })
         .await;
     assert_eq!(fetch.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
-    assert!(state.identifier_rate_limit.lock().await.is_empty());
+    assert!(state.identifier_rate_limit.lock_for_test().await.is_empty());
     assert_eq!(state.security_counters.flush().database_error, 2);
 }
 
@@ -128,6 +128,6 @@ async fn test_database_error_returns_500_without_consuming_attempts() {
     }
 
     // No rate-limit entry may remain: attempts were refunded.
-    let identifier_rate_limit = state.identifier_rate_limit.lock().await;
+    let identifier_rate_limit = state.identifier_rate_limit.lock_for_test().await;
     assert!(!identifier_rate_limit.contains_key(&identifier_hash(SHA256_111111).unwrap()));
 }

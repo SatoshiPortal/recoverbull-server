@@ -49,14 +49,11 @@ pub const PRODUCTION_GLOBAL_WIPE_INTERVAL: std::time::Duration =
 /// The lock order is shared with `/attempts`: snapshot, map, timestamp.
 pub async fn wipe_identifier_rate_limit(state: &AppState) {
     let mut snapshot = state.attempts_snapshot.lock().await;
-    let mut identifiers = state.identifier_rate_limit.lock().await;
-    let count = identifiers.len();
-    identifiers.clear();
-    let mut started_at = state.attempts_collection_started_at.lock().await;
-    *started_at = chrono::Utc::now();
+    let count = state
+        .identifier_rate_limit
+        .clear_and_reset_collection(&state.attempts_collection_started_at, chrono::Utc::now())
+        .await;
     *snapshot = None;
-    drop(started_at);
-    drop(identifiers);
     drop(snapshot);
     tracing::info!(target: "security", count, "daily telemetry wipe completed");
 }
@@ -90,10 +87,10 @@ pub fn spawn_global_wiper(
 /// security benefit (the whitepaper asks identifiers to be wiped daily).
 pub async fn sweep_expired_identifiers(state: &AppState) {
     let now = chrono::Utc::now();
-    let mut identifier_rate_limit = state.identifier_rate_limit.lock().await;
-    identifier_rate_limit.retain(|_, info| {
-        now.signed_duration_since(info.last_candidate_at) <= state.rate_limit_cooldown
-    });
+    state
+        .identifier_rate_limit
+        .retain_active(now, state.rate_limit_cooldown)
+        .await;
 }
 
 /// Spawns the background task that sweeps expired rate-limit entries, so

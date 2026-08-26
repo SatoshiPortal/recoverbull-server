@@ -337,7 +337,7 @@ async fn test_attempts_entries_are_sorted_by_id_hash() {
 async fn test_attempts_omit_entries_after_cooldown_without_waiting_for_sweeper() {
     let state = crate::env::init();
     {
-        let mut entries = state.identifier_rate_limit.lock().await;
+        let mut entries = state.identifier_rate_limit.lock_for_test().await;
         let window_started_at =
             chrono::Utc::now() - state.rate_limit_cooldown - chrono::Duration::seconds(1);
         entries.insert(
@@ -368,7 +368,7 @@ async fn test_attempts_last_attempt_at_is_last_distinct_candidate() {
     let last_candidate_at = now - chrono::TimeDelta::hours(2);
     let last_request_at = now - chrono::TimeDelta::hours(1);
     {
-        let mut entries = state.identifier_rate_limit.lock().await;
+        let mut entries = state.identifier_rate_limit.lock_for_test().await;
         entries.insert(
             crate::recovery::identifiers::identifier_hash(SHA256_111111).unwrap(),
             RateLimitInfo {
@@ -426,7 +426,7 @@ async fn test_attempts_snapshot_at_full_map_scale() {
 
     let now = chrono::Utc::now();
     {
-        let mut map = state.identifier_rate_limit.lock().await;
+        let mut map = state.identifier_rate_limit.lock_for_test().await;
         for i in 0..100_000u32 {
             map.insert(
                 format!("{:064x}", i),

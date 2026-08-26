@@ -1,6 +1,6 @@
 use chrono::Duration;
 use dotenvy::dotenv;
-use std::{collections::HashMap, env, fmt::Display, str::FromStr, sync::Arc};
+use std::{env, fmt::Display, str::FromStr, sync::Arc};
 use tokio::sync::{Mutex, Semaphore};
 
 use crate::AppState;
@@ -329,7 +329,7 @@ pub fn init() -> AppState {
         canary_path: dotenv_path.unwrap_or_else(|| std::path::PathBuf::from(".env")),
         canary_read_semaphore: Arc::new(Semaphore::new(1)),
         rate_limit_cooldown: Duration::minutes(rate_limit_cooldown as i64),
-        identifier_rate_limit: Arc::new(Mutex::new(HashMap::new())),
+        identifier_rate_limit: crate::attempts::ledger::AttemptsLedgerState::new(),
         secret_max_length,
         rate_limit_max_attempts,
         store_token_bucket: Arc::new(Mutex::new(crate::rate_limit::TokenBucket::new(

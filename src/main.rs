@@ -14,7 +14,7 @@ mod storage;
 #[cfg(test)]
 mod tests;
 
-use std::{collections::HashMap, future::IntoFuture, sync::Arc, time::Instant};
+use std::{future::IntoFuture, sync::Arc, time::Instant};
 
 use axum::body::Bytes;
 use chrono::TimeDelta;
@@ -102,7 +102,7 @@ struct AppState {
     /// Serializes dotenv reads so `/info` cannot exhaust Tokio's blocking pool.
     canary_read_semaphore: Arc<Semaphore>,
     rate_limit_cooldown: TimeDelta,
-    identifier_rate_limit: Arc<Mutex<HashMap<String, attempts::ledger::RateLimitInfo>>>,
+    identifier_rate_limit: attempts::ledger::AttemptsLedgerState,
     secret_max_length: usize,
     rate_limit_max_attempts: u8,
     store_token_bucket: Arc<Mutex<rate_limit::TokenBucket>>,

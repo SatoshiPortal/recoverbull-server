@@ -160,24 +160,24 @@ async fn build_snapshot(state: &AppState) -> Result<AttemptsSnapshotCache, Box<R
         }
     }
     let now = chrono::Utc::now();
-    let mut entries: Vec<AttemptEntry> = {
-        let mut identifier_rate_limit = state.identifier_rate_limit.lock().await;
-        identifier_rate_limit.retain(|_, info| {
-            now.signed_duration_since(info.last_candidate_at) <= state.rate_limit_cooldown
-        });
-        identifier_rate_limit
-            .iter()
-            .map(|(id_hash, info)| AttemptEntry {
-                id_hash: id_hash.clone(),
-                total_attempts: info.candidate_count(),
-                failed_attempts: info.failed_candidates,
-                total_requests: info.total_requests,
-                window_started_at: truncate_to_hour(info.window_started_at),
-                last_attempt_at: truncate_to_hour(info.last_candidate_at),
-            })
-            .collect()
-        // lock dropped here
-    };
+    state
+        .identifier_rate_limit
+        .retain_active(now, state.rate_limit_cooldown)
+        .await;
+    let mut entries: Vec<AttemptEntry> = state
+        .identifier_rate_limit
+        .snapshot_entries()
+        .await
+        .into_iter()
+        .map(|(id_hash, info)| AttemptEntry {
+            id_hash: id_hash.clone(),
+            total_attempts: info.candidate_count(),
+            failed_attempts: info.failed_candidates,
+            total_requests: info.total_requests,
+            window_started_at: truncate_to_hour(info.window_started_at),
+            last_attempt_at: truncate_to_hour(info.last_candidate_at),
+        })
+        .collect();
 
     // Sorting happens after the lock guard above goes out of scope: this is
     // the same `identifier_rate_limit` mutex that every `/fetch` and

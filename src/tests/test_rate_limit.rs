@@ -14,14 +14,14 @@ async fn test_global_wipe_clears_candidates_resets_timestamp_and_snapshot() {
     server.get("/attempts").expect_success().await;
     let before = *state.attempts_collection_started_at.lock().await;
     {
-        let mut map = state.identifier_rate_limit.lock().await;
+        let mut map = state.identifier_rate_limit.lock_for_test().await;
         let mut info = RateLimitInfo::new(chrono::Utc::now());
         info.candidates
             .insert("candidate-tag".to_owned(), CandidateState::Committed);
         map.insert(SHA256_111111.to_owned(), info);
     }
     crate::rate_limit::wipe_identifier_rate_limit(&state).await;
-    assert!(state.identifier_rate_limit.lock().await.is_empty());
+    assert!(state.identifier_rate_limit.lock_for_test().await.is_empty());
     assert!(state.attempts_snapshot.lock().await.is_none());
     assert!(*state.attempts_collection_started_at.lock().await > before);
 }
@@ -52,7 +52,7 @@ async fn test_sweep_removes_only_expired_entries() {
     let expired_at = now - state.rate_limit_cooldown - chrono::Duration::minutes(1);
 
     {
-        let mut identifier_rate_limit = state.identifier_rate_limit.lock().await;
+        let mut identifier_rate_limit = state.identifier_rate_limit.lock_for_test().await;
         identifier_rate_limit.insert(
             identifier_hash(SHA256_111111).unwrap(),
             RateLimitInfo {
@@ -79,7 +79,7 @@ async fn test_sweep_removes_only_expired_entries() {
 
     crate::rate_limit::sweep_expired_identifiers(&state).await;
 
-    let identifier_rate_limit = state.identifier_rate_limit.lock().await;
+    let identifier_rate_limit = state.identifier_rate_limit.lock_for_test().await;
     assert!(
         !identifier_rate_limit.contains_key(&identifier_hash(SHA256_111111).unwrap()),
         "expired entry should have been swept"
@@ -96,7 +96,7 @@ async fn test_fetch_expires_sub_threshold_entry_after_cooldown() {
 
     // an expired entry below the max attempts threshold
     {
-        let mut identifier_rate_limit = state.identifier_rate_limit.lock().await;
+        let mut identifier_rate_limit = state.identifier_rate_limit.lock_for_test().await;
         let window_started_at =
             chrono::Utc::now() - state.rate_limit_cooldown - chrono::Duration::minutes(1);
         identifier_rate_limit.insert(
@@ -170,7 +170,7 @@ async fn test_database_concurrency_rejection_refunds_lookup_attempt() {
         .await;
     assert_eq!(response.status_code(), StatusCode::SERVICE_UNAVAILABLE);
 
-    let identifier_rate_limit = state.identifier_rate_limit.lock().await;
+    let identifier_rate_limit = state.identifier_rate_limit.lock_for_test().await;
     assert!(!identifier_rate_limit.contains_key(&identifier_hash(SHA256_111111).unwrap()));
 }
 
@@ -222,7 +222,7 @@ async fn test_cancelled_request_does_not_consume_an_attempt() {
          database semaphore when the 100ms budget expires"
     );
 
-    let identifier_rate_limit = state.identifier_rate_limit.lock().await;
+    let identifier_rate_limit = state.identifier_rate_limit.lock_for_test().await;
     let identifier_hash = identifier_hash(SHA256_111111).unwrap();
     let leaked_attempts = identifier_rate_limit
         .get(&identifier_hash)
@@ -318,7 +318,7 @@ async fn test_cancelled_trash_after_sqlite_start_keeps_attempt_reserved() {
     .await
     .expect("detached trash counters did not finish in time");
 
-    let identifier_rate_limit = state.identifier_rate_limit.lock().await;
+    let identifier_rate_limit = state.identifier_rate_limit.lock_for_test().await;
     assert_eq!(
         identifier_rate_limit
             .get(&identifier_hash(SHA256_111111).unwrap())
@@ -415,7 +415,7 @@ async fn test_concurrent_cancellation_refunds_every_reservation() {
     let settled = tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
             {
-                let map = state.identifier_rate_limit.lock().await;
+                let map = state.identifier_rate_limit.lock_for_test().await;
                 if map
                     .get(&hash)
                     .map(|info| info.candidate_count())
@@ -481,7 +481,7 @@ async fn test_deferred_refund_runs_when_drop_finds_the_lock_contended() {
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         loop {
             {
-                let map = state.identifier_rate_limit.lock().await;
+                let map = state.identifier_rate_limit.lock_for_test().await;
                 if map
                     .get(&hash)
                     .map(|info| info.candidate_count())
@@ -499,7 +499,7 @@ async fn test_deferred_refund_runs_when_drop_finds_the_lock_contended() {
 
     // Hold the map lock across the abort: the guard's Drop cannot take the
     // immediate try_lock path and must spawn the deferred refund task.
-    let map_guard = state.identifier_rate_limit.lock().await;
+    let map_guard = state.identifier_rate_limit.lock_for_test().await;
     handle.abort();
     // Let the Drop run and the spawned task reach the contended lock.
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -510,7 +510,7 @@ async fn test_deferred_refund_runs_when_drop_finds_the_lock_contended() {
     let settled = tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
             {
-                let map = state.identifier_rate_limit.lock().await;
+                let map = state.identifier_rate_limit.lock_for_test().await;
                 if map
                     .get(&hash)
                     .map(|info| info.candidate_count())

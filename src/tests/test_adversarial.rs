@@ -236,7 +236,7 @@ async fn test_successful_fetch_is_not_refunded() {
         .expect_success()
         .await;
 
-    let map = state.identifier_rate_limit.lock().await;
+    let map = state.identifier_rate_limit.lock_for_test().await;
     let info = &map[&identifier_hash(SHA256_111111).unwrap()];
     assert_eq!(info.candidate_count(), 1, "a 200 must not be refunded");
 }
@@ -269,7 +269,7 @@ async fn test_429_does_not_consume_budget() {
         .expect_failure()
         .await;
 
-    let map = state.identifier_rate_limit.lock().await;
+    let map = state.identifier_rate_limit.lock_for_test().await;
     let info = &map[&identifier_hash(SHA256_111111).unwrap()];
     assert_eq!(
         info.candidate_count(),
@@ -948,7 +948,7 @@ async fn test_expired_entry_disappears_from_snapshot() {
 
     // insert an already-expired entry directly into the map
     {
-        let mut map = state.identifier_rate_limit.lock().await;
+        let mut map = state.identifier_rate_limit.lock_for_test().await;
         let expired_at =
             chrono::Utc::now() - state.rate_limit_cooldown - chrono::Duration::minutes(1);
         map.insert(
@@ -1573,7 +1573,7 @@ async fn test_attempts_counter_does_not_overflow_at_u8_max() {
 
     // seed the map at 254 so only two requests are needed
     {
-        let mut map = state.identifier_rate_limit.lock().await;
+        let mut map = state.identifier_rate_limit.lock_for_test().await;
         map.insert(
             identifier_hash(SHA256_111111).unwrap(),
             crate::attempts::ledger::RateLimitInfo {
@@ -1616,7 +1616,7 @@ async fn test_attempts_counter_does_not_overflow_at_u8_max() {
         .await;
     assert_eq!(response.status_code(), StatusCode::TOO_MANY_REQUESTS);
 
-    let map = state.identifier_rate_limit.lock().await;
+    let map = state.identifier_rate_limit.lock_for_test().await;
     assert_eq!(
         map[&identifier_hash(SHA256_111111).unwrap()].candidate_count(),
         255,

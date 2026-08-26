@@ -1,13 +1,4 @@
-use axum::extract::State;
-use axum::response::{IntoResponse, Response};
-use axum::{http::StatusCode, Json};
-use serde_json::json;
-use std::collections::HashMap;
-
-use crate::attempts::{
-    ledger::{CandidateState, RateLimitInfo},
-    AttemptStatus,
-};
+use crate::attempts::ledger::{Admission, LookupOutcome};
 use crate::http::contract::LookupSuccessResponse;
 use crate::http::{
     contract::{FetchSecret, ResponseFailedAttempt},
@@ -18,112 +9,13 @@ use crate::storage::sqlite::{
     establish_connection, read_and_trash_secret_by_id, read_secret_by_id,
 };
 use crate::AppState;
+use axum::extract::State;
+use axum::response::{IntoResponse, Response};
+use axum::{http::StatusCode, Json};
+use serde_json::json;
 
 const DATABASE_PERMIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 const GLOBAL_OVERLOAD_RETRY_AFTER_SECS: u64 = 1;
-
-fn remove_pending(
-    map: &mut HashMap<String, RateLimitInfo>,
-    id_hash: &str,
-    candidate: &str,
-    generation: chrono::DateTime<chrono::Utc>,
-) {
-    let remove_identifier = map.get_mut(id_hash).is_some_and(|info| {
-        if info.window_started_at == generation
-            && info.candidates.get(candidate) == Some(&CandidateState::Pending)
-        {
-            info.candidates.remove(candidate);
-        }
-        info.window_started_at == generation && info.candidates.is_empty()
-    });
-    if remove_identifier {
-        map.remove(id_hash);
-    }
-}
-
-async fn remove_pending_async(
-    state: &AppState,
-    id_hash: &str,
-    candidate: &str,
-    generation: chrono::DateTime<chrono::Utc>,
-) {
-    let mut map = state.identifier_rate_limit.lock().await;
-    remove_pending(&mut map, id_hash, candidate, generation);
-}
-
-/// The generation check makes a delayed cancellation safe even if it outlives
-/// the cooldown and a replacement window has already been created.
-struct PendingGuard {
-    state: AppState,
-    id_hash: String,
-    candidate: String,
-    generation: chrono::DateTime<chrono::Utc>,
-    armed: bool,
-}
-
-impl PendingGuard {
-    fn new(
-        state: AppState,
-        id_hash: String,
-        candidate: String,
-        generation: chrono::DateTime<chrono::Utc>,
-    ) -> Self {
-        Self {
-            state,
-            id_hash,
-            candidate,
-            generation,
-            armed: true,
-        }
-    }
-
-    fn disarm(&mut self) {
-        self.armed = false;
-    }
-}
-
-impl Drop for PendingGuard {
-    fn drop(&mut self) {
-        if !self.armed {
-            return;
-        }
-        let state = self.state.clone();
-        let id_hash = std::mem::take(&mut self.id_hash);
-        let candidate = std::mem::take(&mut self.candidate);
-        let generation = self.generation;
-        let removed_now = match state.identifier_rate_limit.try_lock() {
-            Ok(mut map) => {
-                remove_pending(&mut map, &id_hash, &candidate, generation);
-                true
-            }
-            Err(_) => false,
-        };
-        if !removed_now {
-            tokio::spawn(async move {
-                remove_pending_async(&state, &id_hash, &candidate, generation).await;
-            });
-        }
-    }
-}
-
-fn attempt_status(
-    info: &RateLimitInfo,
-    max: u8,
-    previous: Option<chrono::DateTime<chrono::Utc>>,
-    cooldown: chrono::TimeDelta,
-) -> AttemptStatus {
-    let count = info.candidate_count();
-    AttemptStatus {
-        version: 1,
-        total_attempts: count,
-        failed_attempts: info.failed_candidates,
-        remaining_attempts: max.saturating_sub(count),
-        total_requests: info.total_requests,
-        window_started_at: info.window_started_at,
-        previous_attempt_at: previous,
-        resets_at: info.last_candidate_at + cooldown,
-    }
-}
 
 fn rate_limited(
     count: u8,
@@ -152,59 +44,10 @@ fn rate_limited(
     http_response
 }
 
-enum Admission {
-    New(AttemptStatus, chrono::DateTime<chrono::Utc>),
-    Replay(AttemptStatus, chrono::DateTime<chrono::Utc>),
-    Pending,
-}
-
 enum FinalizerError {
     Connection,
     Database,
     Join(tokio::task::JoinError),
-}
-
-async fn finalize(
-    state: &AppState,
-    id_hash: &str,
-    candidate: &str,
-    generation: chrono::DateTime<chrono::Utc>,
-    result: &Result<Option<crate::storage::sqlite::Secret>, FinalizerError>,
-) {
-    let mut map = state.identifier_rate_limit.lock().await;
-    let remove_identifier = {
-        let Some(info) = map.get_mut(id_hash) else {
-            return;
-        };
-        if info.window_started_at != generation
-            || info.candidates.get(candidate) != Some(&CandidateState::Pending)
-        {
-            return;
-        }
-        match result {
-            Ok(Some(_)) => {
-                info.candidates
-                    .insert(candidate.to_owned(), CandidateState::Committed);
-                false
-            }
-            Ok(None) => {
-                info.candidates
-                    .insert(candidate.to_owned(), CandidateState::Committed);
-                info.failed_candidates = info.failed_candidates.saturating_add(1);
-                false
-            }
-            Err(_) => {
-                info.candidates.remove(candidate);
-                info.candidates.is_empty()
-            }
-        }
-    };
-    // Candidate removal and empty-entry removal are one atomic map update.
-    // Releasing this lock between the two would let an older finalizer delete
-    // a fresh reservation created in the same window.
-    if remove_identifier {
-        map.remove(id_hash);
-    }
 }
 
 pub async fn fetch_secret(
@@ -237,70 +80,32 @@ pub async fn fetch_secret(
     }
     let candidate = generate_secret_id(&identifier, &authentication_key);
     let requested_at = chrono::Utc::now();
-    let admission = {
-        let mut map = state.identifier_rate_limit.lock().await;
-        if map.get(&id_hash).is_some_and(|info| {
-            requested_at.signed_duration_since(info.last_candidate_at) > state.rate_limit_cooldown
-        }) {
-            map.remove(&id_hash);
-        }
-        if !map.contains_key(&id_hash) && map.len() >= state.rate_limit_max_identifiers {
-            map.retain(|_, info| {
-                requested_at.signed_duration_since(info.last_candidate_at)
-                    <= state.rate_limit_cooldown
-            });
-            if map.len() >= state.rate_limit_max_identifiers {
-                state.security_counters.lookup_map_capacity();
-                return retry_after_response(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    GLOBAL_OVERLOAD_RETRY_AFTER_SECS,
-                    "Rate-limit capacity exhausted, retry later",
-                );
-            }
-        }
-        let info = map
-            .entry(id_hash.clone())
-            .or_insert_with(|| RateLimitInfo::new(requested_at));
-        info.total_requests = info.total_requests.saturating_add(1);
-        info.last_request_at = requested_at;
-        // This check intentionally precedes membership, including for known
-        // candidates, so saturation cannot become an authentication oracle.
-        if info.candidate_count() >= state.rate_limit_max_attempts {
-            return rate_limited(
-                info.candidate_count(),
-                info.last_candidate_at,
-                requested_at,
-                &state,
-            );
-        }
-        match info.candidates.get(&candidate).copied() {
-            Some(CandidateState::Pending) => Admission::Pending,
-            Some(CandidateState::Committed) => Admission::Replay(
-                attempt_status(
-                    info,
-                    state.rate_limit_max_attempts,
-                    None,
-                    state.rate_limit_cooldown,
-                ),
-                info.window_started_at,
-            ),
-            None => {
-                let previous = (info.candidate_count() > 0).then_some(info.last_candidate_at);
-                info.candidates
-                    .insert(candidate.clone(), CandidateState::Pending);
-                info.last_candidate_at = requested_at;
-                Admission::New(
-                    attempt_status(
-                        info,
-                        state.rate_limit_max_attempts,
-                        previous,
-                        state.rate_limit_cooldown,
-                    ),
-                    info.window_started_at,
-                )
-            }
-        }
-    };
+    let admission = state
+        .identifier_rate_limit
+        .admit(
+            id_hash.clone(),
+            candidate.clone(),
+            requested_at,
+            state.rate_limit_max_attempts,
+            state.rate_limit_max_identifiers,
+            state.rate_limit_cooldown,
+        )
+        .await;
+    if matches!(admission, Admission::Saturated { .. }) {
+        state.security_counters.lookup_map_capacity();
+        return retry_after_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            GLOBAL_OVERLOAD_RETRY_AFTER_SECS,
+            "Rate-limit capacity exhausted, retry later",
+        );
+    }
+    if let Admission::RateLimited {
+        count,
+        last_candidate_at,
+    } = admission
+    {
+        return rate_limited(count, last_candidate_at, requested_at, &state);
+    }
     if matches!(admission, Admission::Pending) {
         state.security_counters.lookup_rate_limited();
         return retry_after_response(
@@ -309,19 +114,18 @@ pub async fn fetch_secret(
             "Candidate lookup pending, retry later",
         );
     }
-    let (attempt_status, generation, is_new) = match admission {
-        Admission::New(status, generation) => (status, generation, true),
-        Admission::Replay(status, generation) => (status, generation, false),
-        Admission::Pending => unreachable!("pending admission returned above"),
-    };
-    let mut pending_guard = is_new.then(|| {
-        PendingGuard::new(
-            state.clone(),
-            id_hash.clone(),
-            candidate.clone(),
+    let (attempt_status, generation, mut pending_guard) = match admission {
+        Admission::New {
+            status,
             generation,
-        )
-    });
+            reservation,
+        } => (status, generation, Some(reservation)),
+        Admission::Replay { status, generation } => (status, generation, None),
+        Admission::Pending => unreachable!("pending admission returned above"),
+        Admission::Saturated { .. } => unreachable!("saturated admission returned above"),
+        Admission::RateLimited { .. } => unreachable!("rate-limited admission returned above"),
+    };
+    let is_new = pending_guard.is_some();
 
     let permit = match tokio::time::timeout(
         DATABASE_PERMIT_TIMEOUT,
@@ -332,11 +136,10 @@ pub async fn fetch_secret(
         Ok(Ok(permit)) => permit,
         Ok(Err(_)) | Err(_) => {
             if let Some(guard) = pending_guard.as_mut() {
-                remove_pending_async(&state, &id_hash, &candidate, generation).await;
                 // Disarm only after the async removal has completed. If this
                 // handler is cancelled while waiting for the map lock, Drop
                 // remains armed and performs the same idempotent cleanup.
-                guard.disarm();
+                guard.refund().await;
             }
             state.security_counters.database_busy();
             return retry_after_response(
@@ -374,14 +177,15 @@ pub async fn fetch_secret(
             Err(error) => Err(FinalizerError::Join(error)),
         };
         if is_new {
-            finalize(
-                &task_state,
-                &task_id_hash,
-                &task_candidate,
-                generation,
-                &final_result,
-            )
-            .await;
+            let outcome = match &final_result {
+                Ok(Some(_)) => LookupOutcome::Hit,
+                Ok(None) => LookupOutcome::Miss,
+                Err(_) => LookupOutcome::Error,
+            };
+            task_state
+                .identifier_rate_limit
+                .finalize(&task_id_hash, &task_candidate, generation, outcome)
+                .await;
         }
         // An accepted lookup is one whose database operation returned Ok,
         // regardless of whether it found a row. This accounting lives here so
@@ -417,7 +221,10 @@ pub async fn fetch_secret(
         Ok(result) => result,
         Err(_error) => {
             if is_new {
-                remove_pending_async(&state, &id_hash, &candidate, generation).await;
+                state
+                    .identifier_rate_limit
+                    .refund(&id_hash, &candidate, generation)
+                    .await;
             }
             state.security_counters.database_error();
             return (

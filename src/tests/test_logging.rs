@@ -259,7 +259,7 @@ async fn test_canary_updates_and_wipe_do_not_log_canary_value() {
             .as_nanos()
     ));
     state.canary_path = canary_path.clone();
-    crate::database::try_init_db(state.clone()).unwrap();
+    crate::storage::sqlite::try_init_db(state.clone()).unwrap();
     let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone())).unwrap();
     let first = "logging-canary-first";
     let second = "logging-canary-second";
@@ -290,7 +290,8 @@ async fn test_database_error_logs_are_diagnostic_without_sensitive_details() {
     use diesel::RunQueryDsl;
 
     let (server, state) = crate::tests::test_server::new_test_server().await;
-    let mut connection = crate::database::establish_connection(state.database_url.clone()).unwrap();
+    let mut connection =
+        crate::storage::sqlite::establish_connection(state.database_url.clone()).unwrap();
     diesel::sql_query("DROP TABLE secret")
         .execute(&mut connection)
         .unwrap();

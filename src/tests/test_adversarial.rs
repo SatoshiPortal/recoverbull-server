@@ -291,7 +291,7 @@ async fn test_429_does_not_consume_budget() {
 async fn test_full_map_does_not_evict_protected_identifier() {
     let mut state = crate::env::init();
     state.rate_limit_max_identifiers = 1;
-    crate::database::try_init_db(state.clone()).unwrap();
+    crate::storage::sqlite::try_init_db(state.clone()).unwrap();
     let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone())).unwrap();
 
     // lock out the first identifier
@@ -1344,7 +1344,8 @@ async fn test_500_does_not_leak_internals() {
     let (server, state) = crate::tests::test_server::new_test_server().await;
 
     // force every query to fail
-    let mut connection = crate::database::establish_connection(state.clone().database_url).unwrap();
+    let mut connection =
+        crate::storage::sqlite::establish_connection(state.clone().database_url).unwrap();
     diesel::sql_query("DROP TABLE secret")
         .execute(&mut connection)
         .expect("failed to drop table");
@@ -1366,7 +1367,7 @@ async fn test_500_does_not_leak_internals() {
     assert!(!body.contains("database"), "no database detail: {body}");
 
     // restore for the next test
-    crate::database::try_init_db(state.clone()).unwrap();
+    crate::storage::sqlite::try_init_db(state.clone()).unwrap();
 }
 
 /// The exact lockout boundary: the max-th attempt is admitted (401), the
@@ -1567,7 +1568,7 @@ async fn test_resets_at_is_in_the_future_for_active_entry() {
 async fn test_attempts_counter_does_not_overflow_at_u8_max() {
     let mut state = crate::env::init();
     state.rate_limit_max_attempts = 255;
-    crate::database::try_init_db(state.clone()).unwrap();
+    crate::storage::sqlite::try_init_db(state.clone()).unwrap();
     let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone())).unwrap();
 
     // seed the map at 254 so only two requests are needed
@@ -1629,10 +1630,10 @@ async fn test_attempts_counter_does_not_overflow_at_u8_max() {
 #[tokio::test]
 async fn test_concurrent_attempts_polls_agree_on_etag() {
     let app_state = crate::env::init();
-    crate::database::try_init_db(app_state.clone()).unwrap();
+    crate::storage::sqlite::try_init_db(app_state.clone()).unwrap();
     let app = crate::router::new_for_tests(app_state.clone());
     let mut connection =
-        crate::database::establish_connection(app_state.clone().database_url).unwrap();
+        crate::storage::sqlite::establish_connection(app_state.clone().database_url).unwrap();
     crate::tests::test_server::clear_table_secret(&mut connection).await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

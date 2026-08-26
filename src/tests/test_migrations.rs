@@ -13,7 +13,7 @@ struct Count {
 #[test]
 fn empty_database_gets_secret_and_ledger() {
     let mut connection = connection();
-    crate::database::run_migrations(&mut connection).unwrap();
+    crate::storage::sqlite::run_migrations(&mut connection).unwrap();
 
     assert_eq!(
         sql_query("SELECT COUNT(*) AS value FROM secret")
@@ -34,8 +34,8 @@ fn empty_database_gets_secret_and_ledger() {
 #[test]
 fn migrations_are_idempotent() {
     let mut connection = connection();
-    crate::database::run_migrations(&mut connection).unwrap();
-    crate::database::run_migrations(&mut connection).unwrap();
+    crate::storage::sqlite::run_migrations(&mut connection).unwrap();
+    crate::storage::sqlite::run_migrations(&mut connection).unwrap();
 
     assert_eq!(
         sql_query("SELECT COUNT(*) AS value FROM __diesel_schema_migrations")
@@ -56,7 +56,7 @@ fn exact_legacy_table_is_adopted_without_touching_data() {
         .execute(&mut connection)
         .unwrap();
 
-    crate::database::run_migrations(&mut connection).unwrap();
+    crate::storage::sqlite::run_migrations(&mut connection).unwrap();
 
     let row = sql_query("SELECT id, created_at, encrypted_secret FROM secret")
         .get_result::<SecretRow>(&mut connection)
@@ -94,6 +94,6 @@ fn incompatible_legacy_table_is_rejected() {
         .execute(&mut connection)
         .unwrap();
 
-    let error = crate::database::run_migrations(&mut connection).unwrap_err();
+    let error = crate::storage::sqlite::run_migrations(&mut connection).unwrap_err();
     assert!(error.to_string().contains("incompatible schema"));
 }

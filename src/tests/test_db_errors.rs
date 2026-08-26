@@ -8,12 +8,12 @@ use diesel::RunQueryDsl;
 
 #[test]
 fn test_connection_setup_failure_is_opaque_and_non_panicking() {
-    let error = crate::database::establish_connection(
+    let error = crate::storage::sqlite::establish_connection(
         "/path/that/does/not/exist/recoverbull.sqlite3".to_owned(),
     )
     .err()
     .expect("invalid database path must fail closed");
-    assert_eq!(error, crate::database::ConnectionSetupError::Open);
+    assert_eq!(error, crate::storage::sqlite::ConnectionSetupError::Open);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -23,7 +23,7 @@ async fn test_bounded_concurrent_connection_setup_and_write_diagnostics() {
     let (database_url, _guard) = crate::env::unique_test_database();
     let mut state = crate::env::init();
     state.database_url = database_url.clone();
-    crate::database::try_init_db(state).unwrap();
+    crate::storage::sqlite::try_init_db(state).unwrap();
 
     let mut setup_errors = std::collections::BTreeMap::new();
     let mut write_errors = 0;
@@ -32,7 +32,7 @@ async fn test_bounded_concurrent_connection_setup_and_write_diagnostics() {
         for index in 0..CONCURRENCY {
             let database_url = database_url.clone();
             tasks.push(tokio::task::spawn_blocking(move || {
-                let connection = crate::database::establish_connection(database_url);
+                let connection = crate::storage::sqlite::establish_connection(database_url);
                 let Ok(mut connection) = connection else {
                     return (connection.err(), true);
                 };
@@ -43,7 +43,7 @@ async fn test_bounded_concurrent_connection_setup_and_write_diagnostics() {
                 };
                 (
                     None,
-                    crate::database::write(&mut connection, &secret).is_err(),
+                    crate::storage::sqlite::write(&mut connection, &secret).is_err(),
                 )
             }));
         }
@@ -69,7 +69,7 @@ async fn test_bounded_concurrent_connection_setup_and_write_diagnostics() {
 #[tokio::test]
 async fn test_handlers_return_generic_500_when_connection_setup_fails() {
     let mut state = crate::env::init();
-    crate::database::try_init_db(state.clone()).unwrap();
+    crate::storage::sqlite::try_init_db(state.clone()).unwrap();
     state.database_url = "/path/that/does/not/exist/recoverbull.sqlite3".to_owned();
     let server = axum_test::TestServer::new(crate::router::new(state.clone())).unwrap();
 
@@ -105,7 +105,8 @@ async fn test_database_error_returns_500_without_consuming_attempts() {
 
     // Force every subsequent query to fail: drop the table out from under
     // the server. Database initialization is tested separately.
-    let mut connection = crate::database::establish_connection(state.clone().database_url).unwrap();
+    let mut connection =
+        crate::storage::sqlite::establish_connection(state.clone().database_url).unwrap();
     diesel::sql_query("DROP TABLE secret")
         .execute(&mut connection)
         .expect("failed to drop table");

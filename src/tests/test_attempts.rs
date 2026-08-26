@@ -228,7 +228,7 @@ async fn test_attempts_snapshot_rebuild_is_deterministic() {
     let mut state = crate::env::init();
     // force a rebuild on every request
     state.attempts_snapshot_ttl = std::time::Duration::ZERO;
-    crate::database::try_init_db(state.clone()).unwrap();
+    crate::storage::sqlite::try_init_db(state.clone()).unwrap();
     let server = axum_test::TestServer::new(crate::router::new_for_tests(state)).unwrap();
 
     // unchanged activity: the ETag survives rebuilds
@@ -397,7 +397,7 @@ async fn test_attempts_rate_limit_bucket() {
     state.attempts_token_bucket = std::sync::Arc::new(tokio::sync::Mutex::new(
         crate::rate_limit::TokenBucket::new(1.0, 0.0),
     ));
-    crate::database::try_init_db(state.clone()).unwrap();
+    crate::storage::sqlite::try_init_db(state.clone()).unwrap();
     let server = axum_test::TestServer::new(crate::router::new_for_tests(state)).unwrap();
 
     server.get("/attempts").expect_success().await;

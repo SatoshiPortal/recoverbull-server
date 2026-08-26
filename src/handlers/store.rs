@@ -3,8 +3,8 @@ use axum::response::{IntoResponse, Response};
 use axum::{http::StatusCode, Json};
 use serde_json::Value;
 
-use crate::database::establish_connection;
 use crate::models::{error_body, retry_after_response, Secret, StoreSecret};
+use crate::storage::sqlite::establish_connection;
 use crate::utils::{generate_secret_id, is_256bits_hex_hash, is_base64};
 use crate::AppState;
 
@@ -116,7 +116,7 @@ pub async fn store_secret(
         let _test_database_guard = test_database_guard;
         let _database_permit = database_permit;
         let is_stored = match establish_connection(database_url) {
-            Ok(mut connection) => crate::database::write(&mut connection, &key).is_ok(),
+            Ok(mut connection) => crate::storage::sqlite::write(&mut connection, &key).is_ok(),
             Err(_) => false,
         };
         if is_stored {

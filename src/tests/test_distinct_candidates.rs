@@ -245,7 +245,7 @@ async fn test_pending_duplicate_trash_is_rejected_without_a_second_reservation()
     state.rate_limit_max_attempts = 3;
 
     let mut lock_connection =
-        crate::database::establish_connection(state.database_url.clone()).unwrap();
+        crate::storage::sqlite::establish_connection(state.database_url.clone()).unwrap();
     diesel::sql_query("BEGIN IMMEDIATE")
         .execute(&mut lock_connection)
         .expect("test must acquire the SQLite write lock");
@@ -298,7 +298,7 @@ async fn test_pending_distinct_candidates_consume_the_attempt_budget() {
     }
 
     let mut lock_connection =
-        crate::database::establish_connection(state.database_url.clone()).unwrap();
+        crate::storage::sqlite::establish_connection(state.database_url.clone()).unwrap();
     diesel::sql_query("BEGIN IMMEDIATE")
         .execute(&mut lock_connection)
         .expect("test must acquire the SQLite write lock");
@@ -332,7 +332,7 @@ async fn test_pending_distinct_candidates_consume_the_attempt_budget() {
 async fn test_old_trash_completion_cannot_update_a_replaced_rate_limit_window() {
     let (_server, state) = crate::tests::test_server::new_test_server().await;
     let mut lock_connection =
-        crate::database::establish_connection(state.database_url.clone()).unwrap();
+        crate::storage::sqlite::establish_connection(state.database_url.clone()).unwrap();
     diesel::sql_query("BEGIN IMMEDIATE")
         .execute(&mut lock_connection)
         .expect("test must acquire the SQLite write lock");
@@ -390,7 +390,7 @@ async fn test_concurrent_trash_hit_does_not_count_the_losing_miss_as_a_guess() {
         .await;
 
     let mut lock_connection =
-        crate::database::establish_connection(state.database_url.clone()).unwrap();
+        crate::storage::sqlite::establish_connection(state.database_url.clone()).unwrap();
     diesel::sql_query("BEGIN IMMEDIATE")
         .execute(&mut lock_connection)
         .expect("test must acquire the SQLite write lock");

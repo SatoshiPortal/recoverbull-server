@@ -226,7 +226,7 @@ async fn test_store_is_not_counted_in_attempts() {
     // fresh state at each step instead of the first cached snapshot
     let mut state = crate::env::init();
     state.attempts_snapshot_ttl = std::time::Duration::ZERO;
-    crate::database::try_init_db(state.clone()).unwrap();
+    crate::storage::sqlite::try_init_db(state.clone()).unwrap();
     let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone())).unwrap();
 
     let store = &StoreSecret {
@@ -398,7 +398,7 @@ async fn test_503_responses_have_no_machine_code() {
     // identifier cannot get a slot.
     let mut state = crate::env::init();
     state.rate_limit_max_identifiers = 1;
-    crate::database::try_init_db(state.clone()).unwrap();
+    crate::storage::sqlite::try_init_db(state.clone()).unwrap();
     let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone())).unwrap();
 
     server
@@ -428,7 +428,7 @@ async fn test_503_responses_have_no_machine_code() {
     // database busy: block the concurrency semaphore.
     let mut state = crate::env::init();
     state.database_semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
-    crate::database::try_init_db(state.clone()).unwrap();
+    crate::storage::sqlite::try_init_db(state.clone()).unwrap();
     let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone())).unwrap();
 
     let response = server

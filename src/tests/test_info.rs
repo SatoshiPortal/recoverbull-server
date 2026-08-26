@@ -64,7 +64,7 @@ async fn test_info_rereads_canary_from_file_with_startup_fallback() {
             .as_nanos()
     ));
     state.canary_path = canary_path.clone();
-    crate::database::try_init_db(state.clone()).unwrap();
+    crate::storage::sqlite::try_init_db(state.clone()).unwrap();
     let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone())).unwrap();
 
     // the file value wins over the startup value
@@ -102,7 +102,7 @@ async fn test_info_rereads_same_length_canary_when_file_metadata_is_restored() {
             .as_nanos()
     ));
     state.canary_path = canary_path.clone();
-    crate::database::try_init_db(state.clone()).unwrap();
+    crate::storage::sqlite::try_init_db(state.clone()).unwrap();
     let server = axum_test::TestServer::new(crate::router::new_for_tests(state)).unwrap();
 
     std::fs::write(&canary_path, "CANARY=AAAA\n").unwrap();
@@ -140,7 +140,7 @@ async fn test_info_env_canary_is_authoritative_over_file() {
             .as_nanos()
     ));
     state.canary_path = canary_path.clone();
-    crate::database::try_init_db(state.clone()).unwrap();
+    crate::storage::sqlite::try_init_db(state.clone()).unwrap();
     let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone())).unwrap();
 
     std::fs::write(&canary_path, "CANARY='🐦‍⬛'\n").unwrap();

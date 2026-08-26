@@ -4,10 +4,12 @@ use axum::{http::StatusCode, Json};
 use serde_json::json;
 use std::collections::HashMap;
 
-use crate::database::{establish_connection, read_and_trash_secret_by_id, read_secret_by_id};
 use crate::models::{
     error_body, retry_after_response, AttemptStatus, CandidateState, FetchSecret, RateLimitInfo,
     ResponseFailedAttempt,
+};
+use crate::storage::sqlite::{
+    establish_connection, read_and_trash_secret_by_id, read_secret_by_id,
 };
 use crate::utils::{generate_secret_id, identifier_hash, is_256bits_hex_hash};
 use crate::AppState;

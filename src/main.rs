@@ -1,4 +1,3 @@
-mod database;
 mod diagnostic;
 mod env;
 mod handlers;
@@ -7,6 +6,7 @@ mod rate_limit;
 mod router;
 mod schema;
 mod security_counters;
+mod storage;
 
 #[cfg(test)]
 mod tests;
@@ -139,7 +139,7 @@ async fn main() {
         );
     }
 
-    if let Err(error) = crate::database::try_init_db(app_state.clone()) {
+    if let Err(error) = crate::storage::sqlite::try_init_db(app_state.clone()) {
         eprintln!("Failed to initialize database: {error:?}");
         std::process::exit(1);
     }

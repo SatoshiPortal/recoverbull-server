@@ -31,30 +31,21 @@ const GLOBAL_OVERLOAD_RETRY_AFTER_SECS: u64 = 1;
 /// is no uncompressed variant, which keeps one representation, one ETag and
 /// one cache entry.
 pub async fn get_attempts(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    {
-        if !state.attempts_maintenance.try_consume_request().await {
-            state.security_counters.attempts_rate_limited();
-            return retry_after_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                GLOBAL_OVERLOAD_RETRY_AFTER_SECS,
-                "Too many attempts telemetry requests, retry later",
-            );
-        }
+    if !state.attempts_request_admitted().await {
+        return retry_after_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            GLOBAL_OVERLOAD_RETRY_AFTER_SECS,
+            "Too many attempts telemetry requests, retry later",
+        );
     }
 
-    let snapshot = match state
-        .attempts_snapshot
-        .snapshot_for_request(&state.identifier_rate_limit, state.rate_limit_cooldown)
-        .await
-    {
+    let snapshot = match state.attempts_snapshot().await {
         Ok(snapshot) => snapshot,
         Err(()) => return *internal_error(),
     };
     let etag = snapshot.etag.clone();
     let body = axum::body::Bytes::from_owner(snapshot.gzip_body.clone());
-    let max_age = state
-        .attempts_snapshot
-        .remaining_max_age(snapshot.created_at);
+    let max_age = state.attempts_max_age(snapshot.created_at);
 
     let not_modified = headers
         .get(header::IF_NONE_MATCH)

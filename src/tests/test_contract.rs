@@ -225,11 +225,12 @@ async fn test_attempt_status_is_exact_while_snapshot_is_hour_truncated() {
 async fn test_store_is_not_counted_in_attempts() {
     // a zero snapshot TTL forces a rebuild on every poll, so the test sees
     // fresh state at each step instead of the first cached snapshot
-    let mut state = crate::env::init();
+    let mut state = crate::app::init();
     state
-        .attempts_snapshot
+        .attempts
+        .snapshot
         .set_ttl_for_test(std::time::Duration::ZERO);
-    crate::storage::sqlite::try_init_db(state.clone()).unwrap();
+    state.storage.initialize().unwrap();
     let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone())).unwrap();
 
     let store = &StoreSecret {
@@ -325,7 +326,10 @@ async fn test_global_buckets_use_503_without_targeted_metadata() {
     let (server, state) = crate::tests::test_server::new_test_server().await;
 
     // exhaust the global lookup bucket
-    *state.lookup_token_bucket.lock().await = crate::rate_limit::TokenBucket::new(0.0, 0.0);
+    state
+        .recovery
+        .set_lookup_bucket_for_test(crate::rate_limit::TokenBucket::new(0.0, 0.0))
+        .await;
     let response = server
         .post("/fetch")
         .json(&FetchSecret {
@@ -350,7 +354,10 @@ async fn test_global_buckets_use_503_without_targeted_metadata() {
         .is_ok());
 
     // exhaust the global store bucket
-    *state.store_token_bucket.lock().await = crate::rate_limit::TokenBucket::new(0.0, 0.0);
+    state
+        .recovery
+        .set_store_bucket_for_test(crate::rate_limit::TokenBucket::new(0.0, 0.0))
+        .await;
     let response = server
         .post("/store")
         .json(&StoreSecret {
@@ -377,7 +384,8 @@ async fn test_global_buckets_use_503_without_targeted_metadata() {
 
     // exhaust the global attempts bucket
     state
-        .attempts_maintenance
+        .attempts
+        .maintenance
         .set_bucket_for_test(crate::rate_limit::TokenBucket::new(0.0, 0.0))
         .await;
     let response = server.get("/attempts").expect_failure().await;
@@ -402,10 +410,9 @@ async fn test_global_buckets_use_503_without_targeted_metadata() {
 async fn test_503_responses_have_no_machine_code() {
     // identifier-map capacity exhausted: force a full map so a brand new
     // identifier cannot get a slot.
-    let mut state = crate::env::init();
-    state.rate_limit_max_identifiers = 1;
-    state.recovery_service.set_max_identifiers_for_test(1);
-    crate::storage::sqlite::try_init_db(state.clone()).unwrap();
+    let mut state = crate::app::init();
+    state.recovery.set_max_identifiers_for_test(1);
+    state.storage.initialize().unwrap();
     let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone())).unwrap();
 
     server
@@ -433,12 +440,11 @@ async fn test_503_responses_have_no_machine_code() {
         .is_ok());
 
     // database busy: block the concurrency semaphore.
-    let mut state = crate::env::init();
-    state.database_semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+    let mut state = crate::app::init();
     state
-        .recovery_service
-        .set_database_semaphore_for_test(state.database_semaphore.clone());
-    crate::storage::sqlite::try_init_db(state.clone()).unwrap();
+        .recovery
+        .set_database_semaphore_for_test(std::sync::Arc::new(tokio::sync::Semaphore::new(0)));
+    state.storage.initialize().unwrap();
     let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone())).unwrap();
 
     let response = server

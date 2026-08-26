@@ -3,9 +3,9 @@ use axum::response::{IntoResponse, Response};
 use axum::{http::StatusCode, Json};
 use serde_json::Value;
 
+use crate::app::AppState;
 use crate::http::{contract::StoreSecret, error::retry_after_response};
 use crate::recovery::service::{StoreCommand, StoreResult};
-use crate::AppState;
 
 const GLOBAL_OVERLOAD_RETRY_AFTER_SECS: u64 = 1;
 
@@ -14,7 +14,7 @@ pub async fn store_secret(
     Json(request): Json<StoreSecret>,
 ) -> Response {
     match state
-        .recovery_service
+        .recovery_service()
         .store(StoreCommand {
             identifier: request.identifier,
             authentication_key: request.authentication_key,

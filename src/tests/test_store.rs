@@ -110,7 +110,8 @@ async fn test_failure_encrypted_secret_invalid_base64() {
 async fn test_store_checks_length_before_base64() {
     let (server, state) = crate::tests::test_server::new_test_server().await;
 
-    let oversized_invalid = "!".repeat(state.secret_max_length + 4 - (state.secret_max_length % 4));
+    let oversized_invalid = "!"
+        .repeat(state.recovery.max_secret_length() + 4 - (state.recovery.max_secret_length() % 4));
     let response = server
         .post("/store")
         .json(&StoreSecret {
@@ -140,7 +141,8 @@ async fn test_store_database_error_returns_coherent_body() {
 
     // Force the write to fail: drop the table out from under the server.
     let mut connection =
-        crate::storage::sqlite::establish_connection(state.clone().database_url).unwrap();
+        crate::storage::sqlite::establish_connection(state.storage.database_url_for_test())
+            .unwrap();
     diesel::sql_query("DROP TABLE secret")
         .execute(&mut connection)
         .expect("failed to drop table");

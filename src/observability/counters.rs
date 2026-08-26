@@ -1,8 +1,6 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use crate::AppState;
-
 #[derive(Default)]
 pub struct SecurityCounters {
     store_accepted: AtomicU64,
@@ -127,7 +125,7 @@ pub struct CounterSnapshot {
     pub diagnostic_logs_suppressed: u64,
 }
 
-pub(crate) fn spawn_reporter(state: AppState, period: Duration) {
+pub(crate) fn spawn_reporter(state: super::ObservabilityState, period: Duration) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
         loop {
@@ -137,8 +135,8 @@ pub(crate) fn spawn_reporter(state: AppState, period: Duration) {
     });
 }
 
-pub(crate) fn report_once(state: &AppState) {
-    let snapshot = state.security_counters.flush();
+pub(crate) fn report_once(state: &super::ObservabilityState) {
+    let snapshot = state.counters.flush();
     tracing::info!(
         target: "security_counters",
         store_accepted = snapshot.store_accepted,

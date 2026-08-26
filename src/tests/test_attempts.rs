@@ -226,12 +226,13 @@ async fn test_attempts_snapshot_etag_and_conditional_requests() {
 
 #[tokio::test]
 async fn test_attempts_snapshot_rebuild_is_deterministic() {
-    let mut state = crate::env::init();
+    let mut state = crate::app::init();
     // force a rebuild on every request
     state
-        .attempts_snapshot
+        .attempts
+        .snapshot
         .set_ttl_for_test(std::time::Duration::ZERO);
-    crate::storage::sqlite::try_init_db(state.clone()).unwrap();
+    state.storage.initialize().unwrap();
     let server = axum_test::TestServer::new(crate::router::new_for_tests(state)).unwrap();
 
     // unchanged activity: the ETag survives rebuilds
@@ -259,10 +260,12 @@ async fn test_attempts_snapshot_rebuild_is_deterministic() {
 async fn test_cancelled_attempts_request_keeps_single_rebuild_in_flight() {
     let (_server, mut state) = crate::tests::test_server::new_test_server().await;
     state
-        .attempts_snapshot
+        .attempts
+        .snapshot
         .set_ttl_for_test(std::time::Duration::ZERO);
     state
-        .attempts_snapshot
+        .attempts
+        .snapshot
         .probe()
         .hold
         .store(true, Ordering::SeqCst);
@@ -276,7 +279,7 @@ async fn test_cancelled_attempts_request_keeps_single_rebuild_in_flight() {
     });
     tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        state.attempts_snapshot.probe().started_notify.notified(),
+        state.attempts.snapshot.probe().started_notify.notified(),
     )
     .await
     .expect("snapshot worker did not start within 5 seconds");
@@ -291,18 +294,20 @@ async fn test_cancelled_attempts_request_keeps_single_rebuild_in_flight() {
         .await
     });
     state
-        .attempts_snapshot
+        .attempts
+        .snapshot
         .probe()
         .released
         .store(true, Ordering::SeqCst);
-    state.attempts_snapshot.probe().release.notify_one();
+    state.attempts.snapshot.probe().release.notify_one();
     let response = tokio::time::timeout(std::time::Duration::from_secs(5), second)
         .await
         .expect("joined snapshot request did not complete within 5 seconds")
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let builds_started = state
-        .attempts_snapshot
+        .attempts
+        .snapshot
         .probe()
         .started
         .load(Ordering::SeqCst);
@@ -345,11 +350,11 @@ async fn test_attempts_entries_are_sorted_by_id_hash() {
 
 #[tokio::test]
 async fn test_attempts_omit_entries_after_cooldown_without_waiting_for_sweeper() {
-    let state = crate::env::init();
+    let state = crate::app::init();
     {
-        let mut entries = state.identifier_rate_limit.lock_for_test().await;
+        let mut entries = state.attempts.ledger.lock_for_test().await;
         let window_started_at =
-            chrono::Utc::now() - state.rate_limit_cooldown - chrono::Duration::seconds(1);
+            chrono::Utc::now() - state.attempts.policy.cooldown() - chrono::Duration::seconds(1);
         entries.insert(
             crate::recovery::identifiers::identifier_hash(SHA256_111111).unwrap(),
             RateLimitInfo {
@@ -371,14 +376,17 @@ async fn test_attempts_omit_entries_after_cooldown_without_waiting_for_sweeper()
 
 #[tokio::test]
 async fn test_attempts_last_attempt_at_is_last_distinct_candidate() {
-    let mut state = crate::env::init();
-    state.rate_limit_cooldown = chrono::TimeDelta::hours(24);
+    let state = crate::app::init();
+    state
+        .attempts
+        .policy
+        .set_cooldown_for_test(chrono::TimeDelta::hours(24));
     let now = chrono::Utc::now();
     let window_started_at = now - chrono::TimeDelta::hours(4);
     let last_candidate_at = now - chrono::TimeDelta::hours(2);
     let last_request_at = now - chrono::TimeDelta::hours(1);
     {
-        let mut entries = state.identifier_rate_limit.lock_for_test().await;
+        let mut entries = state.attempts.ledger.lock_for_test().await;
         entries.insert(
             crate::recovery::identifiers::identifier_hash(SHA256_111111).unwrap(),
             RateLimitInfo {
@@ -404,12 +412,13 @@ async fn test_attempts_last_attempt_at_is_last_distinct_candidate() {
 
 #[tokio::test]
 async fn test_attempts_rate_limit_bucket() {
-    let state = crate::env::init();
+    let state = crate::app::init();
     state
-        .attempts_maintenance
+        .attempts
+        .maintenance
         .set_bucket_for_test(crate::rate_limit::TokenBucket::new(1.0, 0.0))
         .await;
-    crate::storage::sqlite::try_init_db(state.clone()).unwrap();
+    state.storage.initialize().unwrap();
     let server = axum_test::TestServer::new(crate::router::new_for_tests(state)).unwrap();
 
     server.get("/attempts").expect_success().await;
@@ -437,7 +446,7 @@ async fn test_attempts_snapshot_at_full_map_scale() {
 
     let now = chrono::Utc::now();
     {
-        let mut map = state.identifier_rate_limit.lock_for_test().await;
+        let mut map = state.attempts.ledger.lock_for_test().await;
         for i in 0..100_000u32 {
             map.insert(
                 format!("{:064x}", i),

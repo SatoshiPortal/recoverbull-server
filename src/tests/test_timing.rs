@@ -95,11 +95,12 @@ async fn default_body_limit_rejection_is_also_delayed() {
 
 #[tokio::test]
 async fn production_router_applies_the_500_millisecond_floor() {
-    let app_state = crate::env::init();
-    crate::storage::sqlite::try_init_db(app_state.clone()).unwrap();
+    let app_state = crate::app::init();
+    app_state.storage.initialize().unwrap();
     let app = crate::router::new(app_state.clone());
     let mut connection =
-        crate::storage::sqlite::establish_connection(app_state.clone().database_url).unwrap();
+        crate::storage::sqlite::establish_connection(app_state.storage.database_url_for_test())
+            .unwrap();
     crate::tests::test_server::clear_table_secret(&mut connection).await;
     let server = axum_test::TestServer::new(app).unwrap();
 

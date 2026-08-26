@@ -11,7 +11,8 @@ async fn wait_for_attempts(state: &crate::AppState, expected: u8) {
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         loop {
             if state
-                .identifier_rate_limit
+                .attempts
+                .ledger
                 .lock_for_test()
                 .await
                 .get(&identifier_hash(SHA256_111111).unwrap())
@@ -242,11 +243,11 @@ async fn test_pending_duplicate_trash_is_rejected_without_a_second_reservation()
     // Keep one free slot so checking Pending before saturation cannot become
     // a membership oracle. Once the budget is full, every candidate — known
     // or unknown, Pending or Committed — must receive the same 429.
-    state.rate_limit_max_attempts = 3;
-    state.recovery_service.set_max_attempts_for_test(3);
+    state.recovery.set_max_attempts_for_test(3);
 
     let mut lock_connection =
-        crate::storage::sqlite::establish_connection(state.database_url.clone()).unwrap();
+        crate::storage::sqlite::establish_connection(state.storage.database_url_for_test())
+            .unwrap();
     diesel::sql_query("BEGIN IMMEDIATE")
         .execute(&mut lock_connection)
         .expect("test must acquire the SQLite write lock");
@@ -263,7 +264,8 @@ async fn test_pending_duplicate_trash_is_rejected_without_a_second_reservation()
     assert_eq!(second, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(
         state
-            .identifier_rate_limit
+            .attempts
+            .ledger
             .lock_for_test()
             .await
             .get(&identifier_hash(SHA256_111111).unwrap())
@@ -299,7 +301,8 @@ async fn test_pending_distinct_candidates_consume_the_attempt_budget() {
     }
 
     let mut lock_connection =
-        crate::storage::sqlite::establish_connection(state.database_url.clone()).unwrap();
+        crate::storage::sqlite::establish_connection(state.storage.database_url_for_test())
+            .unwrap();
     diesel::sql_query("BEGIN IMMEDIATE")
         .execute(&mut lock_connection)
         .expect("test must acquire the SQLite write lock");
@@ -333,7 +336,8 @@ async fn test_pending_distinct_candidates_consume_the_attempt_budget() {
 async fn test_old_trash_completion_cannot_update_a_replaced_rate_limit_window() {
     let (_server, state) = crate::tests::test_server::new_test_server().await;
     let mut lock_connection =
-        crate::storage::sqlite::establish_connection(state.database_url.clone()).unwrap();
+        crate::storage::sqlite::establish_connection(state.storage.database_url_for_test())
+            .unwrap();
     diesel::sql_query("BEGIN IMMEDIATE")
         .execute(&mut lock_connection)
         .expect("test must acquire the SQLite write lock");
@@ -343,7 +347,7 @@ async fn test_old_trash_completion_cannot_update_a_replaced_rate_limit_window() 
 
     let fresh_at = chrono::Utc::now();
     let id_hash = identifier_hash(SHA256_111111).unwrap();
-    state.identifier_rate_limit.lock_for_test().await.insert(
+    state.attempts.ledger.lock_for_test().await.insert(
         id_hash.clone(),
         RateLimitInfo {
             window_started_at: fresh_at,
@@ -365,7 +369,8 @@ async fn test_old_trash_completion_cannot_update_a_replaced_rate_limit_window() 
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
     let info = state
-        .identifier_rate_limit
+        .attempts
+        .ledger
         .lock_for_test()
         .await
         .get(&id_hash)
@@ -391,7 +396,8 @@ async fn test_concurrent_trash_hit_does_not_count_the_losing_miss_as_a_guess() {
         .await;
 
     let mut lock_connection =
-        crate::storage::sqlite::establish_connection(state.database_url.clone()).unwrap();
+        crate::storage::sqlite::establish_connection(state.storage.database_url_for_test())
+            .unwrap();
     diesel::sql_query("BEGIN IMMEDIATE")
         .execute(&mut lock_connection)
         .expect("test must acquire the SQLite write lock");
@@ -410,7 +416,8 @@ async fn test_concurrent_trash_hit_does_not_count_the_losing_miss_as_a_guess() {
     assert_eq!(first_status, StatusCode::ACCEPTED);
 
     let info = state
-        .identifier_rate_limit
+        .attempts
+        .ledger
         .lock_for_test()
         .await
         .get(&identifier_hash(SHA256_111111).unwrap())
@@ -446,7 +453,8 @@ async fn test_committed_trash_race_returns_accepted_and_unauthorized_without_fai
     assert!(statuses.contains(&StatusCode::ACCEPTED));
     assert!(statuses.contains(&StatusCode::UNAUTHORIZED));
     let info = state
-        .identifier_rate_limit
+        .attempts
+        .ledger
         .lock_for_test()
         .await
         .get(&identifier_hash(SHA256_111111).unwrap())

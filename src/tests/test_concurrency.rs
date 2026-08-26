@@ -3,19 +3,24 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 /// Starts the app on a real TCP listener so requests are truly concurrent,
 /// handled in parallel by the multi-threaded runtime.
 async fn spawn_server() -> (std::net::SocketAddr, crate::AppState) {
-    let app_state = crate::env::init();
+    let app_state = crate::app::init();
     // Dedicated generous buckets: these tests drive 30-100 requests and must
     // not depend on the environment-provided buckets (code defaults: store
     // burst 10, lookup burst 100) — see SECURITY.md "Test-writing traps".
-    *app_state.store_token_bucket.lock().await =
-        crate::rate_limit::TokenBucket::new(10_000.0, 10_000.0);
-    *app_state.lookup_token_bucket.lock().await =
-        crate::rate_limit::TokenBucket::new(10_000.0, 10_000.0);
-    crate::storage::sqlite::try_init_db(app_state.clone()).unwrap();
+    app_state
+        .recovery
+        .set_store_bucket_for_test(crate::rate_limit::TokenBucket::new(10_000.0, 10_000.0))
+        .await;
+    app_state
+        .recovery
+        .set_lookup_bucket_for_test(crate::rate_limit::TokenBucket::new(10_000.0, 10_000.0))
+        .await;
+    app_state.storage.initialize().unwrap();
     let app = crate::router::new_for_tests(app_state.clone());
 
     let mut connection =
-        crate::storage::sqlite::establish_connection(app_state.clone().database_url).unwrap();
+        crate::storage::sqlite::establish_connection(app_state.storage.database_url_for_test())
+            .unwrap();
     crate::tests::test_server::clear_table_secret(&mut connection).await;
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -125,10 +130,11 @@ async fn test_rate_limit_holds_under_concurrency() {
 
     assert_eq!(other, 0, "unexpected status codes");
     assert_eq!(
-        unauthorized, state.rate_limit_max_attempts as usize,
+        unauthorized,
+        state.attempts.policy.max_attempts() as usize,
         "rate limit bypassed: more guesses consumed than allowed"
     );
-    assert_eq!(too_many, N - state.rate_limit_max_attempts as usize);
+    assert_eq!(too_many, N - state.attempts.policy.max_attempts() as usize);
 }
 
 /// A concurrent duplicate must not release the secret twice. The deterministic
@@ -214,7 +220,8 @@ async fn test_concurrent_identical_store_is_idempotent() {
     );
 
     let mut connection =
-        crate::storage::sqlite::establish_connection(app_state.database_url).unwrap();
+        crate::storage::sqlite::establish_connection(app_state.storage.database_url_for_test())
+            .unwrap();
     let rows: i64 = crate::schema::secret::table
         .count()
         .get_result(&mut connection)

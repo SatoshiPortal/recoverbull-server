@@ -1,7 +1,7 @@
 use crate::schema::secret::dsl::*;
 
+use crate::config::StorageConfig;
 use crate::schema::secret::*;
-use crate::AppState;
 use std::sync::Arc;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -27,7 +27,7 @@ pub(crate) struct SqliteStorage {
     database_url: String,
     database_semaphore: Arc<Semaphore>,
     #[cfg(test)]
-    test_database_guard: Arc<crate::env::TestDatabaseGuard>,
+    test_database_guard: Arc<crate::config::TestDatabaseGuard>,
 }
 
 /// Opaque lease transferred to a blocking worker; its permit is held until
@@ -36,7 +36,7 @@ pub(crate) struct SqliteOperation {
     database_url: String,
     permit: OwnedSemaphorePermit,
     #[cfg(test)]
-    test_database_guard: Arc<crate::env::TestDatabaseGuard>,
+    test_database_guard: Arc<crate::config::TestDatabaseGuard>,
 }
 
 #[derive(Clone)]
@@ -62,16 +62,12 @@ pub(crate) enum StorageError {
 }
 
 impl SqliteStorage {
-    pub(crate) fn new(
-        database_url: String,
-        database_semaphore: Arc<Semaphore>,
-        #[cfg(test)] test_database_guard: Arc<crate::env::TestDatabaseGuard>,
-    ) -> Self {
+    pub(crate) fn from_config(config: StorageConfig) -> Self {
         Self {
-            database_url,
-            database_semaphore,
+            database_url: config.database_url,
+            database_semaphore: Arc::new(Semaphore::new(config.database_max_concurrency)),
             #[cfg(test)]
-            test_database_guard,
+            test_database_guard: config.test_database_guard,
         }
     }
 
@@ -91,6 +87,26 @@ impl SqliteStorage {
         })
     }
 
+    pub(crate) fn initialize(&self) -> Result<(), ConnectionSetupError> {
+        let mut connection = establish_connection_without_wal_check(self.database_url.clone())?;
+        verify_sqlite_runtime(&mut connection)?;
+        run_migrations(&mut connection).map_err(|_| ConnectionSetupError::Migration)?;
+        sql_query("PRAGMA journal_mode = WAL;")
+            .execute(&mut connection)
+            .map_err(|_| ConnectionSetupError::Wal)?;
+        let journal_mode = sql_query("SELECT journal_mode AS value FROM pragma_journal_mode")
+            .load::<PragmaText>(&mut connection)
+            .map_err(|_| ConnectionSetupError::Wal)?
+            .into_iter()
+            .next()
+            .ok_or(ConnectionSetupError::Wal)?;
+        if journal_mode.value != "wal" {
+            return Err(ConnectionSetupError::Wal);
+        }
+        tracing::info!(target: "security", "database initialized");
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(crate) fn set_semaphore_for_test(&mut self, semaphore: Arc<Semaphore>) {
         self.database_semaphore = semaphore;
@@ -99,6 +115,14 @@ impl SqliteStorage {
     #[cfg(test)]
     pub(crate) fn set_database_url_for_test(&mut self, database_url: String) {
         self.database_url = database_url;
+    }
+    #[cfg(test)]
+    pub(crate) fn database_url_for_test(&self) -> String {
+        self.database_url.clone()
+    }
+    #[cfg(test)]
+    pub(crate) fn database_semaphore_for_test(&self) -> Arc<Semaphore> {
+        self.database_semaphore.clone()
     }
 }
 
@@ -175,28 +199,6 @@ struct SecretColumn {
     primary_key: i32,
     #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
     default_value: Option<String>,
-}
-
-pub fn try_init_db(state: AppState) -> Result<(), ConnectionSetupError> {
-    let mut connection = establish_connection_without_wal_check(state.database_url)?;
-    verify_sqlite_runtime(&mut connection)?;
-    run_migrations(&mut connection).map_err(|_| ConnectionSetupError::Migration)?;
-
-    // enable WAL mode to allow replication with litestream
-    sql_query("PRAGMA journal_mode = WAL;")
-        .execute(&mut connection)
-        .map_err(|_| ConnectionSetupError::Wal)?;
-    let journal_mode = sql_query("SELECT journal_mode AS value FROM pragma_journal_mode")
-        .load::<PragmaText>(&mut connection)
-        .map_err(|_| ConnectionSetupError::Wal)?
-        .into_iter()
-        .next()
-        .ok_or(ConnectionSetupError::Wal)?;
-    if journal_mode.value != "wal" {
-        return Err(ConnectionSetupError::Wal);
-    }
-    tracing::info!(target: "security", "database initialized");
-    Ok(())
 }
 
 /// Runs embedded migrations, adopting an exact pre-Diesel `secret` table when

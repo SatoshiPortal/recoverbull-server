@@ -1,7 +1,12 @@
 //! Attempt-domain values shared by lookup admission and telemetry.
 
+use crate::config::AttemptsConfig;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::sync::{
+    atomic::{AtomicI64, AtomicU8, AtomicUsize},
+    Arc,
+};
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct AttemptStatus {
@@ -22,3 +27,71 @@ pub(crate) struct AttemptStatus {
 pub(crate) mod ledger;
 pub(crate) mod maintenance;
 pub(crate) mod snapshot;
+
+#[derive(Clone)]
+pub(crate) struct AttemptsPolicy {
+    cooldown_minutes: Arc<AtomicI64>,
+    max_attempts: Arc<AtomicU8>,
+    max_identifiers: Arc<AtomicUsize>,
+}
+impl AttemptsPolicy {
+    fn new(config: &AttemptsConfig) -> Self {
+        Self {
+            cooldown_minutes: Arc::new(AtomicI64::new(config.rate_limit_cooldown_minutes)),
+            max_attempts: Arc::new(AtomicU8::new(config.rate_limit_max_attempts)),
+            max_identifiers: Arc::new(AtomicUsize::new(config.rate_limit_max_identifiers)),
+        }
+    }
+    pub(crate) fn cooldown(&self) -> chrono::TimeDelta {
+        chrono::TimeDelta::minutes(
+            self.cooldown_minutes
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+    pub(crate) fn max_attempts(&self) -> u8 {
+        self.max_attempts.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    pub(crate) fn max_identifiers(&self) -> usize {
+        self.max_identifiers
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+    #[cfg(test)]
+    pub(crate) fn set_max_attempts_for_test(&self, value: u8) {
+        self.max_attempts
+            .store(value, std::sync::atomic::Ordering::Relaxed);
+    }
+    #[cfg(test)]
+    pub(crate) fn set_max_identifiers_for_test(&self, value: usize) {
+        self.max_identifiers
+            .store(value, std::sync::atomic::Ordering::Relaxed);
+    }
+    #[cfg(test)]
+    pub(crate) fn set_cooldown_for_test(&self, value: chrono::TimeDelta) {
+        self.cooldown_minutes
+            .store(value.num_minutes(), std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct AttemptsState {
+    pub(crate) policy: AttemptsPolicy,
+    pub(crate) ledger: ledger::AttemptsLedgerState,
+    pub(crate) snapshot: snapshot::AttemptsSnapshotState,
+    pub(crate) maintenance: maintenance::AttemptsMaintenanceState,
+}
+impl AttemptsState {
+    pub(crate) fn new(config: AttemptsConfig) -> Self {
+        Self {
+            policy: AttemptsPolicy::new(&config),
+            ledger: ledger::AttemptsLedgerState::new(),
+            snapshot: snapshot::AttemptsSnapshotState::new(config.snapshot_ttl),
+            maintenance: maintenance::AttemptsMaintenanceState::new(
+                config.attempts_rate_limit_burst,
+                config.attempts_rate_limit_refill,
+            ),
+        }
+    }
+    pub(crate) fn policy(&self) -> AttemptsPolicy {
+        self.policy.clone()
+    }
+}

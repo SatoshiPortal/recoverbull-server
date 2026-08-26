@@ -1,22 +1,22 @@
+mod app;
 mod attempts;
-mod diagnostic;
+mod config;
 mod digest;
-mod env;
 mod handlers;
 mod http;
+mod observability;
 mod rate_limit;
 mod recovery;
 mod router;
 mod schema;
-mod security_counters;
 mod storage;
+
+pub(crate) use app::AppState;
 
 #[cfg(test)]
 mod tests;
 
-use chrono::TimeDelta;
-use std::{future::IntoFuture, sync::Arc};
-use tokio::sync::{Mutex, Semaphore};
+use std::future::IntoFuture;
 
 const APP_GRACE_PERIOD: std::time::Duration = std::time::Duration::from_secs(35);
 
@@ -49,37 +49,6 @@ where
     }
 }
 
-#[derive(Clone)]
-struct AppState {
-    server_address: String,
-    database_url: String,
-    #[cfg(test)]
-    _test_database_guard: Arc<env::TestDatabaseGuard>,
-    /// Warrant canary captured at startup for unavailable-file fallback, or
-    /// as the authoritative value when it came from process environment.
-    canary: String,
-    /// True when CANARY was provided by the process environment (dotenvy
-    /// never overrides it): the file is then ignored at request time.
-    canary_from_env: bool,
-    /// Dotenv file re-read for every `/info` request.
-    canary_path: std::path::PathBuf,
-    /// Serializes dotenv reads so `/info` cannot exhaust Tokio's blocking pool.
-    canary_read_semaphore: Arc<Semaphore>,
-    rate_limit_cooldown: TimeDelta,
-    identifier_rate_limit: attempts::ledger::AttemptsLedgerState,
-    secret_max_length: usize,
-    rate_limit_max_attempts: u8,
-    store_token_bucket: Arc<Mutex<rate_limit::TokenBucket>>,
-    lookup_token_bucket: Arc<Mutex<rate_limit::TokenBucket>>,
-    attempts_maintenance: attempts::maintenance::AttemptsMaintenanceState,
-    rate_limit_max_identifiers: usize,
-    database_semaphore: Arc<Semaphore>,
-    recovery_service: recovery::service::RecoveryService,
-    attempts_snapshot: attempts::snapshot::AttemptsSnapshotState,
-    security_counters: Arc<security_counters::SecurityCounters>,
-    diagnostic_logs: Arc<diagnostic::LogQuota>,
-}
-
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
@@ -89,40 +58,31 @@ async fn main() {
         )
         .init();
 
-    let app_state = crate::env::init();
+    let app_state = crate::app::build(crate::config::init());
 
-    if !app_state.server_address.starts_with("127.0.0.1")
-        && !app_state.server_address.starts_with("localhost")
-        && !app_state.server_address.starts_with("[::1]")
+    if !app_state.server_address().starts_with("127.0.0.1")
+        && !app_state.server_address().starts_with("localhost")
+        && !app_state.server_address().starts_with("[::1]")
     {
         eprintln!(
             "WARNING: SERVER_ADDRESS ({}) is not loopback. This server is designed to run behind a Tor onion service or a TLS-terminating proxy; never expose it directly on a public interface.",
-            app_state.server_address
+            app_state.server_address()
         );
     }
 
-    if let Err(error) = crate::storage::sqlite::try_init_db(app_state.clone()) {
+    if let Err(error) = app_state.initialize_storage() {
         eprintln!("Failed to initialize database: {error:?}");
         std::process::exit(1);
     }
     tracing::info!(target: "security", secure_delete = true, counter_window_seconds = 300, "security controls enabled");
-    crate::security_counters::spawn_reporter(
-        app_state.clone(),
-        std::time::Duration::from_secs(300),
-    );
+    app_state.spawn_security_reporter(std::time::Duration::from_secs(300));
 
-    crate::attempts::maintenance::spawn_sweeper(
-        app_state.identifier_rate_limit.clone(),
-        app_state.rate_limit_cooldown,
-    );
-    let mut wiper = crate::attempts::maintenance::spawn_production_wiper(
-        app_state.identifier_rate_limit.clone(),
-        app_state.attempts_snapshot.clone(),
-    );
+    app_state.spawn_attempts_sweeper();
+    let mut wiper = app_state.spawn_production_wiper();
 
     let app = router::new(app_state.clone());
 
-    let listener = tokio::net::TcpListener::bind(&app_state.server_address)
+    let listener = tokio::net::TcpListener::bind(app_state.server_address())
         .await
         .unwrap();
     let (shutdown_trigger, shutdown_request) = tokio::sync::oneshot::channel();

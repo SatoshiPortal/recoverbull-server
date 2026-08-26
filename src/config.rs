@@ -1,9 +1,7 @@
-use chrono::Duration;
 use dotenvy::dotenv;
-use std::{env, fmt::Display, str::FromStr, sync::Arc};
-use tokio::sync::{Mutex, Semaphore};
-
-use crate::AppState;
+#[cfg(test)]
+use std::sync::Arc;
+use std::{env, fmt::Display, str::FromStr};
 
 fn optional_env<T>(name: &str, default: T) -> T
 where
@@ -24,7 +22,7 @@ where
 }
 
 /// Builds a database path unique to this call, under the OS temp directory.
-/// Every test calls `env::init()`, so each test gets its own SQLite file:
+/// Every test calls `app::init()`, so each test gets its own SQLite file:
 /// without this, all tests shared a single file and ran into each other's
 /// data under `cargo test`'s parallel execution.
 #[cfg(test)]
@@ -193,7 +191,50 @@ pub fn canary_file_state(path: &std::path::Path) -> CanaryFileState {
     CanaryFileState::Removed
 }
 
-pub fn init() -> AppState {
+#[derive(Clone)]
+pub(crate) struct StorageConfig {
+    pub(crate) database_url: String,
+    pub(crate) database_max_concurrency: usize,
+    #[cfg(test)]
+    pub(crate) test_database_guard: Arc<TestDatabaseGuard>,
+}
+
+#[derive(Clone)]
+pub(crate) struct RecoveryConfig {
+    pub(crate) store_rate_limit_burst: f64,
+    pub(crate) store_rate_limit_refill: f64,
+    pub(crate) lookup_rate_limit_burst: f64,
+    pub(crate) lookup_rate_limit_refill: f64,
+    pub(crate) secret_max_length: usize,
+}
+
+#[derive(Clone)]
+pub(crate) struct AttemptsConfig {
+    pub(crate) rate_limit_cooldown_minutes: i64,
+    pub(crate) rate_limit_max_attempts: u8,
+    pub(crate) rate_limit_max_identifiers: usize,
+    pub(crate) attempts_rate_limit_burst: f64,
+    pub(crate) attempts_rate_limit_refill: f64,
+    pub(crate) snapshot_ttl: std::time::Duration,
+}
+
+#[derive(Clone)]
+pub(crate) struct InfoConfig {
+    pub(crate) canary: String,
+    pub(crate) canary_from_env: bool,
+    pub(crate) canary_path: std::path::PathBuf,
+}
+
+#[derive(Clone)]
+pub(crate) struct ValidatedConfig {
+    pub(crate) server_address: String,
+    pub(crate) storage: StorageConfig,
+    pub(crate) recovery: RecoveryConfig,
+    pub(crate) attempts: AttemptsConfig,
+    pub(crate) info: InfoConfig,
+}
+
+pub fn init() -> ValidatedConfig {
     // Whether CANARY comes from the process environment must be known before
     // dotenv loads the file: dotenvy never overrides an existing variable.
     // An environment-provided canary is authoritative (file edits are
@@ -319,63 +360,33 @@ pub fn init() -> AppState {
         std::process::exit(1);
     }
 
-    let identifier_rate_limit = crate::attempts::ledger::AttemptsLedgerState::new();
-    let store_token_bucket = Arc::new(Mutex::new(crate::rate_limit::TokenBucket::new(
-        store_rate_limit_burst,
-        store_rate_limit_refill,
-    )));
-    let lookup_token_bucket = Arc::new(Mutex::new(crate::rate_limit::TokenBucket::new(
-        lookup_rate_limit_burst,
-        lookup_rate_limit_refill,
-    )));
-    let database_semaphore = Arc::new(Semaphore::new(database_max_concurrency));
-    #[cfg(test)]
-    let test_guard_for_service = test_database_guard.clone();
-    let storage = crate::storage::sqlite::SqliteStorage::new(
-        database_url.clone(),
-        database_semaphore.clone(),
-        #[cfg(test)]
-        test_guard_for_service,
-    );
-    let security_counters = Arc::new(crate::security_counters::SecurityCounters::default());
-    let recovery_service = crate::recovery::service::RecoveryService::new(
-        store_token_bucket.clone(),
-        lookup_token_bucket.clone(),
-        identifier_rate_limit.clone(),
-        storage,
-        security_counters.clone(),
-        secret_max_length,
-        Duration::minutes(rate_limit_cooldown as i64),
-        rate_limit_max_attempts,
-        rate_limit_max_identifiers,
-    );
-
-    AppState {
+    ValidatedConfig {
         server_address: server_addr,
-        database_url,
-        #[cfg(test)]
-        _test_database_guard: test_database_guard,
-        canary,
-        canary_from_env,
-        canary_path: dotenv_path.unwrap_or_else(|| std::path::PathBuf::from(".env")),
-        canary_read_semaphore: Arc::new(Semaphore::new(1)),
-        rate_limit_cooldown: Duration::minutes(rate_limit_cooldown as i64),
-        identifier_rate_limit,
-        secret_max_length,
-        rate_limit_max_attempts,
-        store_token_bucket,
-        lookup_token_bucket,
-        attempts_maintenance: crate::attempts::maintenance::AttemptsMaintenanceState::new(
+        storage: StorageConfig {
+            database_url,
+            database_max_concurrency,
+            #[cfg(test)]
+            test_database_guard,
+        },
+        recovery: RecoveryConfig {
+            store_rate_limit_burst,
+            store_rate_limit_refill,
+            lookup_rate_limit_burst,
+            lookup_rate_limit_refill,
+            secret_max_length,
+        },
+        attempts: AttemptsConfig {
+            rate_limit_cooldown_minutes: rate_limit_cooldown,
+            rate_limit_max_attempts,
+            rate_limit_max_identifiers,
             attempts_rate_limit_burst,
             attempts_rate_limit_refill,
-        ),
-        rate_limit_max_identifiers,
-        database_semaphore,
-        recovery_service,
-        attempts_snapshot: crate::attempts::snapshot::AttemptsSnapshotState::new(
-            std::time::Duration::from_secs(attempts_snapshot_ttl_seconds),
-        ),
-        security_counters,
-        diagnostic_logs: crate::diagnostic::new_quota(),
+            snapshot_ttl: std::time::Duration::from_secs(attempts_snapshot_ttl_seconds),
+        },
+        info: InfoConfig {
+            canary,
+            canary_from_env,
+            canary_path: dotenv_path.unwrap_or_else(|| std::path::PathBuf::from(".env")),
+        },
     }
 }

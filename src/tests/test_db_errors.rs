@@ -21,10 +21,12 @@ fn test_connection_setup_failure_is_opaque_and_non_panicking() {
 async fn test_bounded_concurrent_connection_setup_and_write_diagnostics() {
     const ROUNDS: usize = 4;
     const CONCURRENCY: usize = 256;
-    let (database_url, _guard) = crate::env::unique_test_database();
-    let mut state = crate::env::init();
-    state.database_url = database_url.clone();
-    crate::storage::sqlite::try_init_db(state).unwrap();
+    let (database_url, _guard) = crate::config::unique_test_database();
+    let mut state = crate::app::init();
+    state
+        .recovery
+        .set_database_url_for_test(database_url.clone());
+    state.recovery.initialize_for_test().unwrap();
 
     let mut setup_errors = std::collections::BTreeMap::new();
     let mut write_errors = 0;
@@ -69,12 +71,11 @@ async fn test_bounded_concurrent_connection_setup_and_write_diagnostics() {
 
 #[tokio::test]
 async fn test_handlers_return_generic_500_when_connection_setup_fails() {
-    let mut state = crate::env::init();
-    crate::storage::sqlite::try_init_db(state.clone()).unwrap();
-    state.database_url = "/path/that/does/not/exist/recoverbull.sqlite3".to_owned();
+    let mut state = crate::app::init();
+    state.storage.initialize().unwrap();
     state
-        .recovery_service
-        .set_database_url_for_test(state.database_url.clone());
+        .recovery
+        .set_database_url_for_test("/path/that/does/not/exist/recoverbull.sqlite3".to_owned());
     let server = axum_test::TestServer::new(crate::router::new(state.clone())).unwrap();
 
     let store = server
@@ -95,8 +96,8 @@ async fn test_handlers_return_generic_500_when_connection_setup_fails() {
         })
         .await;
     assert_eq!(fetch.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
-    assert!(state.identifier_rate_limit.lock_for_test().await.is_empty());
-    assert_eq!(state.security_counters.flush().database_error, 2);
+    assert!(state.attempts.ledger.lock_for_test().await.is_empty());
+    assert_eq!(state.observability.counters.flush().database_error, 2);
 }
 
 /// A database failure must not be confused with wrong credentials:
@@ -110,7 +111,8 @@ async fn test_database_error_returns_500_without_consuming_attempts() {
     // Force every subsequent query to fail: drop the table out from under
     // the server. Database initialization is tested separately.
     let mut connection =
-        crate::storage::sqlite::establish_connection(state.clone().database_url).unwrap();
+        crate::storage::sqlite::establish_connection(state.storage.database_url_for_test())
+            .unwrap();
     diesel::sql_query("DROP TABLE secret")
         .execute(&mut connection)
         .expect("failed to drop table");
@@ -121,7 +123,7 @@ async fn test_database_error_returns_500_without_consuming_attempts() {
     };
 
     // More requests than max_failed_attempts: none may be 401 or 429.
-    for _ in 0..(state.rate_limit_max_attempts + 2) {
+    for _ in 0..(state.attempts.policy.max_attempts() + 2) {
         let response = server.post("/fetch").json(fetch).await;
         assert_eq!(
             response.status_code(),
@@ -131,6 +133,6 @@ async fn test_database_error_returns_500_without_consuming_attempts() {
     }
 
     // No rate-limit entry may remain: attempts were refunded.
-    let identifier_rate_limit = state.identifier_rate_limit.lock_for_test().await;
+    let identifier_rate_limit = state.attempts.ledger.lock_for_test().await;
     assert!(!identifier_rate_limit.contains_key(&identifier_hash(SHA256_111111).unwrap()));
 }

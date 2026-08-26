@@ -2,12 +2,14 @@
 
 use super::identifiers::{generate_secret_id, identifier_hash, is_256bits_hex_hash};
 use crate::{
+    attempts::AttemptsState,
     attempts::{
-        ledger::{Admission, AttemptsLedgerState, LookupOutcome, ReservationGuard},
+        ledger::{Admission, LookupOutcome, ReservationGuard},
         AttemptStatus,
     },
+    config::RecoveryConfig,
+    observability::SecurityCounters,
     rate_limit::TokenBucket,
-    security_counters::SecurityCounters,
     storage::sqlite::{NewStoredSecret, SqliteStorage, StorageError, StoredSecret},
 };
 use base64::Engine;
@@ -70,37 +72,32 @@ pub(crate) enum LookupResult {
 pub(crate) struct RecoveryService {
     store_bucket: Arc<Mutex<TokenBucket>>,
     lookup_bucket: Arc<Mutex<TokenBucket>>,
-    ledger: AttemptsLedgerState,
+    attempts: AttemptsState,
     storage: SqliteStorage,
     counters: Arc<SecurityCounters>,
     max_secret_length: usize,
-    cooldown: chrono::TimeDelta,
-    max_attempts: u8,
-    max_identifiers: usize,
 }
 
 impl RecoveryService {
     pub(crate) fn new(
-        store_bucket: Arc<Mutex<TokenBucket>>,
-        lookup_bucket: Arc<Mutex<TokenBucket>>,
-        ledger: AttemptsLedgerState,
+        config: RecoveryConfig,
+        attempts: AttemptsState,
         storage: SqliteStorage,
         counters: Arc<SecurityCounters>,
-        max_secret_length: usize,
-        cooldown: chrono::TimeDelta,
-        max_attempts: u8,
-        max_identifiers: usize,
     ) -> Self {
         Self {
-            store_bucket,
-            lookup_bucket,
-            ledger,
+            store_bucket: Arc::new(Mutex::new(TokenBucket::new(
+                config.store_rate_limit_burst,
+                config.store_rate_limit_refill,
+            ))),
+            lookup_bucket: Arc::new(Mutex::new(TokenBucket::new(
+                config.lookup_rate_limit_burst,
+                config.lookup_rate_limit_refill,
+            ))),
+            attempts,
             storage,
             counters,
-            max_secret_length,
-            cooldown,
-            max_attempts,
-            max_identifiers,
+            max_secret_length: config.secret_max_length,
         }
     }
 
@@ -175,12 +172,12 @@ impl RecoveryService {
 
     #[cfg(test)]
     pub(crate) fn set_max_identifiers_for_test(&mut self, max: usize) {
-        self.max_identifiers = max;
+        self.attempts.policy.set_max_identifiers_for_test(max);
     }
 
     #[cfg(test)]
     pub(crate) fn set_max_attempts_for_test(&mut self, max: u8) {
-        self.max_attempts = max;
+        self.attempts.policy.set_max_attempts_for_test(max);
     }
 
     #[cfg(test)]
@@ -194,6 +191,28 @@ impl RecoveryService {
     #[cfg(test)]
     pub(crate) fn set_database_url_for_test(&mut self, database_url: String) {
         self.storage.set_database_url_for_test(database_url);
+    }
+    #[cfg(test)]
+    pub(crate) fn database_semaphore_for_test(&self) -> Arc<tokio::sync::Semaphore> {
+        self.storage.database_semaphore_for_test()
+    }
+    #[cfg(test)]
+    pub(crate) fn initialize_for_test(
+        &self,
+    ) -> Result<(), crate::storage::sqlite::ConnectionSetupError> {
+        self.storage.initialize()
+    }
+    #[cfg(test)]
+    pub(crate) async fn set_store_bucket_for_test(&self, bucket: TokenBucket) {
+        *self.store_bucket.lock().await = bucket;
+    }
+    #[cfg(test)]
+    pub(crate) async fn set_lookup_bucket_for_test(&self, bucket: TokenBucket) {
+        *self.lookup_bucket.lock().await = bucket;
+    }
+    #[cfg(test)]
+    pub(crate) fn max_secret_length(&self) -> usize {
+        self.max_secret_length
     }
 
     pub(crate) async fn lookup(&self, request: LookupCommand, kind: LookupKind) -> LookupResult {
@@ -210,14 +229,15 @@ impl RecoveryService {
         let candidate = generate_secret_id(&identifier, &authentication_key);
         let requested_at = Utc::now();
         let admission = self
+            .attempts
             .ledger
             .admit(
                 id_hash.clone(),
                 candidate.clone(),
                 requested_at,
-                self.max_attempts,
-                self.max_identifiers,
-                self.cooldown,
+                self.attempts.policy.max_attempts(),
+                self.attempts.policy.max_identifiers(),
+                self.attempts.policy.cooldown(),
             )
             .await;
         match admission {
@@ -230,14 +250,15 @@ impl RecoveryService {
                 last_candidate_at,
             } => {
                 self.counters.lookup_target_lockout();
-                let retry_after_secs = (last_candidate_at + self.cooldown - requested_at)
+                let retry_after_secs = (last_candidate_at + self.attempts.policy.cooldown()
+                    - requested_at)
                     .num_seconds()
                     .max(1) as u64;
                 LookupResult::RateLimited {
                     count,
                     requested_at: last_candidate_at,
                     retry_after_secs,
-                    cooldown_minutes: self.cooldown.num_minutes(),
+                    cooldown_minutes: self.attempts.policy.cooldown().num_minutes(),
                 }
             }
             Admission::Pending => {
@@ -292,7 +313,7 @@ impl RecoveryService {
                 return LookupResult::DatabaseBusy;
             }
         };
-        let task_ledger = self.ledger.clone();
+        let task_ledger = self.attempts.ledger.clone();
         let task_counters = self.counters.clone();
         let task_id_hash = id_hash.clone();
         let task_candidate = candidate.clone();
@@ -347,7 +368,10 @@ impl RecoveryService {
             Ok(result) => result,
             Err(_) => {
                 if let Some(generation) = generation {
-                    self.ledger.refund(&id_hash, &candidate, generation).await;
+                    self.attempts
+                        .ledger
+                        .refund(&id_hash, &candidate, generation)
+                        .await;
                 }
                 self.counters.database_error();
                 return LookupResult::DatabaseError;
@@ -358,7 +382,7 @@ impl RecoveryService {
                 secret,
                 attempt_status,
                 requested_at,
-                cooldown_minutes: self.cooldown.num_minutes(),
+                cooldown_minutes: self.attempts.policy.cooldown().num_minutes(),
             },
             Err(_) => LookupResult::DatabaseError,
         }

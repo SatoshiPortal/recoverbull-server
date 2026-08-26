@@ -7,9 +7,11 @@ fn test_application_connection_enables_secure_delete() {
         #[diesel(sql_type = diesel::sql_types::Integer)]
         value: i32,
     }
-    let state = crate::env::init();
-    crate::storage::sqlite::try_init_db(state.clone()).unwrap();
-    let mut connection = crate::storage::sqlite::establish_connection(state.database_url).unwrap();
+    let state = crate::app::init();
+    state.storage.initialize().unwrap();
+    let mut connection =
+        crate::storage::sqlite::establish_connection(state.storage.database_url_for_test())
+            .unwrap();
     let value = diesel::sql_query("SELECT secure_delete AS value FROM pragma_secure_delete")
         .get_result::<PragmaValue>(&mut connection)
         .unwrap();
@@ -25,9 +27,11 @@ fn test_application_connection_uses_patched_sqlite_and_wal() {
         #[diesel(sql_type = diesel::sql_types::Text)]
         value: String,
     }
-    let state = crate::env::init();
-    crate::storage::sqlite::try_init_db(state.clone()).unwrap();
-    let mut connection = crate::storage::sqlite::establish_connection(state.database_url).unwrap();
+    let state = crate::app::init();
+    state.storage.initialize().unwrap();
+    let mut connection =
+        crate::storage::sqlite::establish_connection(state.storage.database_url_for_test())
+            .unwrap();
     let version = diesel::sql_query("SELECT sqlite_version() AS value")
         .get_result::<TextValue>(&mut connection)
         .unwrap();

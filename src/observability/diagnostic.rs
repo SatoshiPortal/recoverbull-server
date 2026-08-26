@@ -1,9 +1,5 @@
-use axum::{
-    extract::Request,
-    http::{HeaderValue, Method},
-    middleware::Next,
-    response::Response,
-};
+//! Request diagnostics with privacy-preserving IDs and separate log quotas.
+
 use sha2::{Digest, Sha256};
 use std::{
     sync::{
@@ -13,7 +9,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use crate::{security_counters::SecurityCounters, AppState};
+use crate::observability::{ObservabilityState, SecurityCounters};
 
 static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -98,8 +94,9 @@ pub(crate) fn route_kind(path: &str) -> &'static str {
     }
 }
 
-pub(crate) fn method_kind(method: &Method) -> &'static str {
-    match method.as_str() {
+/// Maps known HTTP methods while collapsing others to `other`.
+pub(crate) fn method_kind(method: &str) -> &'static str {
+    match method {
         "GET" => "GET",
         "POST" => "POST",
         "PUT" => "PUT",
@@ -186,15 +183,15 @@ fn emit(
     }
 }
 
-pub(crate) async fn middleware(state: AppState, mut request: Request, next: Next) -> Response {
-    // A client-supplied value must not reach handlers or influence diagnostics.
-    request.headers_mut().remove("x-request-id");
-    let request_id = request_id();
-    let route = route_kind(request.uri().path());
-    let method = method_kind(request.method());
-    let started = Instant::now();
-    let mut response = next.run(request).await;
-    let status = response.status().as_u16();
+/// Emits one quota-controlled diagnostic event from transport-neutral values.
+pub(crate) fn record(
+    state: &ObservabilityState,
+    request_id: &str,
+    route: &'static str,
+    method: &'static str,
+    status: u16,
+    duration: Duration,
+) {
     let category = status_category(status);
     let class = if category == "server_error" {
         QuotaClass::ServerError
@@ -202,20 +199,16 @@ pub(crate) async fn middleware(state: AppState, mut request: Request, next: Next
         QuotaClass::Detail
     };
     emit(
-        &state.diagnostic_logs,
-        &state.security_counters,
+        &state.log_quota,
+        &state.counters,
         class,
         DiagnosticEvent {
-            request_id: &request_id,
+            request_id,
             route,
             method,
             status,
             category,
-            duration: duration_bucket(started.elapsed()),
+            duration: duration_bucket(duration),
         },
     );
-    if let Ok(value) = HeaderValue::from_str(&request_id) {
-        response.headers_mut().insert("x-request-id", value);
-    }
-    response
 }

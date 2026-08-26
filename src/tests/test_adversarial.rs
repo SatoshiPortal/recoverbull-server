@@ -236,7 +236,7 @@ async fn test_successful_fetch_is_not_refunded() {
         .expect_success()
         .await;
 
-    let map = state.identifier_rate_limit.lock_for_test().await;
+    let map = state.attempts.ledger.lock_for_test().await;
     let info = &map[&identifier_hash(SHA256_111111).unwrap()];
     assert_eq!(info.candidate_count(), 1, "a 200 must not be refunded");
 }
@@ -248,7 +248,7 @@ async fn test_successful_fetch_is_not_refunded() {
 async fn test_429_does_not_consume_budget() {
     let (server, state) = crate::tests::test_server::new_test_server().await;
 
-    for index in 0..state.rate_limit_max_attempts as usize {
+    for index in 0..state.attempts.policy.max_attempts() as usize {
         server
             .post("/fetch")
             .json(&FetchSecret {
@@ -269,16 +269,16 @@ async fn test_429_does_not_consume_budget() {
         .expect_failure()
         .await;
 
-    let map = state.identifier_rate_limit.lock_for_test().await;
+    let map = state.attempts.ledger.lock_for_test().await;
     let info = &map[&identifier_hash(SHA256_111111).unwrap()];
     assert_eq!(
         info.candidate_count(),
-        state.rate_limit_max_attempts,
+        state.attempts.policy.max_attempts(),
         "a 429 must not consume budget"
     );
     assert_eq!(
         info.total_requests,
-        u64::from(state.rate_limit_max_attempts) + 1,
+        u64::from(state.attempts.policy.max_attempts()) + 1,
         "a rejected replay must still increase total_requests"
     );
 }
@@ -289,14 +289,13 @@ async fn test_429_does_not_consume_budget() {
 /// sacrificed to make room.
 #[tokio::test]
 async fn test_full_map_does_not_evict_protected_identifier() {
-    let mut state = crate::env::init();
-    state.rate_limit_max_identifiers = 1;
-    state.recovery_service.set_max_identifiers_for_test(1);
-    crate::storage::sqlite::try_init_db(state.clone()).unwrap();
+    let mut state = crate::app::init();
+    state.recovery.set_max_identifiers_for_test(1);
+    state.storage.initialize().unwrap();
     let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone())).unwrap();
 
     // lock out the first identifier
-    for index in 0..state.rate_limit_max_attempts as usize {
+    for index in 0..state.attempts.policy.max_attempts() as usize {
         server
             .post("/fetch")
             .json(&FetchSecret {
@@ -366,7 +365,7 @@ async fn test_remaining_attempts_relationship() {
     assert_eq!(total, 1);
     assert_eq!(
         remaining,
-        state.rate_limit_max_attempts - total,
+        state.attempts.policy.max_attempts() - total,
         "remaining must equal max - total_attempts"
     );
     assert_eq!(status["total_requests"], 1);
@@ -395,7 +394,7 @@ async fn test_remaining_attempts_relationship() {
     assert_eq!(total, 2);
     assert_eq!(
         remaining,
-        state.rate_limit_max_attempts - total,
+        state.attempts.policy.max_attempts() - total,
         "remaining must equal max - total_attempts"
     );
     assert_eq!(status["total_requests"], 3);
@@ -633,7 +632,7 @@ async fn test_error_responses_leak_no_secret_material() {
     assert!(!body.contains(SHA256_222222));
 
     // drive to 429
-    for index in 1..state.rate_limit_max_attempts as usize {
+    for index in 1..state.attempts.policy.max_attempts() as usize {
         server
             .post("/fetch")
             .json(&FetchSecret {
@@ -907,7 +906,7 @@ async fn test_resets_at_advances_with_each_distinct_candidate() {
 async fn test_429_requested_at_is_the_last_admitted_attempt() {
     let (server, state) = crate::tests::test_server::new_test_server().await;
 
-    for index in 0..state.rate_limit_max_attempts as usize {
+    for index in 0..state.attempts.policy.max_attempts() as usize {
         server
             .post("/fetch")
             .json(&FetchSecret {
@@ -949,9 +948,9 @@ async fn test_expired_entry_disappears_from_snapshot() {
 
     // insert an already-expired entry directly into the map
     {
-        let mut map = state.identifier_rate_limit.lock_for_test().await;
+        let mut map = state.attempts.ledger.lock_for_test().await;
         let expired_at =
-            chrono::Utc::now() - state.rate_limit_cooldown - chrono::Duration::minutes(1);
+            chrono::Utc::now() - state.attempts.policy.cooldown() - chrono::Duration::minutes(1);
         map.insert(
             identifier_hash(SHA256_111111).unwrap(),
             crate::attempts::ledger::RateLimitInfo {
@@ -1038,8 +1037,8 @@ async fn test_info_and_snapshot_collection_started_at_agree() {
     assert_eq!(info_collection, snapshot_collection);
 
     crate::attempts::maintenance::wipe_identifier_rate_limit(
-        &state.identifier_rate_limit,
-        &state.attempts_snapshot,
+        &state.attempts.ledger,
+        &state.attempts.snapshot,
     )
     .await;
     let info = server.get("/info").expect_success().await;
@@ -1146,7 +1145,10 @@ async fn test_lookup_and_store_buckets_are_independent() {
     let (server, state) = crate::tests::test_server::new_test_server().await;
 
     // exhaust the lookup bucket: /fetch is 429 but /store still works
-    *state.lookup_token_bucket.lock().await = crate::rate_limit::TokenBucket::new(0.0, 0.0);
+    state
+        .recovery
+        .set_lookup_bucket_for_test(crate::rate_limit::TokenBucket::new(0.0, 0.0))
+        .await;
     let store = server
         .post("/store")
         .json(&StoreSecret {
@@ -1160,8 +1162,14 @@ async fn test_lookup_and_store_buckets_are_independent() {
 
     // restore the lookup bucket, then exhaust the store bucket: /store is
     // 429 but /fetch still reaches the per-identifier path (401, not 429)
-    *state.lookup_token_bucket.lock().await = crate::rate_limit::TokenBucket::new(100.0, 100.0);
-    *state.store_token_bucket.lock().await = crate::rate_limit::TokenBucket::new(0.0, 0.0);
+    state
+        .recovery
+        .set_lookup_bucket_for_test(crate::rate_limit::TokenBucket::new(100.0, 100.0))
+        .await;
+    state
+        .recovery
+        .set_store_bucket_for_test(crate::rate_limit::TokenBucket::new(0.0, 0.0))
+        .await;
     let fetch = server
         .post("/fetch")
         .json(&FetchSecret {
@@ -1179,7 +1187,10 @@ async fn test_lookup_and_store_buckets_are_independent() {
 async fn test_lookup_bucket_does_not_block_attempts() {
     let (server, state) = crate::tests::test_server::new_test_server().await;
 
-    *state.lookup_token_bucket.lock().await = crate::rate_limit::TokenBucket::new(0.0, 0.0);
+    state
+        .recovery
+        .set_lookup_bucket_for_test(crate::rate_limit::TokenBucket::new(0.0, 0.0))
+        .await;
     let snapshot = server.get("/attempts").expect_success().await;
     assert_eq!(snapshot.status_code(), StatusCode::OK);
 }
@@ -1279,7 +1290,7 @@ async fn test_encrypted_secret_length_boundary() {
     let (server, state) = crate::tests::test_server::new_test_server().await;
 
     // exactly at the limit: accepted
-    let at_limit = "A".repeat(state.secret_max_length);
+    let at_limit = "A".repeat(state.recovery.max_secret_length());
     let response = server
         .post("/store")
         .json(&StoreSecret {
@@ -1291,7 +1302,7 @@ async fn test_encrypted_secret_length_boundary() {
     assert_eq!(response.status_code(), StatusCode::CREATED);
 
     // one valid base64 quantum over the limit: rejected
-    let over_limit = "A".repeat(state.secret_max_length + 4);
+    let over_limit = "A".repeat(state.recovery.max_secret_length() + 4);
     let response = server
         .post("/store")
         .json(&StoreSecret {
@@ -1350,7 +1361,8 @@ async fn test_500_does_not_leak_internals() {
 
     // force every query to fail
     let mut connection =
-        crate::storage::sqlite::establish_connection(state.clone().database_url).unwrap();
+        crate::storage::sqlite::establish_connection(state.storage.database_url_for_test())
+            .unwrap();
     diesel::sql_query("DROP TABLE secret")
         .execute(&mut connection)
         .expect("failed to drop table");
@@ -1372,7 +1384,7 @@ async fn test_500_does_not_leak_internals() {
     assert!(!body.contains("database"), "no database detail: {body}");
 
     // restore for the next test
-    crate::storage::sqlite::try_init_db(state.clone()).unwrap();
+    state.storage.initialize().unwrap();
 }
 
 /// The exact lockout boundary: the max-th attempt is admitted (401), the
@@ -1381,7 +1393,7 @@ async fn test_500_does_not_leak_internals() {
 #[tokio::test]
 async fn test_lockout_boundary_is_exact() {
     let (server, state) = crate::tests::test_server::new_test_server().await;
-    let max = state.rate_limit_max_attempts;
+    let max = state.attempts.policy.max_attempts();
 
     // the first `max` attempts are all admitted (401)
     for i in 0..max as usize {
@@ -1427,10 +1439,17 @@ async fn test_lockout_boundary_is_exact() {
 async fn test_info_is_not_rate_limited() {
     let (server, state) = crate::tests::test_server::new_test_server().await;
 
-    *state.lookup_token_bucket.lock().await = crate::rate_limit::TokenBucket::new(0.0, 0.0);
-    *state.store_token_bucket.lock().await = crate::rate_limit::TokenBucket::new(0.0, 0.0);
     state
-        .attempts_maintenance
+        .recovery
+        .set_lookup_bucket_for_test(crate::rate_limit::TokenBucket::new(0.0, 0.0))
+        .await;
+    state
+        .recovery
+        .set_store_bucket_for_test(crate::rate_limit::TokenBucket::new(0.0, 0.0))
+        .await;
+    state
+        .attempts
+        .maintenance
         .set_bucket_for_test(crate::rate_limit::TokenBucket::new(0.0, 0.0))
         .await;
 
@@ -1574,15 +1593,14 @@ async fn test_resets_at_is_in_the_future_for_active_entry() {
 /// counter stays at 255 — no wrap-around to 0 that would unlock the budget.
 #[tokio::test]
 async fn test_attempts_counter_does_not_overflow_at_u8_max() {
-    let mut state = crate::env::init();
-    state.rate_limit_max_attempts = 255;
-    state.recovery_service.set_max_attempts_for_test(255);
-    crate::storage::sqlite::try_init_db(state.clone()).unwrap();
+    let mut state = crate::app::init();
+    state.recovery.set_max_attempts_for_test(255);
+    state.storage.initialize().unwrap();
     let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone())).unwrap();
 
     // seed the map at 254 so only two requests are needed
     {
-        let mut map = state.identifier_rate_limit.lock_for_test().await;
+        let mut map = state.attempts.ledger.lock_for_test().await;
         map.insert(
             identifier_hash(SHA256_111111).unwrap(),
             crate::attempts::ledger::RateLimitInfo {
@@ -1625,7 +1643,7 @@ async fn test_attempts_counter_does_not_overflow_at_u8_max() {
         .await;
     assert_eq!(response.status_code(), StatusCode::TOO_MANY_REQUESTS);
 
-    let map = state.identifier_rate_limit.lock_for_test().await;
+    let map = state.attempts.ledger.lock_for_test().await;
     assert_eq!(
         map[&identifier_hash(SHA256_111111).unwrap()].candidate_count(),
         255,
@@ -1638,11 +1656,12 @@ async fn test_attempts_counter_does_not_overflow_at_u8_max() {
 /// under concurrency.
 #[tokio::test]
 async fn test_concurrent_attempts_polls_agree_on_etag() {
-    let app_state = crate::env::init();
-    crate::storage::sqlite::try_init_db(app_state.clone()).unwrap();
+    let app_state = crate::app::init();
+    app_state.storage.initialize().unwrap();
     let app = crate::router::new_for_tests(app_state.clone());
     let mut connection =
-        crate::storage::sqlite::establish_connection(app_state.clone().database_url).unwrap();
+        crate::storage::sqlite::establish_connection(app_state.storage.database_url_for_test())
+            .unwrap();
     crate::tests::test_server::clear_table_secret(&mut connection).await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

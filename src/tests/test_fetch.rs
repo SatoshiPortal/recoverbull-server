@@ -1,5 +1,5 @@
 use crate::{
-    models::{FetchSecret, Secret, StoreSecret},
+    models::{FetchSecret, StoreSecret},
     tests::{BASE64_ENCRYPTED_SECRET, SHA256_111111, SHA256_222222, SHA256_CONCAT_111111_222222},
     utils::identifier_hash,
 };
@@ -26,9 +26,9 @@ async fn test_fetch_success() {
 
     assert_eq!(response.status_code(), StatusCode::OK);
 
-    let secret = response.json::<Secret>();
-    assert_eq!(secret.id, SHA256_CONCAT_111111_222222);
-    assert_eq!(secret.encrypted_secret, BASE64_ENCRYPTED_SECRET);
+    let body = response.json::<serde_json::Value>();
+    assert_eq!(body["id"], SHA256_CONCAT_111111_222222);
+    assert_eq!(body["encrypted_secret"], BASE64_ENCRYPTED_SECRET);
 }
 
 #[tokio::test]
@@ -193,10 +193,10 @@ async fn test_fetch_rate_limit_enforced_and_reset_after_cooldown() {
         .expect_success()
         .await;
 
-    let secret = response.json::<Secret>();
+    let body = response.json::<serde_json::Value>();
 
-    assert_eq!(secret.id, SHA256_CONCAT_111111_222222);
-    assert_eq!(secret.encrypted_secret, BASE64_ENCRYPTED_SECRET);
+    assert_eq!(body["id"], SHA256_CONCAT_111111_222222);
+    assert_eq!(body["encrypted_secret"], BASE64_ENCRYPTED_SECRET);
 
     // A successful lookup consumes the first attempt of the new window and
     // must not clear the security counter.

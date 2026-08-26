@@ -1,7 +1,7 @@
 use axum::http::StatusCode;
 
 use crate::{
-    models::{FetchSecret, Secret, StoreSecret},
+    models::{FetchSecret, StoreSecret},
     tests::{BASE64_ENCRYPTED_SECRET, SHA256_111111, SHA256_222222},
 };
 
@@ -52,8 +52,8 @@ async fn test_duplicate_store_is_indistinguishable_and_does_not_overwrite() {
         })
         .expect_success()
         .await
-        .json::<Secret>();
-    assert_eq!(fetched.encrypted_secret, BASE64_ENCRYPTED_SECRET);
+        .json::<serde_json::Value>();
+    assert_eq!(fetched["encrypted_secret"], BASE64_ENCRYPTED_SECRET);
 }
 
 #[tokio::test]

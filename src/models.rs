@@ -3,7 +3,6 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use diesel::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -57,14 +56,6 @@ pub struct StoreSecret {
 pub struct FetchSecret {
     pub identifier: String,
     pub authentication_key: String,
-}
-
-#[derive(Insertable, Serialize, Deserialize, Queryable, Selectable)]
-#[diesel(table_name = crate::schema::secret)]
-pub struct Secret {
-    pub id: String,
-    pub created_at: String,
-    pub encrypted_secret: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

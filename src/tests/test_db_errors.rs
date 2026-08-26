@@ -1,5 +1,6 @@
 use crate::{
-    models::{FetchSecret, Secret},
+    models::FetchSecret,
+    storage::sqlite::Secret,
     tests::{SHA256_111111, SHA256_222222},
     utils::identifier_hash,
 };

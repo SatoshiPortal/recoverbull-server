@@ -3,8 +3,8 @@ use axum::response::{IntoResponse, Response};
 use axum::{http::StatusCode, Json};
 use serde_json::Value;
 
-use crate::models::{error_body, retry_after_response, Secret, StoreSecret};
-use crate::storage::sqlite::establish_connection;
+use crate::models::{error_body, retry_after_response, StoreSecret};
+use crate::storage::sqlite::{establish_connection, Secret};
 use crate::utils::{generate_secret_id, is_256bits_hex_hash, is_base64};
 use crate::AppState;
 

@@ -1,6 +1,7 @@
 mod diagnostic;
 mod env;
 mod handlers;
+mod http;
 mod models;
 mod rate_limit;
 mod router;

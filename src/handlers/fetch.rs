@@ -4,6 +4,7 @@ use axum::{http::StatusCode, Json};
 use serde_json::json;
 use std::collections::HashMap;
 
+use crate::http::contract::LookupSuccessResponse;
 use crate::models::{
     error_body, retry_after_response, AttemptStatus, CandidateState, FetchSecret, RateLimitInfo,
     ResponseFailedAttempt,
@@ -164,7 +165,7 @@ async fn finalize(
     id_hash: &str,
     candidate: &str,
     generation: chrono::DateTime<chrono::Utc>,
-    result: &Result<Option<crate::models::Secret>, FinalizerError>,
+    result: &Result<Option<crate::storage::sqlite::Secret>, FinalizerError>,
 ) {
     let mut map = state.identifier_rate_limit.lock().await;
     let remove_identifier = {
@@ -447,8 +448,12 @@ pub async fn fetch_secret(
             } else {
                 StatusCode::OK
             };
-            let mut body = serde_json::to_value(key).expect("secret is serializable");
-            body["attempt_status"] = json!(attempt_status);
+            let body = LookupSuccessResponse {
+                id: key.id,
+                created_at: key.created_at,
+                encrypted_secret: key.encrypted_secret,
+                attempt_status,
+            };
             (code, Json(body)).into_response()
         }
         None => (

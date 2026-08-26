@@ -1,14 +1,23 @@
 use crate::schema::secret::dsl::*;
 
+use crate::schema::secret::*;
 use crate::AppState;
-use crate::{models::Secret, schema::secret::*};
 
+use diesel::prelude::*;
 use diesel::sql_query;
 use diesel::{
     Connection, ExpressionMethods, OptionalExtension, QueryDsl, QueryableByName, RunQueryDsl,
     SqliteConnection,
 };
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
+
+#[derive(Insertable, Queryable, Selectable)]
+#[diesel(table_name = crate::schema::secret)]
+pub(crate) struct Secret {
+    pub(crate) id: String,
+    pub(crate) created_at: String,
+    pub(crate) encrypted_secret: String,
+}
 
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!();
 const INITIAL_MIGRATION_VERSION: &str = "0001";

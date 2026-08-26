@@ -1,9 +1,9 @@
 use axum::{
-    extract::{DefaultBodyLimit, Request, State},
+    extract::{DefaultBodyLimit, Request},
     middleware::{from_fn, Next},
     response::Response,
     routing::{get, post},
-    Json, Router,
+    Router,
 };
 use std::{
     sync::Arc,
@@ -12,7 +12,6 @@ use std::{
 
 use crate::{
     handlers::{attempts, fetch, info, store},
-    http::contract::FetchSecret,
     AppState,
 };
 
@@ -38,18 +37,8 @@ pub(crate) fn new_with_response_delay(app_state: AppState, response_delay: Durat
 
     let sensitive_routes = Router::new()
         .route("/store", post(store::store_secret))
-        .route(
-            "/fetch",
-            post(|state: State<AppState>, json: Json<FetchSecret>| {
-                fetch::fetch_secret(state, json, false)
-            }),
-        )
-        .route(
-            "/trash",
-            post(|state: State<AppState>, json: Json<FetchSecret>| {
-                fetch::fetch_secret(state, json, true)
-            }),
-        )
+        .route("/fetch", post(fetch::fetch_secret))
+        .route("/trash", post(fetch::trash_secret))
         // route_layer limits this middleware to matched routes. The method
         // check additionally keeps GET/HEAD 405 responses out of the floor.
         .route_layer(from_fn(move |request, next| {

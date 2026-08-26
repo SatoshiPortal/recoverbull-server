@@ -291,6 +291,7 @@ async fn test_429_does_not_consume_budget() {
 async fn test_full_map_does_not_evict_protected_identifier() {
     let mut state = crate::env::init();
     state.rate_limit_max_identifiers = 1;
+    state.recovery_service.set_max_identifiers_for_test(1);
     crate::storage::sqlite::try_init_db(state.clone()).unwrap();
     let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone())).unwrap();
 
@@ -1575,6 +1576,7 @@ async fn test_resets_at_is_in_the_future_for_active_entry() {
 async fn test_attempts_counter_does_not_overflow_at_u8_max() {
     let mut state = crate::env::init();
     state.rate_limit_max_attempts = 255;
+    state.recovery_service.set_max_attempts_for_test(255);
     crate::storage::sqlite::try_init_db(state.clone()).unwrap();
     let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone())).unwrap();
 

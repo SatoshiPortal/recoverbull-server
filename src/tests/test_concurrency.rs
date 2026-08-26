@@ -3,16 +3,14 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 /// Starts the app on a real TCP listener so requests are truly concurrent,
 /// handled in parallel by the multi-threaded runtime.
 async fn spawn_server() -> (std::net::SocketAddr, crate::AppState) {
-    let mut app_state = crate::env::init();
+    let app_state = crate::env::init();
     // Dedicated generous buckets: these tests drive 30-100 requests and must
     // not depend on the environment-provided buckets (code defaults: store
     // burst 10, lookup burst 100) — see SECURITY.md "Test-writing traps".
-    app_state.store_token_bucket = std::sync::Arc::new(tokio::sync::Mutex::new(
-        crate::rate_limit::TokenBucket::new(10_000.0, 10_000.0),
-    ));
-    app_state.lookup_token_bucket = std::sync::Arc::new(tokio::sync::Mutex::new(
-        crate::rate_limit::TokenBucket::new(10_000.0, 10_000.0),
-    ));
+    *app_state.store_token_bucket.lock().await =
+        crate::rate_limit::TokenBucket::new(10_000.0, 10_000.0);
+    *app_state.lookup_token_bucket.lock().await =
+        crate::rate_limit::TokenBucket::new(10_000.0, 10_000.0);
     crate::storage::sqlite::try_init_db(app_state.clone()).unwrap();
     let app = crate::router::new_for_tests(app_state.clone());
 

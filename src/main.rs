@@ -74,6 +74,7 @@ struct AppState {
     attempts_maintenance: attempts::maintenance::AttemptsMaintenanceState,
     rate_limit_max_identifiers: usize,
     database_semaphore: Arc<Semaphore>,
+    recovery_service: recovery::service::RecoveryService,
     attempts_snapshot: attempts::snapshot::AttemptsSnapshotState,
     security_counters: Arc<security_counters::SecurityCounters>,
     diagnostic_logs: Arc<diagnostic::LogQuota>,

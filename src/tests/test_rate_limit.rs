@@ -140,6 +140,7 @@ async fn test_fetch_expires_sub_threshold_entry_after_cooldown() {
 async fn test_new_identifiers_fail_closed_when_rate_limit_map_is_full() {
     let mut state = crate::env::init();
     state.rate_limit_max_identifiers = 1;
+    state.recovery_service.set_max_identifiers_for_test(1);
     crate::storage::sqlite::try_init_db(state.clone()).unwrap();
     let server = axum_test::TestServer::new(crate::router::new_for_tests(state)).unwrap();
 
@@ -166,6 +167,9 @@ async fn test_new_identifiers_fail_closed_when_rate_limit_map_is_full() {
 async fn test_database_concurrency_rejection_refunds_lookup_attempt() {
     let mut state = crate::env::init();
     state.database_semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+    state
+        .recovery_service
+        .set_database_semaphore_for_test(state.database_semaphore.clone());
     crate::storage::sqlite::try_init_db(state.clone()).unwrap();
     let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone())).unwrap();
 
@@ -200,6 +204,9 @@ async fn test_database_concurrency_rejection_refunds_lookup_attempt() {
 async fn test_cancelled_request_does_not_consume_an_attempt() {
     let mut state = crate::env::init();
     state.database_semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+    state
+        .recovery_service
+        .set_database_semaphore_for_test(state.database_semaphore.clone());
     crate::storage::sqlite::try_init_db(state.clone()).unwrap();
 
     let request = FetchSecret {
@@ -219,7 +226,6 @@ async fn test_cancelled_request_does_not_consume_an_attempt() {
         crate::handlers::fetch::fetch_secret(
             axum::extract::State(state.clone()),
             axum::Json(request),
-            false,
         ),
     )
     .await;
@@ -271,10 +277,9 @@ async fn test_cancelled_trash_after_sqlite_start_keeps_attempt_reserved() {
     };
     let outcome = tokio::time::timeout(
         std::time::Duration::from_millis(100),
-        crate::handlers::fetch::fetch_secret(
+        crate::handlers::fetch::trash_secret(
             axum::extract::State(state.clone()),
             axum::Json(request),
-            true,
         ),
     )
     .await;
@@ -392,6 +397,9 @@ async fn test_cancelled_store_after_sqlite_start_counts_once() {
 async fn test_concurrent_cancellation_refunds_every_reservation() {
     let mut state = crate::env::init();
     state.database_semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+    state
+        .recovery_service
+        .set_database_semaphore_for_test(state.database_semaphore.clone());
     crate::storage::sqlite::try_init_db(state.clone()).unwrap();
 
     let request = || FetchSecret {
@@ -408,7 +416,6 @@ async fn test_concurrent_cancellation_refunds_every_reservation() {
                 crate::handlers::fetch::fetch_secret(
                     axum::extract::State(state),
                     axum::Json(request()),
-                    false,
                 ),
             )
             .await
@@ -448,7 +455,6 @@ async fn test_concurrent_cancellation_refunds_every_reservation() {
     let response = crate::handlers::fetch::fetch_secret(
         axum::extract::State(state.clone()),
         axum::Json(request()),
-        false,
     )
     .await;
     assert_eq!(
@@ -467,6 +473,9 @@ async fn test_concurrent_cancellation_refunds_every_reservation() {
 async fn test_deferred_refund_runs_when_drop_finds_the_lock_contended() {
     let mut state = crate::env::init();
     state.database_semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+    state
+        .recovery_service
+        .set_database_semaphore_for_test(state.database_semaphore.clone());
     crate::storage::sqlite::try_init_db(state.clone()).unwrap();
 
     let request = FetchSecret {
@@ -478,7 +487,6 @@ async fn test_deferred_refund_runs_when_drop_finds_the_lock_contended() {
         crate::handlers::fetch::fetch_secret(
             axum::extract::State(handler_state),
             axum::Json(request),
-            false,
         )
         .await;
     });

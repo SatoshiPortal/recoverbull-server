@@ -72,6 +72,9 @@ async fn test_handlers_return_generic_500_when_connection_setup_fails() {
     let mut state = crate::env::init();
     crate::storage::sqlite::try_init_db(state.clone()).unwrap();
     state.database_url = "/path/that/does/not/exist/recoverbull.sqlite3".to_owned();
+    state
+        .recovery_service
+        .set_database_url_for_test(state.database_url.clone());
     let server = axum_test::TestServer::new(crate::router::new(state.clone())).unwrap();
 
     let store = server

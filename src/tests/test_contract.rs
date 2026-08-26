@@ -404,6 +404,7 @@ async fn test_503_responses_have_no_machine_code() {
     // identifier cannot get a slot.
     let mut state = crate::env::init();
     state.rate_limit_max_identifiers = 1;
+    state.recovery_service.set_max_identifiers_for_test(1);
     crate::storage::sqlite::try_init_db(state.clone()).unwrap();
     let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone())).unwrap();
 
@@ -434,6 +435,9 @@ async fn test_503_responses_have_no_machine_code() {
     // database busy: block the concurrency semaphore.
     let mut state = crate::env::init();
     state.database_semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+    state
+        .recovery_service
+        .set_database_semaphore_for_test(state.database_semaphore.clone());
     crate::storage::sqlite::try_init_db(state.clone()).unwrap();
     let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone())).unwrap();
 

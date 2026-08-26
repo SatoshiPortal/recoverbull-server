@@ -319,6 +319,37 @@ pub fn init() -> AppState {
         std::process::exit(1);
     }
 
+    let identifier_rate_limit = crate::attempts::ledger::AttemptsLedgerState::new();
+    let store_token_bucket = Arc::new(Mutex::new(crate::rate_limit::TokenBucket::new(
+        store_rate_limit_burst,
+        store_rate_limit_refill,
+    )));
+    let lookup_token_bucket = Arc::new(Mutex::new(crate::rate_limit::TokenBucket::new(
+        lookup_rate_limit_burst,
+        lookup_rate_limit_refill,
+    )));
+    let database_semaphore = Arc::new(Semaphore::new(database_max_concurrency));
+    #[cfg(test)]
+    let test_guard_for_service = test_database_guard.clone();
+    let storage = crate::storage::sqlite::SqliteStorage::new(
+        database_url.clone(),
+        database_semaphore.clone(),
+        #[cfg(test)]
+        test_guard_for_service,
+    );
+    let security_counters = Arc::new(crate::security_counters::SecurityCounters::default());
+    let recovery_service = crate::recovery::service::RecoveryService::new(
+        store_token_bucket.clone(),
+        lookup_token_bucket.clone(),
+        identifier_rate_limit.clone(),
+        storage,
+        security_counters.clone(),
+        secret_max_length,
+        Duration::minutes(rate_limit_cooldown as i64),
+        rate_limit_max_attempts,
+        rate_limit_max_identifiers,
+    );
+
     AppState {
         server_address: server_addr,
         database_url,
@@ -329,27 +360,22 @@ pub fn init() -> AppState {
         canary_path: dotenv_path.unwrap_or_else(|| std::path::PathBuf::from(".env")),
         canary_read_semaphore: Arc::new(Semaphore::new(1)),
         rate_limit_cooldown: Duration::minutes(rate_limit_cooldown as i64),
-        identifier_rate_limit: crate::attempts::ledger::AttemptsLedgerState::new(),
+        identifier_rate_limit,
         secret_max_length,
         rate_limit_max_attempts,
-        store_token_bucket: Arc::new(Mutex::new(crate::rate_limit::TokenBucket::new(
-            store_rate_limit_burst,
-            store_rate_limit_refill,
-        ))),
-        lookup_token_bucket: Arc::new(Mutex::new(crate::rate_limit::TokenBucket::new(
-            lookup_rate_limit_burst,
-            lookup_rate_limit_refill,
-        ))),
+        store_token_bucket,
+        lookup_token_bucket,
         attempts_maintenance: crate::attempts::maintenance::AttemptsMaintenanceState::new(
             attempts_rate_limit_burst,
             attempts_rate_limit_refill,
         ),
         rate_limit_max_identifiers,
-        database_semaphore: Arc::new(Semaphore::new(database_max_concurrency)),
+        database_semaphore,
+        recovery_service,
         attempts_snapshot: crate::attempts::snapshot::AttemptsSnapshotState::new(
             std::time::Duration::from_secs(attempts_snapshot_ttl_seconds),
         ),
-        security_counters: Arc::new(crate::security_counters::SecurityCounters::default()),
+        security_counters,
         diagnostic_logs: crate::diagnostic::new_quota(),
     }
 }

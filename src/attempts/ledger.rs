@@ -296,11 +296,12 @@ impl ReservationGuard {
             self.state
                 .refund(&self.id_hash, &self.candidate, self.generation)
                 .await;
-            self.disarm();
+            self.armed = false;
         }
     }
 
-    pub(crate) fn disarm(&mut self) {
+    /// Transfers finalization responsibility and consumes the guard.
+    pub(crate) fn transfer(mut self) {
         self.armed = false;
     }
 }

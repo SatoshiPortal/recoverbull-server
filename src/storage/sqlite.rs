@@ -2,6 +2,8 @@ use crate::schema::secret::dsl::*;
 
 use crate::schema::secret::*;
 use crate::AppState;
+use std::sync::Arc;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use diesel::prelude::*;
 use diesel::sql_query;
@@ -17,6 +19,133 @@ pub(crate) struct Secret {
     pub(crate) id: String,
     pub(crate) created_at: String,
     pub(crate) encrypted_secret: String,
+}
+
+#[derive(Clone)]
+/// Concrete database runtime; recovery receives only opaque operations.
+pub(crate) struct SqliteStorage {
+    database_url: String,
+    database_semaphore: Arc<Semaphore>,
+    #[cfg(test)]
+    test_database_guard: Arc<crate::env::TestDatabaseGuard>,
+}
+
+/// Opaque lease transferred to a blocking worker; its permit is held until
+/// the synchronous operation returns.
+pub(crate) struct SqliteOperation {
+    database_url: String,
+    permit: OwnedSemaphorePermit,
+    #[cfg(test)]
+    test_database_guard: Arc<crate::env::TestDatabaseGuard>,
+}
+
+#[derive(Clone)]
+pub(crate) struct NewStoredSecret {
+    pub(crate) id: String,
+    pub(crate) created_at: String,
+    pub(crate) encrypted_secret: String,
+}
+
+#[derive(Clone)]
+/// Non-Diesel value returned across the storage/recovery boundary.
+pub(crate) struct StoredSecret {
+    pub(crate) id: String,
+    pub(crate) created_at: String,
+    pub(crate) encrypted_secret: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Opaque storage failure categories safe for domain and HTTP mapping.
+pub(crate) enum StorageError {
+    Connection,
+    Database,
+}
+
+impl SqliteStorage {
+    pub(crate) fn new(
+        database_url: String,
+        database_semaphore: Arc<Semaphore>,
+        #[cfg(test)] test_database_guard: Arc<crate::env::TestDatabaseGuard>,
+    ) -> Self {
+        Self {
+            database_url,
+            database_semaphore,
+            #[cfg(test)]
+            test_database_guard,
+        }
+    }
+
+    pub(crate) async fn acquire(&self) -> Result<SqliteOperation, StorageError> {
+        let permit = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            self.database_semaphore.clone().acquire_owned(),
+        )
+        .await
+        .map_err(|_| StorageError::Connection)?
+        .map_err(|_| StorageError::Connection)?;
+        Ok(SqliteOperation {
+            database_url: self.database_url.clone(),
+            permit,
+            #[cfg(test)]
+            test_database_guard: self.test_database_guard.clone(),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_semaphore_for_test(&mut self, semaphore: Arc<Semaphore>) {
+        self.database_semaphore = semaphore;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_database_url_for_test(&mut self, database_url: String) {
+        self.database_url = database_url;
+    }
+}
+
+impl SqliteOperation {
+    pub(crate) fn store(self, new_secret: NewStoredSecret) -> Result<(), StorageError> {
+        let _permit = self.permit;
+        #[cfg(test)]
+        let _test_database_guard = self.test_database_guard;
+        let mut connection =
+            establish_connection(self.database_url).map_err(|_| StorageError::Connection)?;
+        write(
+            &mut connection,
+            &Secret {
+                id: new_secret.id,
+                created_at: new_secret.created_at,
+                encrypted_secret: new_secret.encrypted_secret,
+            },
+        )
+        .map_err(|_| StorageError::Database)
+    }
+
+    pub(crate) fn fetch(self, secret_id: String) -> Result<Option<StoredSecret>, StorageError> {
+        self.lookup(secret_id, false)
+    }
+
+    pub(crate) fn trash(self, secret_id: String) -> Result<Option<StoredSecret>, StorageError> {
+        self.lookup(secret_id, true)
+    }
+
+    fn lookup(self, secret_id: String, trash: bool) -> Result<Option<StoredSecret>, StorageError> {
+        let _permit = self.permit;
+        #[cfg(test)]
+        let _test_database_guard = self.test_database_guard;
+        let mut connection =
+            establish_connection(self.database_url).map_err(|_| StorageError::Connection)?;
+        let row = if trash {
+            read_and_trash_secret_by_id(&mut connection, &secret_id)
+        } else {
+            read_secret_by_id(&mut connection, &secret_id)
+        }
+        .map_err(|_| StorageError::Database)?;
+        Ok(row.map(|row| StoredSecret {
+            id: row.id,
+            created_at: row.created_at,
+            encrypted_secret: row.encrypted_secret,
+        }))
+    }
 }
 
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!();

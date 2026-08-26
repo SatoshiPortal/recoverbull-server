@@ -27,10 +27,9 @@ async fn wait_for_attempts(state: &crate::AppState, expected: u8) {
 }
 
 async fn trash(state: crate::AppState, authentication_key: &str) -> StatusCode {
-    crate::handlers::fetch::fetch_secret(
+    crate::handlers::fetch::trash_secret(
         axum::extract::State(state),
         axum::Json(fetch(SHA256_111111, authentication_key)),
-        true,
     )
     .await
     .status()
@@ -244,6 +243,7 @@ async fn test_pending_duplicate_trash_is_rejected_without_a_second_reservation()
     // a membership oracle. Once the budget is full, every candidate — known
     // or unknown, Pending or Committed — must receive the same 429.
     state.rate_limit_max_attempts = 3;
+    state.recovery_service.set_max_attempts_for_test(3);
 
     let mut lock_connection =
         crate::storage::sqlite::establish_connection(state.database_url.clone()).unwrap();

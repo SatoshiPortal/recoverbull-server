@@ -226,7 +226,9 @@ async fn test_store_is_not_counted_in_attempts() {
     // a zero snapshot TTL forces a rebuild on every poll, so the test sees
     // fresh state at each step instead of the first cached snapshot
     let mut state = crate::env::init();
-    state.attempts_snapshot_ttl = std::time::Duration::ZERO;
+    state
+        .attempts_snapshot
+        .set_ttl_for_test(std::time::Duration::ZERO);
     crate::storage::sqlite::try_init_db(state.clone()).unwrap();
     let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone())).unwrap();
 

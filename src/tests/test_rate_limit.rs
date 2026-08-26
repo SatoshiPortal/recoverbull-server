@@ -12,7 +12,7 @@ use std::time::Duration;
 async fn test_global_wipe_clears_candidates_resets_timestamp_and_snapshot() {
     let (server, state) = crate::tests::test_server::new_test_server().await;
     server.get("/attempts").expect_success().await;
-    let before = *state.attempts_collection_started_at.lock().await;
+    let before = state.attempts_snapshot.collection_started_at().await;
     {
         let mut map = state.identifier_rate_limit.lock_for_test().await;
         let mut info = RateLimitInfo::new(chrono::Utc::now());
@@ -22,8 +22,8 @@ async fn test_global_wipe_clears_candidates_resets_timestamp_and_snapshot() {
     }
     crate::rate_limit::wipe_identifier_rate_limit(&state).await;
     assert!(state.identifier_rate_limit.lock_for_test().await.is_empty());
-    assert!(state.attempts_snapshot.lock().await.is_none());
-    assert!(*state.attempts_collection_started_at.lock().await > before);
+    assert!(!state.attempts_snapshot.is_cached_for_test().await);
+    assert!(state.attempts_snapshot.collection_started_at().await > before);
 }
 
 #[test]

@@ -1,19 +1,13 @@
-use std::{io::Write, sync::Arc};
-
+use crate::{
+    http::error::{error_body, retry_after_response},
+    AppState,
+};
 use axum::{
-    body::{Body, Bytes},
+    body::Body,
     extract::State,
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
-};
-use flate2::{write::GzEncoder, Compression};
-
-use crate::{
-    attempts::snapshot::{truncate_to_hour, AttemptEntry, AttemptsSnapshot},
-    digest::sha256_hex,
-    http::error::{error_body, retry_after_response},
-    AppState, AttemptsSnapshotCache,
 };
 
 /// Small fixed advisory backoff for the global attempts-telemetry bucket:
@@ -49,13 +43,19 @@ pub async fn get_attempts(State(state): State<AppState>, headers: HeaderMap) -> 
         }
     }
 
-    let snapshot = match snapshot_for_request(&state).await {
+    let snapshot = match state
+        .attempts_snapshot
+        .snapshot_for_request(&state.identifier_rate_limit, state.rate_limit_cooldown)
+        .await
+    {
         Ok(snapshot) => snapshot,
-        Err(response) => return *response,
+        Err(()) => return *internal_error(),
     };
     let etag = snapshot.etag.clone();
-    let body = snapshot.gzip_body.as_ref().clone();
-    let max_age = remaining_max_age(snapshot.created_at, state.attempts_snapshot_ttl);
+    let body = axum::body::Bytes::from_owner(snapshot.gzip_body.clone());
+    let max_age = state
+        .attempts_snapshot
+        .remaining_max_age(snapshot.created_at);
 
     let not_modified = headers
         .get(header::IF_NONE_MATCH)
@@ -92,43 +92,6 @@ pub async fn get_attempts(State(state): State<AppState>, headers: HeaderMap) -> 
     response
 }
 
-async fn snapshot_for_request(state: &AppState) -> Result<AttemptsSnapshotCache, Box<Response>> {
-    {
-        let cached = state.attempts_snapshot.lock().await;
-        if let Some(snapshot) = cached.as_ref() {
-            if snapshot.created_at.elapsed() < state.attempts_snapshot_ttl {
-                return Ok(snapshot.clone());
-            }
-        }
-    }
-
-    let mut build_slot = state.attempts_snapshot_build.lock().await;
-    let mut receiver = if let Some(receiver) = build_slot.as_ref() {
-        receiver.clone()
-    } else {
-        let (sender, receiver) = tokio::sync::watch::channel(None);
-        *build_slot = Some(receiver.clone());
-        let worker_state = state.clone();
-        tokio::spawn(async move {
-            let result = build_snapshot(&worker_state).await.map_err(|_| ());
-            if let Ok(snapshot) = &result {
-                *worker_state.attempts_snapshot.lock().await = Some(snapshot.clone());
-            }
-            let _ = sender.send(Some(result));
-            *worker_state.attempts_snapshot_build.lock().await = None;
-        });
-        receiver
-    };
-    drop(build_slot);
-
-    receiver.changed().await.map_err(|_| internal_error())?;
-    let result = receiver.borrow().clone();
-    match result {
-        Some(Ok(snapshot)) => Ok(snapshot),
-        Some(Err(())) | None => Err(internal_error()),
-    }
-}
-
 fn internal_error() -> Box<Response> {
     Box::new(
         (
@@ -137,89 +100,4 @@ fn internal_error() -> Box<Response> {
         )
             .into_response(),
     )
-}
-
-/// Collects the current entries under the rate-limit lock, then serializes
-/// and compresses on a blocking thread after releasing it. flate2 writes a
-/// zero mtime in the gzip header, so identical content produces identical
-/// bytes and a stable ETag across rebuilds.
-async fn build_snapshot(state: &AppState) -> Result<AttemptsSnapshotCache, Box<Response>> {
-    #[cfg(test)]
-    {
-        use std::sync::atomic::Ordering;
-
-        state
-            .attempts_build_probe
-            .started
-            .fetch_add(1, Ordering::SeqCst);
-        state.attempts_build_probe.started_notify.notify_one();
-        if state.attempts_build_probe.hold.load(Ordering::SeqCst)
-            && !state.attempts_build_probe.released.load(Ordering::SeqCst)
-        {
-            state.attempts_build_probe.release.notified().await;
-        }
-    }
-    let now = chrono::Utc::now();
-    state
-        .identifier_rate_limit
-        .retain_active(now, state.rate_limit_cooldown)
-        .await;
-    let mut entries: Vec<AttemptEntry> = state
-        .identifier_rate_limit
-        .snapshot_entries()
-        .await
-        .into_iter()
-        .map(|(id_hash, info)| AttemptEntry {
-            id_hash: id_hash.clone(),
-            total_attempts: info.candidate_count(),
-            failed_attempts: info.failed_candidates,
-            total_requests: info.total_requests,
-            window_started_at: truncate_to_hour(info.window_started_at),
-            last_attempt_at: truncate_to_hour(info.last_candidate_at),
-        })
-        .collect();
-
-    // Sorting happens after the lock guard above goes out of scope: this is
-    // the same `identifier_rate_limit` mutex that every `/fetch` and
-    // `/trash` request must acquire to reserve an attempt, so holding it
-    // through an O(n log n) sort over up to 100k entries would inject
-    // latency into that user-facing recovery path on every TTL window.
-    // Deterministic ordering (identical activity must produce identical
-    // bytes so the ETag only changes when the activity does) does not
-    // require the lock, only a stable snapshot of the data.
-    entries.sort_by(|a, b| a.id_hash.cmp(&b.id_hash));
-
-    let collection_started_at = *state.attempts_collection_started_at.lock().await;
-    let payload = AttemptsSnapshot {
-        version: 1,
-        collection_started_at: truncate_to_hour(collection_started_at),
-        entries,
-    };
-
-    let built = tokio::task::spawn_blocking(move || -> std::io::Result<AttemptsSnapshotCache> {
-        let raw = serde_json::to_vec(&payload).expect("attempts snapshot is serializable");
-        let mut encoder = GzEncoder::new(Vec::new(), Compression::new(6));
-        encoder.write_all(&raw)?;
-        let gzip = encoder.finish()?;
-        Ok(AttemptsSnapshotCache {
-            etag: format!("\"{}\"", sha256_hex(&gzip)),
-            gzip_body: Arc::new(Bytes::from(gzip)),
-            created_at: std::time::Instant::now(),
-        })
-    })
-    .await;
-
-    match built {
-        Ok(Ok(snapshot)) => Ok(snapshot),
-        Ok(Err(_error)) => Err(internal_error()),
-        Err(_error) => Err(internal_error()),
-    }
-}
-
-/// Remaining snapshot freshness, rounded up to the next second so clients
-/// never cache past the rebuild. Never zero: a zero max-age would let some
-/// caches treat the body as immediately stale and hammer the origin.
-fn remaining_max_age(created_at: std::time::Instant, ttl: std::time::Duration) -> u64 {
-    let remaining = ttl.saturating_sub(created_at.elapsed());
-    (remaining.as_secs() + u64::from(remaining.subsec_nanos() > 0)).max(1)
 }

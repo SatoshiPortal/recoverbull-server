@@ -14,10 +14,8 @@ mod storage;
 #[cfg(test)]
 mod tests;
 
-use std::{future::IntoFuture, sync::Arc, time::Instant};
-
-use axum::body::Bytes;
 use chrono::TimeDelta;
+use std::{future::IntoFuture, sync::Arc};
 use tokio::sync::{Mutex, Semaphore};
 
 const APP_GRACE_PERIOD: std::time::Duration = std::time::Duration::from_secs(35);
@@ -51,40 +49,6 @@ where
     }
 }
 
-/// Immutable `/attempts` representation: serialized and compressed at most
-/// once per TTL window, then shared by every response without copying.
-#[derive(Clone)]
-struct AttemptsSnapshotCache {
-    gzip_body: Arc<Bytes>,
-    etag: String,
-    created_at: Instant,
-}
-
-type AttemptsBuildReceiver =
-    tokio::sync::watch::Receiver<Option<Result<AttemptsSnapshotCache, ()>>>;
-
-#[cfg(test)]
-struct AttemptsBuildProbe {
-    started: std::sync::atomic::AtomicUsize,
-    hold: std::sync::atomic::AtomicBool,
-    released: std::sync::atomic::AtomicBool,
-    started_notify: tokio::sync::Notify,
-    release: tokio::sync::Notify,
-}
-
-#[cfg(test)]
-impl Default for AttemptsBuildProbe {
-    fn default() -> Self {
-        Self {
-            started: std::sync::atomic::AtomicUsize::new(0),
-            hold: std::sync::atomic::AtomicBool::new(false),
-            released: std::sync::atomic::AtomicBool::new(false),
-            started_notify: tokio::sync::Notify::new(),
-            release: tokio::sync::Notify::new(),
-        }
-    }
-}
-
 #[derive(Clone)]
 struct AppState {
     server_address: String,
@@ -110,12 +74,7 @@ struct AppState {
     attempts_token_bucket: Arc<Mutex<rate_limit::TokenBucket>>,
     rate_limit_max_identifiers: usize,
     database_semaphore: Arc<Semaphore>,
-    attempts_collection_started_at: Arc<Mutex<chrono::DateTime<chrono::Utc>>>,
-    attempts_snapshot: Arc<Mutex<Option<AttemptsSnapshotCache>>>,
-    attempts_snapshot_build: Arc<Mutex<Option<AttemptsBuildReceiver>>>,
-    #[cfg(test)]
-    attempts_build_probe: Arc<AttemptsBuildProbe>,
-    attempts_snapshot_ttl: std::time::Duration,
+    attempts_snapshot: attempts::snapshot::AttemptsSnapshotState,
     security_counters: Arc<security_counters::SecurityCounters>,
     diagnostic_logs: Arc<diagnostic::LogQuota>,
 }

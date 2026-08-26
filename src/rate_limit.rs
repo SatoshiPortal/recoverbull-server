@@ -48,13 +48,10 @@ pub const PRODUCTION_GLOBAL_WIPE_INTERVAL: std::time::Duration =
 /// Clears all identifiers and candidate tags and starts a fresh collection.
 /// The lock order is shared with `/attempts`: snapshot, map, timestamp.
 pub async fn wipe_identifier_rate_limit(state: &AppState) {
-    let mut snapshot = state.attempts_snapshot.lock().await;
     let count = state
-        .identifier_rate_limit
-        .clear_and_reset_collection(&state.attempts_collection_started_at, chrono::Utc::now())
+        .attempts_snapshot
+        .clear_and_reset_collection(&state.identifier_rate_limit, chrono::Utc::now())
         .await;
-    *snapshot = None;
-    drop(snapshot);
     tracing::info!(target: "security", count, "daily telemetry wipe completed");
 }
 

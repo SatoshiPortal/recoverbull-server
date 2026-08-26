@@ -228,7 +228,9 @@ async fn test_attempts_snapshot_etag_and_conditional_requests() {
 async fn test_attempts_snapshot_rebuild_is_deterministic() {
     let mut state = crate::env::init();
     // force a rebuild on every request
-    state.attempts_snapshot_ttl = std::time::Duration::ZERO;
+    state
+        .attempts_snapshot
+        .set_ttl_for_test(std::time::Duration::ZERO);
     crate::storage::sqlite::try_init_db(state.clone()).unwrap();
     let server = axum_test::TestServer::new(crate::router::new_for_tests(state)).unwrap();
 
@@ -256,9 +258,12 @@ async fn test_attempts_snapshot_rebuild_is_deterministic() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_cancelled_attempts_request_keeps_single_rebuild_in_flight() {
     let (_server, mut state) = crate::tests::test_server::new_test_server().await;
-    state.attempts_snapshot_ttl = std::time::Duration::ZERO;
     state
-        .attempts_build_probe
+        .attempts_snapshot
+        .set_ttl_for_test(std::time::Duration::ZERO);
+    state
+        .attempts_snapshot
+        .probe()
         .hold
         .store(true, Ordering::SeqCst);
     let first_state = state.clone();
@@ -271,7 +276,7 @@ async fn test_cancelled_attempts_request_keeps_single_rebuild_in_flight() {
     });
     tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        state.attempts_build_probe.started_notify.notified(),
+        state.attempts_snapshot.probe().started_notify.notified(),
     )
     .await
     .expect("snapshot worker did not start within 5 seconds");
@@ -286,16 +291,21 @@ async fn test_cancelled_attempts_request_keeps_single_rebuild_in_flight() {
         .await
     });
     state
-        .attempts_build_probe
+        .attempts_snapshot
+        .probe()
         .released
         .store(true, Ordering::SeqCst);
-    state.attempts_build_probe.release.notify_one();
+    state.attempts_snapshot.probe().release.notify_one();
     let response = tokio::time::timeout(std::time::Duration::from_secs(5), second)
         .await
         .expect("joined snapshot request did not complete within 5 seconds")
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let builds_started = state.attempts_build_probe.started.load(Ordering::SeqCst);
+    let builds_started = state
+        .attempts_snapshot
+        .probe()
+        .started
+        .load(Ordering::SeqCst);
     assert_eq!(
         builds_started, 1,
         "the second request must join the rebuild started by the cancelled request"

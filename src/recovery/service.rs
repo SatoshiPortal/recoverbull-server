@@ -19,18 +19,24 @@ use tokio::sync::Mutex;
 
 /// Primitive store input crossing the HTTP/recovery boundary.
 pub(crate) struct StoreCommand {
+    /// HTTP identifier, canonicalized before admission.
     pub(crate) identifier: String,
+    /// HTTP authentication key, canonicalized before derivation.
     pub(crate) authentication_key: String,
+    /// Base64-encoded encrypted payload; `created_at` is generated internally.
     pub(crate) encrypted_secret: String,
 }
 
 /// Primitive lookup input crossing the HTTP/recovery boundary.
 pub(crate) struct LookupCommand {
+    /// HTTP identifier supplied for candidate derivation.
     pub(crate) identifier: String,
+    /// HTTP authentication key supplied for candidate derivation.
     pub(crate) authentication_key: String,
 }
 
 #[derive(Clone, Copy)]
+/// Selects read-only fetch or transactional destructive trash semantics.
 pub(crate) enum LookupKind {
     Fetch,
     /// Destructive lookup: the storage operation reads and deletes in one transaction.
@@ -38,17 +44,27 @@ pub(crate) enum LookupKind {
 }
 
 pub(crate) enum StoreResult {
+    /// The secret was accepted and written idempotently.
     Stored,
+    /// Input failed validation, with a client-safe explanation.
     Invalid(String),
+    /// The global store bucket had no token.
     GlobalOverload,
+    /// A database lease could not be acquired before its deadline.
     DatabaseBusy,
+    /// The detached database operation failed.
     DatabaseError,
 }
 
+/// Domain outcomes mapped by handlers to deliberately coarse HTTP responses.
 pub(crate) enum LookupResult {
+    /// Input failed canonical hash validation.
     Invalid,
+    /// The global lookup bucket had no token.
     GlobalOverload,
+    /// The identifier map reached its configured capacity.
     Capacity,
+    /// An identical candidate is currently being processed.
     Pending,
     RateLimited {
         count: u8,
@@ -59,9 +75,13 @@ pub(crate) enum LookupResult {
     DatabaseBusy,
     DatabaseError,
     Completed {
+        /// Secret when credentials matched; `None` is a uniform miss.
         secret: Option<StoredSecret>,
+        /// Attempt counters for the current candidate window.
         attempt_status: AttemptStatus,
+        /// Time at which this lookup was admitted.
         requested_at: DateTime<Utc>,
+        /// Configured retry window in minutes.
         cooldown_minutes: i64,
     },
 }
@@ -79,6 +99,7 @@ pub(crate) struct RecoveryService {
 }
 
 impl RecoveryService {
+    /// Builds recovery owners while keeping Axum and Diesel at their boundaries.
     pub(crate) fn new(
         config: RecoveryConfig,
         attempts: AttemptsState,
@@ -101,6 +122,8 @@ impl RecoveryService {
         }
     }
 
+    /// Validates and canonicalizes a store command, applies the global write
+    /// limit, and transfers an opaque storage lease to blocking work.
     pub(crate) async fn store(&self, request: StoreCommand) -> StoreResult {
         let authentication_key = request.authentication_key.to_lowercase();
         let identifier = request.identifier.to_lowercase();
@@ -135,6 +158,9 @@ impl RecoveryService {
             created_at: Utc::now().to_rfc3339(),
             encrypted_secret,
         };
+        // Validation and global admission precede the database lease. Once the
+        // lease is moved into the detached worker, cancellation cannot abandon
+        // the operation or its accounting.
         let operation = match self.storage.acquire().await {
             Ok(operation) => operation,
             Err(_) => {
@@ -171,16 +197,19 @@ impl RecoveryService {
     }
 
     #[cfg(test)]
+    /// Test-only map-capacity seam; excluded from release builds.
     pub(crate) fn set_max_identifiers_for_test(&mut self, max: usize) {
         self.attempts.policy.set_max_identifiers_for_test(max);
     }
 
     #[cfg(test)]
+    /// Test-only attempt-limit seam; excluded from release builds.
     pub(crate) fn set_max_attempts_for_test(&mut self, max: u8) {
         self.attempts.policy.set_max_attempts_for_test(max);
     }
 
     #[cfg(test)]
+    /// Test-only database semaphore seam; excluded from release builds.
     pub(crate) fn set_database_semaphore_for_test(
         &mut self,
         semaphore: Arc<tokio::sync::Semaphore>,
@@ -189,32 +218,40 @@ impl RecoveryService {
     }
 
     #[cfg(test)]
+    /// Test-only database URL seam; excluded from release builds.
     pub(crate) fn set_database_url_for_test(&mut self, database_url: String) {
         self.storage.set_database_url_for_test(database_url);
     }
     #[cfg(test)]
+    /// Test-only semaphore observation seam; excluded from release builds.
     pub(crate) fn database_semaphore_for_test(&self) -> Arc<tokio::sync::Semaphore> {
         self.storage.database_semaphore_for_test()
     }
     #[cfg(test)]
+    /// Test-only initialization seam; excluded from release builds.
     pub(crate) fn initialize_for_test(
         &self,
     ) -> Result<(), crate::storage::sqlite::ConnectionSetupError> {
         self.storage.initialize()
     }
     #[cfg(test)]
+    /// Test-only store-bucket seam; excluded from release builds.
     pub(crate) async fn set_store_bucket_for_test(&self, bucket: TokenBucket) {
         *self.store_bucket.lock().await = bucket;
     }
     #[cfg(test)]
+    /// Test-only lookup-bucket seam; excluded from release builds.
     pub(crate) async fn set_lookup_bucket_for_test(&self, bucket: TokenBucket) {
         *self.lookup_bucket.lock().await = bucket;
     }
     #[cfg(test)]
+    /// Test-only configuration observation seam; excluded from release builds.
     pub(crate) fn max_secret_length(&self) -> usize {
         self.max_secret_length
     }
 
+    /// Admits a fetch or trash candidate and returns a transport-neutral
+    /// outcome after bounded storage work and ledger finalization.
     pub(crate) async fn lookup(&self, request: LookupCommand, kind: LookupKind) -> LookupResult {
         let identifier = request.identifier.to_lowercase();
         let authentication_key = request.authentication_key.to_lowercase();
@@ -228,6 +265,8 @@ impl RecoveryService {
         let id_hash = identifier_hash(&identifier).expect("validated hex identifier");
         let candidate = generate_secret_id(&identifier, &authentication_key);
         let requested_at = Utc::now();
+        // Lookup proceeds through global throttling, ledger admission, a
+        // bounded SQLite lease, then generation finalization and counters.
         let admission = self
             .attempts
             .ledger
@@ -303,6 +342,8 @@ impl RecoveryService {
             Some(value) => (Some(value.0), Some(value.1)),
             None => (None, None),
         };
+        // A detached task receives both the opaque permit and reservation
+        // finalization responsibility; only its JoinHandle is awaited here.
         let operation = match self.storage.acquire().await {
             Ok(operation) => operation,
             Err(_) => {

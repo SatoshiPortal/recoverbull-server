@@ -8,6 +8,7 @@ use tokio::sync::Mutex;
 use tokio::sync::MutexGuard;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+/// Lifecycle of a derived candidate in the admission state machine.
 pub(crate) enum CandidateState {
     Pending,
     Committed,
@@ -18,6 +19,7 @@ pub(crate) enum CandidateState {
 pub(crate) type CandidateTag = String;
 
 #[derive(Clone)]
+/// Per-identifier counters and candidate states retained during cooldown.
 pub(crate) struct RateLimitInfo {
     pub(crate) window_started_at: DateTime<Utc>,
     pub(crate) last_candidate_at: DateTime<Utc>,
@@ -28,6 +30,7 @@ pub(crate) struct RateLimitInfo {
 }
 
 impl RateLimitInfo {
+    /// Starts an empty window at `now`.
     pub(crate) fn new(now: DateTime<Utc>) -> Self {
         Self {
             window_started_at: now,
@@ -54,12 +57,14 @@ pub(crate) struct AttemptsLedgerState {
 }
 
 #[derive(Clone, Copy)]
+/// Database result used to finalize or refund a pending reservation.
 pub(crate) enum LookupOutcome {
     Hit,
     Miss,
     Error,
 }
 
+/// Result of ordered identifier/candidate admission under the ledger lock.
 pub(crate) enum Admission {
     New {
         status: AttemptStatus,
@@ -79,12 +84,15 @@ pub(crate) enum Admission {
 }
 
 impl AttemptsLedgerState {
+    /// Creates an empty ledger.
     pub(crate) fn new() -> Self {
         Self {
             map: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
+    /// Performs expiry, capacity, request accounting, saturation, and candidate
+    /// membership checks atomically under the ledger lock, in that order.
     pub(crate) async fn admit(
         &self,
         id_hash: String,
@@ -94,6 +102,9 @@ impl AttemptsLedgerState {
         max_identifiers: usize,
         cooldown: TimeDelta,
     ) -> Admission {
+        // Admission order is deliberate: expire the target, evict stale
+        // identifiers before rejecting capacity, count the request, enforce
+        // candidate limits, then distinguish Pending, Replay, and New.
         let mut map = self.map.lock().await;
         if map.get(&id_hash).is_some_and(|info| {
             requested_at.signed_duration_since(info.last_candidate_at) > cooldown
@@ -145,6 +156,8 @@ impl AttemptsLedgerState {
         }
     }
 
+    /// Commits a hit or miss, or refunds an error, only while the candidate is
+    /// still Pending in the same generation.
     pub(crate) async fn finalize(
         &self,
         id_hash: &str,
@@ -152,6 +165,8 @@ impl AttemptsLedgerState {
         generation: DateTime<Utc>,
         outcome: LookupOutcome,
     ) {
+        // Generation and Pending checks prevent a late worker from changing a
+        // newer cooldown window or committing a reservation twice.
         let mut map = self.map.lock().await;
         let remove_identifier = {
             let Some(info) = map.get_mut(id_hash) else {
@@ -182,11 +197,13 @@ impl AttemptsLedgerState {
         }
     }
 
+    /// Removes a still-pending candidate only when its generation matches.
     pub(crate) async fn refund(&self, id_hash: &str, candidate: &str, generation: DateTime<Utc>) {
         let mut map = self.map.lock().await;
         remove_pending(&mut map, id_hash, candidate, generation);
     }
 
+    /// Copies entries for snapshot work, releasing the map lock immediately.
     pub(crate) async fn snapshot_entries(&self) -> Vec<(String, RateLimitInfo)> {
         self.map
             .lock()
@@ -196,6 +213,7 @@ impl AttemptsLedgerState {
             .collect()
     }
 
+    /// Drops identifiers whose last distinct candidate is outside cooldown.
     pub(crate) async fn retain_active(&self, now: DateTime<Utc>, cooldown: TimeDelta) {
         self.map
             .lock()
@@ -203,10 +221,8 @@ impl AttemptsLedgerState {
             .retain(|_, info| now.signed_duration_since(info.last_candidate_at) <= cooldown);
     }
 
-    /// Clears the ledger and resets the collection timestamp while retaining
-    /// the map lock across both operations. The caller must already hold the
-    /// snapshot lock: this transitional API preserves the pre-Commit-8 order
-    /// `snapshot -> map -> timestamp` until timestamp ownership moves here.
+    /// Clears all entries and advances collection time while preserving the
+    /// `snapshot -> map -> timestamp` lock order used by the snapshot owner.
     pub(crate) async fn clear_and_reset_collection(
         &self,
         collection_started_at: &Mutex<DateTime<Utc>>,
@@ -276,6 +292,7 @@ pub(crate) struct ReservationGuard {
 }
 
 impl ReservationGuard {
+    /// Creates an armed guard whose drop path refunds the Pending candidate.
     fn new(
         state: AttemptsLedgerState,
         id_hash: String,
@@ -291,6 +308,7 @@ impl ReservationGuard {
         }
     }
 
+    /// Explicitly refunds the reservation before transferring responsibility.
     pub(crate) async fn refund(&mut self) {
         if self.armed {
             self.state

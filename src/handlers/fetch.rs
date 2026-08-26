@@ -1,3 +1,5 @@
+//! `/fetch` and `/trash` request extraction and response mapping.
+
 use axum::extract::State;
 use axum::response::{IntoResponse, Response};
 use axum::{http::StatusCode, Json};
@@ -10,6 +12,7 @@ use crate::recovery::service::{LookupCommand, LookupKind, LookupResult};
 
 const GLOBAL_OVERLOAD_RETRY_AFTER_SECS: u64 = 1;
 
+/// Performs a non-destructive authenticated lookup.
 pub async fn fetch_secret(
     State(state): State<AppState>,
     Json(request): Json<FetchSecret>,
@@ -29,6 +32,7 @@ pub async fn fetch_secret(
     )
 }
 
+/// Performs an authenticated lookup whose storage read and delete are atomic.
 pub async fn trash_secret(
     State(state): State<AppState>,
     Json(request): Json<FetchSecret>,

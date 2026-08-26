@@ -1,3 +1,5 @@
+//! `/store` request extraction and response mapping.
+
 use axum::extract::State;
 use axum::response::{IntoResponse, Response};
 use axum::{http::StatusCode, Json};
@@ -9,6 +11,7 @@ use crate::recovery::service::{StoreCommand, StoreResult};
 
 const GLOBAL_OVERLOAD_RETRY_AFTER_SECS: u64 = 1;
 
+/// Accepts and stores an encrypted secret through the recovery service.
 pub async fn store_secret(
     State(state): State<AppState>,
     Json(request): Json<StoreSecret>,

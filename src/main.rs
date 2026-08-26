@@ -1,3 +1,8 @@
+//! Recoverbull server entry point and bounded process lifecycle.
+//!
+//! Startup assembles shared owners, initializes SQLite, starts maintenance and
+//! reporting tasks, and shuts down with a finite grace period.
+
 mod app;
 mod attempts;
 mod config;
@@ -50,6 +55,7 @@ where
 }
 
 #[tokio::main]
+/// Starts the server after configuration and SQLite capability checks.
 async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(

@@ -1,5 +1,30 @@
 # Security
 
+## Authority and evidence
+
+The documentation hierarchy is explicit. The [RecoverBull whitepaper repository](https://github.com/SatoshiPortal/recoverbull-whitepaper) is authoritative for the protocol, its threats, and its intent; its normative `SPECIFICATION.md` is pending there. The README is authoritative for the client interface and the operator runbook. This document is authoritative for implementation invariants and the security-review guide. The code and tests are authoritative for implemented behavior and executable proof. If protocol documents conflict, the whitepaper prevails. Documentation, including `cargo doc`, does not become proof merely because it compiles.
+
+## Reviewer reading map
+
+Read the final implementation in this order:
+
+1. `src/main.rs` — process lifecycle and shutdown; `src/app.rs` — `AppState` ownership and construction; `src/config.rs` — validated configuration and canary state.
+2. `src/router.rs` — route, Axum middleware adapter, body-limit, timeout, and response-floor boundaries; then `src/http/contract.rs`, `src/http/error.rs`, and `src/handlers/store.rs`, `src/handlers/fetch.rs`, `src/handlers/info.rs`, and `src/handlers/attempts.rs` for the HTTP boundary and handlers.
+3. `src/recovery/identifiers.rs` — identifier and candidate derivation; `src/recovery/service.rs` — recovery orchestration.
+4. `src/attempts/ledger.rs` — admission and finalization FSM; `src/attempts/snapshot.rs` — deterministic public snapshot; `src/attempts/maintenance.rs` — expiry and global wipe.
+5. `src/storage/sqlite.rs` — Diesel/SQLite transactions and connection checks; `src/observability/diagnostic.rs` and `src/observability/counters.rs` — privacy-safe diagnostics and aggregate counters.
+6. Read tests by category: `src/tests/test_contract.rs`, `test_concurrency.rs`, `test_privacy.rs`, `test_http_boundary.rs`, `test_config.rs`, `test_rate_limit.rs`, `test_distinct_candidates.rs`, `test_attempts.rs`, `test_secure_delete.rs`, `test_db_errors.rs`, `test_logging.rs`, `test_fetch.rs`, `test_store.rs`, `test_trash.rs`, `test_info.rs`, `test_timing.rs`, `test_migrations.rs`, `test_adversarial.rs`, `test_audit_claims.rs`, and `test_server.rs`.
+
+## Ownership and dependency map
+
+- HTTP ownership is limited to Axum: `router.rs`, `http/*`, and `handlers/*` translate requests and responses; `router.rs` owns the request-diagnostics adapter. Domain modules, including `observability/diagnostic.rs` and `attempts/snapshot.rs`, do not depend on Axum or bytes.
+- Storage ownership is limited to Diesel/SQLite: `storage/sqlite.rs` owns connections, migrations' runtime interaction, WAL/secure-delete checks, and transactions. HTTP and recovery do not issue Diesel queries directly.
+- Recovery orchestration is `recovery/{identifiers,service}.rs`; it owns protocol coordination without Axum or Diesel dependencies.
+- Attempts are owned by `attempts/{ledger,snapshot,maintenance}.rs`: the ledger owns the candidate FSM, the snapshot owns cache serialization, and maintenance owns expiry and wipe.
+- Observability is owned by `observability/{diagnostic,counters}.rs`; it receives static categories and aggregate values, not secrets or request metadata.
+- `AppState` in `app.rs` privately owns the shared service, attempts, information, and observability components; production code receives only narrow capability methods, while component seams are explicit and test-only.
+- `src/schema.rs` is the Diesel-generated root imposed by `diesel.toml`; do not relocate it while preserving the configured schema path.
+
 ## Request diagnostics privacy
 
 The five-minute `info` counter summary includes diagnostic log emission and
@@ -149,31 +174,93 @@ Operators are responsible for retention of those copies.
 
 ## Invariants (each guarded by tests)
 
+The table below is the minimal primary-guard index for the security invariants; it is not an exhaustive index of every test. Supplemental tests are classified here by module so an auditor can locate evidence without listing all 175 tests individually.
+
+### Additional evidence by test module
+
+| Registered test module | Supplemental evidence area |
+|---|---|
+| `test_adversarial` | malformed input and hostile sequencing |
+| `test_attempts` | snapshot contract and telemetry values |
+| `test_audit_claims` | historical audit findings and claim-level regressions |
+| `test_concurrency` | concurrent admission and storage operations |
+| `test_config` | fail-closed configuration validation |
+| `test_contract` | HTTP status/body contracts |
+| `test_db_errors` | database failure classification and refunds |
+| `test_distinct_candidates` | candidate capacity and shared fetch/trash budget |
+| `test_fetch` | fetch response mapping |
+| `test_http_boundary` | routing, extraction, limits, and headers |
+| `test_info` | live canary and operational metadata |
+| `test_logging` | request IDs, quotas, and sensitive-value exclusion |
+| `test_migrations` | schema setup and SQLite capability checks |
+| `test_privacy` | snapshot and response privacy properties |
+| `test_rate_limit` | bucket accounting, expiry, and wipe |
+| `test_secure_delete` | SQLite secure deletion and WAL behavior |
+| `test_server` | shared isolated server and database fixtures |
+| `test_store` | store validation and idempotency |
+| `test_timing` | sensitive POST response floor |
+| `test_trash` | atomic destructive lookup behavior |
+
+### Candidate admission and transition table
+
+Admission is ordered and shared by `/fetch` and `/trash`: expiry and capacity are checked first, `total_requests` is then updated for an existing entry, saturation is checked before membership, and only then is candidate membership inspected. A full map rejects a new identifier fail-closed. Saturation rejects every candidate, including known candidates, before database work. A `Pending` duplicate returns `503` without another reservation; a `Committed` replay is free before saturation. A new candidate creates `Pending` and reserves one slot.
+
+| Current state / admission | Result | Final state and accounting |
+|---|---|---|
+| Expired entry | Start a new window | Old entry is removed before admission. |
+| Map at capacity, new identifier | `503` | No entry and no per-identifier counter. |
+| `candidate_count >= max` | `429` | No membership or database lookup; `Retry-After` applies. |
+| `Pending` duplicate | `503` | Existing reservation remains; no second reservation. |
+| `Committed` replay | Continue lookup | Remains `Committed`; `total_requests` increments, with no new attempt or cooldown extension. |
+| New candidate | Continue lookup | `Pending` owns one reserved slot. |
+| Admitted hit or miss | Finalize | `Committed`; a miss increments `failed_attempts` once and a hit does not reset the budget. |
+| Error or refund before commit | Refund/remove | `Pending` is removed and refunded once. |
+
+External statuses are `400` invalid data, `401` invalid credentials, `429` targeted lockout, `503` pressure/unavailability, and `500` internal failure. `429` and `503` carry `Retry-After`; clients classify by status, not error text. `total_attempts` counts distinct admitted candidates, `failed_attempts` finalized misses, and `total_requests` requests attached to an active entry.
+
+### Cancellation ownership
+
+`ReservationGuard` is armed before transfer. Timeout, cancellation, or a dropped handler before transfer refunds exactly once. The database lease and permit are moved into the detached task/`spawn_blocking` work; the handler consumes the guard with `transfer` only after that transfer. A dropped handler therefore cannot abandon finalization, trash, or counters. An outer task failure performs a generation-specific refund and cannot alter a replacement window.
+
+### Blocking bounds and lock order
+
+SQLite admission waits at most one second for its semaphore; failure returns `503` without consuming an attempt. The permit remains owned through the blocking operation and is released on return. The canary reader uses one dedicated permit. Snapshot generation clones the map under lock, then sorts, serializes, and gzips outside it. No HTTP or network operation runs under a domain lock.
+
+The global wipe's simultaneous lock order is exactly `snapshot cache -> ledger map -> collection timestamp`. Normal snapshot generation does not hold these three simultaneously: it clones ledger data under its lock and processes it afterward.
+
 Breaking any of these reintroduces a fixed vulnerability. If you change the
 code, keep the invariant — and run the guarding test.
 
-| Invariant | Why | Guarding test(s) |
-|---|---|---|
-| `/store` is idempotent: fresh and duplicate return the same `201`, never overwrite | F1: duplicate `403` was an unthrottled `authentication_key` oracle | `test_audit_f1_store_gives_no_existence_signal`, `test_duplicate_store_is_indistinguishable_and_does_not_overwrite`, `test_concurrent_identical_store_is_idempotent` |
-| Rate-limit check-and-increment is atomic under one lock | Concurrent requests otherwise overshoot the budget | `test_rate_limit_holds_under_concurrency` |
-| Every distinct candidate consumes budget, hits and misses included; committed replays are free only before saturation and never extend cooldown | Planted rows must not bypass the budget, while identical replays improve availability | `test_replaying_one_valid_candidate_does_not_consume_more_attempts`, `test_replaying_one_invalid_candidate_does_not_consume_more_attempts`, `test_replaying_one_candidate_does_not_slide_resets_at`, `test_audit_f1_planted_rows_cannot_reset_fetch_rate_limit` |
-| `candidate_count >= max` returns `429` before membership/DB for known, Pending, and Committed candidates | Saturation must not become an authentication oracle | `test_known_candidate_is_rejected_when_distinct_candidate_capacity_is_full`, `test_distinct_planted_candidates_consume_capacity`, `test_pending_distinct_candidates_consume_the_attempt_budget` |
-| Pending reserves a slot immediately; duplicate Pending returns `503` without a second reservation; `/fetch` and `/trash` share the set | Concurrent work must not oversubscribe or manufacture a duplicate candidate | `test_pending_duplicate_trash_is_rejected_without_a_second_reservation`, `test_fetch_and_trash_share_one_candidate_attempt` |
-| Detached finalization is generation-safe; DB error/cancellation before DB removes Pending; a miss increments failed once; trash races do not create false failures | Late completion and cancellation must not corrupt a replacement window or telemetry | `test_old_trash_completion_cannot_update_a_replaced_rate_limit_window`, `test_database_error_returns_500_without_consuming_attempts`, `test_committed_trash_race_returns_accepted_and_unauthorized_without_failure`, `test_concurrent_trash_hit_does_not_count_the_losing_miss_as_a_guess` |
-| A Pending reservation is removed exactly once on cancellation before SQLite or on internal error; after transfer to SQLite, the detached task owns finalization | Budget integrity under cancellation and lost HTTP responses | `test_cancelled_request_does_not_consume_an_attempt`, `test_cancelled_trash_after_sqlite_start_keeps_attempt_reserved`, `test_concurrent_cancellation_refunds_every_reservation`, `test_deferred_refund_runs_when_drop_finds_the_lock_contended`, `test_database_error_returns_500_without_consuming_attempts` |
-| Pending cleanup and detached finalization are candidate- and generation-specific; candidate removal plus empty-entry removal is atomic under one map lock | A stale completion must never mutate or delete a reservation in a replacement window or a newer request | `test_old_trash_completion_cannot_update_a_replaced_rate_limit_window`, `test_pending_duplicate_trash_is_rejected_without_a_second_reservation` |
-| `id_hash` = SHA-256 over raw identifier bytes; `secret_id` = SHA-256 over the two hex *strings* | Clients must match their entry; mixing algorithms silently breaks detection | `test_attempts_id_hash_matches_shared_client_vector`, `test_secret_id_and_id_hash_are_distinct_algorithms` |
-| Logs and error responses carry counts and static strings only — never identifiers, keys, or bodies | Anonymity | `test_error_responses_leak_no_secret_material`, `test_snapshot_never_contains_secret_material`, `test_500_does_not_leak_internals` |
-| Hex inputs are lowercased before validation and hashing | Case variants would split budgets and records | `test_audit_f12_hex_case_is_canonicalized` |
-| Cheap validation before expensive: length before base64 decode, 1 kB body limit | DoS via decode/parse cost | `test_store_checks_length_before_base64`, `test_store_rejects_oversized_json_before_deserialization` |
-| Snapshot is deterministic (sorted entries, gzip `mtime=0`), hour-truncated, single-flight, initial telemetry contract version 1; counts distinct candidates and all requests but exposes no CandidateTags | Stable ETag; precision gradient; bounded build cost and privacy | `test_attempts_snapshot_rebuild_is_deterministic`, `test_attempts_publish_hashed_identifier_with_counters`, `test_attempts_snapshot_at_full_map_scale`, `test_concurrent_attempts_polls_agree_on_etag`, `test_snapshot_never_contains_secret_material` |
-| Global wipe clears identifiers and CandidateTags every 24 hours, resets the budget timestamp, and invalidates pre-wipe snapshots; the first wipe is delayed until the period elapses | No pre-wipe telemetry survives the boundary and `/info` agrees with `/attempts` | `test_global_wipe_clears_candidates_resets_timestamp_and_snapshot`, `test_global_wiper_first_deadline_is_delayed_by_period`, `test_production_global_wipe_interval_is_24_hours` |
-| Configuration is validated fail-closed at startup (ranges, NaN/∞/≤0 rejected) | A zero or absurd value would silently disable a protection | `src/tests/test_env.rs` |
-| Token bursts are finite, contain at least one representable token, and subtracting one changes the `f64` | Numerically ineffective capacities would silently disable a bucket | `src/tests/test_env.rs` |
-| SQLite is bundled at least 3.51.3; startup verifies runtime version and WAL, while every connection verifies WAL and secure deletion | Reproducible WAL-reset fix and deletion invariant without a per-connection version query | `src/tests/test_secure_delete.rs` |
-| Errors are classified by HTTP status only: `429` = targeted lockout, `503` = global pressure, both with `Retry-After` | Clients must not match on error text | `src/tests/test_contract.rs` |
-| POST requests matching `/store`, `/fetch`, and `/trash` have a uniform minimum server-side response time, including extractor rejections; `/info`, `/attempts`, 404s, 405s, other routes, and already-slow processing are excluded | Reduce fast success/failure timing differences without holding database resources or pretending to equalize network time | `src/tests/test_timing.rs` |
-| Dotenv CANARY is read for every `/info` without cache metadata; process-env CANARY is authoritative, missing CANARY is empty, and unavailable files use startup fallback | Operators can signal edits immediately without stale cache state | `test_info_rereads_same_length_canary_when_file_metadata_is_restored`, `test_info_rereads_canary_from_file_with_startup_fallback`, `test_info_env_canary_is_authoritative_over_file` |
+| Invariant | Owner | Why | Guarding test(s) |
+|---|---|---|---|
+| `/store` is idempotent: fresh and duplicate return the same `201`, never overwrite | `RecoveryService::store`, `SqliteOperation::store` | F1: duplicate `403` was an unthrottled `authentication_key` oracle | `test_audit_f1_store_gives_no_existence_signal`, `test_duplicate_store_is_indistinguishable_and_does_not_overwrite`, `test_concurrent_identical_store_is_idempotent` |
+| Rate-limit check-and-increment is atomic under one lock | `attempts::ledger::admit` | Concurrent requests otherwise overshoot the budget | `test_rate_limit_holds_under_concurrency` |
+| Every distinct candidate consumes budget, hits and misses included; committed replays are free only before saturation and never extend cooldown | `attempts::ledger::admit` | Planted rows must not bypass the budget, while identical replays improve availability | `test_replaying_one_valid_candidate_does_not_consume_more_attempts`, `test_replaying_one_invalid_candidate_does_not_consume_more_attempts`, `test_replaying_one_candidate_does_not_slide_resets_at`, `test_audit_f1_planted_rows_cannot_reset_fetch_rate_limit` |
+| `candidate_count >= max` returns `429` before membership/DB for known, Pending, and Committed candidates | `attempts::ledger::admit` | Saturation must not become an authentication oracle | `test_known_candidate_is_rejected_when_distinct_candidate_capacity_is_full`, `test_distinct_planted_candidates_consume_capacity`, `test_pending_distinct_candidates_consume_the_attempt_budget` |
+| Pending reserves a slot immediately; duplicate Pending returns `503` without a second reservation; `/fetch` and `/trash` share the set | `AttemptsLedgerState::admit`, `RecoveryService::lookup` | Concurrent work must not oversubscribe or manufacture a duplicate candidate | `test_pending_duplicate_trash_is_rejected_without_a_second_reservation`, `test_fetch_and_trash_share_one_candidate_attempt` |
+| Detached finalization is generation-safe; DB error/cancellation before DB removes Pending; a miss increments failed once; trash races do not create false failures | `attempts::ledger::finalize`, `recovery::service` | Late completion and cancellation must not corrupt a replacement window or telemetry | `test_old_trash_completion_cannot_update_a_replaced_rate_limit_window`, `test_database_error_returns_500_without_consuming_attempts`, `test_committed_trash_race_returns_accepted_and_unauthorized_without_failure`, `test_concurrent_trash_hit_does_not_count_the_losing_miss_as_a_guess` |
+| A Pending reservation is removed exactly once on cancellation before SQLite or on internal error; after transfer to SQLite, the detached task owns finalization | `ReservationGuard`, `RecoveryService::{run_lookup,store}`, `SqliteOperation` | Budget integrity under cancellation and lost HTTP responses | `test_cancelled_request_does_not_consume_an_attempt`, `test_cancelled_trash_after_sqlite_start_keeps_attempt_reserved`, `test_concurrent_cancellation_refunds_every_reservation`, `test_deferred_refund_runs_when_drop_finds_the_lock_contended`, `test_database_error_returns_500_without_consuming_attempts` |
+| Pending cleanup and detached finalization are candidate- and generation-specific; candidate removal plus empty-entry removal is atomic under one map lock | `attempts::ledger::finalize` | A stale completion must never mutate or delete a reservation in a replacement window or a newer request | `test_old_trash_completion_cannot_update_a_replaced_rate_limit_window`, `test_pending_duplicate_trash_is_rejected_without_a_second_reservation` |
+| `id_hash` = SHA-256 over raw identifier bytes; `secret_id` = SHA-256 over the two hex *strings* | `recovery::identifiers` | Clients must match their entry; mixing algorithms silently breaks detection | `test_attempts_id_hash_matches_shared_client_vector`, `test_secret_id_and_id_hash_are_distinct_algorithms` |
+| Logs and error responses carry counts and static strings only — never identifiers, keys, or bodies | `observability::{diagnostic,counters}`, `http::{contract,error}` | Anonymity | `test_error_responses_leak_no_secret_material`, `test_snapshot_never_contains_secret_material`, `test_500_does_not_leak_internals` |
+| Hex inputs are lowercased before validation and hashing | `recovery::identifiers` | Case variants would split budgets and records | `test_audit_f12_hex_case_is_canonicalized` |
+| Cheap validation before expensive: length before base64 decode, 1 kB body limit | `RecoveryService::store`, `router` | DoS via decode/parse cost | `test_store_checks_length_before_base64`, `test_store_rejects_oversized_json_before_deserialization` |
+| Snapshot is deterministic (sorted entries, gzip `mtime=0`), hour-truncated, single-flight, initial telemetry contract version 1; counts distinct candidates and all requests but exposes no CandidateTags | `attempts::snapshot` | Stable ETag; precision gradient; bounded build cost and privacy | `test_attempts_snapshot_rebuild_is_deterministic`, `test_attempts_publish_hashed_identifier_with_counters`, `test_attempts_snapshot_at_full_map_scale`, `test_concurrent_attempts_polls_agree_on_etag`, `test_snapshot_never_contains_secret_material` |
+| Global wipe clears identifiers and CandidateTags every 24 hours, resets the budget timestamp, and invalidates pre-wipe snapshots; the first wipe is delayed until the period elapses | `attempts::maintenance` | No pre-wipe telemetry survives the boundary and `/info` agrees with `/attempts` | `test_global_wipe_clears_candidates_resets_timestamp_and_snapshot`, `test_global_wiper_first_deadline_is_delayed_by_period`, `test_production_global_wipe_interval_is_24_hours` |
+| Configuration is validated fail-closed at startup (ranges, NaN/∞/≤0 rejected) | `config::{validate_config,validate_capacity}` | A zero or absurd value would silently disable a protection | `test_validate_config_accepts_valid_values`, `test_validate_config_rejects_zero_max_attempts`, `test_validate_capacity_rejects_zero`, `test_validate_token_bucket_rejects_nan` |
+| Token bursts are finite, contain at least one representable token, and subtracting one changes the `f64` | `config::validate_token_bucket` | Numerically ineffective capacities would silently disable a bucket | `test_validate_token_bucket_rejects_f64_max`, `test_validate_token_bucket_rejects_infinity`, `test_validate_token_bucket_rejects_sub_token_bursts` |
+| SQLite is bundled at least 3.51.3; startup verifies runtime version and WAL, while every connection verifies WAL and secure deletion | `storage::sqlite` | Reproducible WAL-reset fix and deletion invariant without a per-connection version query | `test_application_connection_enables_secure_delete`, `test_application_connection_uses_patched_sqlite_and_wal`, `test_memory_database_fails_closed_when_wal_is_unavailable` |
+| Errors are classified by HTTP status only: `429` = targeted lockout, `503` = global pressure, both with `Retry-After` | `http::{contract,error}`, `router` | Clients must not match on error text | `test_503_responses_have_no_machine_code`, `test_global_buckets_use_503_without_targeted_metadata`, `test_targeted_429_has_targeted_metadata` |
+| POST requests matching `/store`, `/fetch`, and `/trash` have a uniform minimum server-side response time, including extractor rejections; `/info`, `/attempts`, 404s, 405s, other routes, and already-slow processing are excluded | `router` | Reduce fast success/failure timing differences without holding database resources or pretending to equalize network time | `production_router_applies_the_500_millisecond_floor`, `sensitive_post_success_and_failures_have_the_configured_floor`, `default_body_limit_rejection_is_also_delayed` |
+| Dotenv CANARY is read for every `/info` without cache metadata; process-env CANARY is authoritative, missing CANARY is empty, and unavailable files use startup fallback | `config::canary_file_state`, `InfoState::current_canary` | Operators can signal edits immediately without stale cache state | `test_info_rereads_same_length_canary_when_file_metadata_is_restored`, `test_info_rereads_canary_from_file_with_startup_fallback`, `test_info_env_canary_is_authoritative_over_file` |
+
+## Final path and verification checklist
+
+- [ ] `src/main.rs`, `src/app.rs`, `src/config.rs`, `src/router.rs`, `src/http/`, `src/handlers/`, `src/recovery/`, `src/attempts/`, `src/storage/sqlite.rs`, and `src/observability/` exist at the paths in the reading map.
+- [ ] `src/schema.rs` remains the Diesel schema path imposed by `diesel.toml`.
+- [ ] The final test listing contains every test named in the invariant table: verify with `cargo test --locked -- --list` (the local post-reorganization listing contains 175 tests; no listing is checked in).
+- [ ] CI compiles rustdocs with `cargo doc --no-deps --document-private-items --locked`; this proves only that rustdoc compiles, not that an invariant is correct or tested.
+- [ ] For a documentation-only change, the local static checks are `git diff --check`, path existence checks, and exact-name checks against the final `cargo test --locked -- --list` output; do not substitute `cargo doc` for executable invariant evidence.
 
 ## Test-writing traps
 
@@ -221,7 +308,7 @@ code, keep the invariant — and run the guarding test.
    correctness of a key without consuming the per-identifier budget?
 2. **Budget accounting.** Every reserved attempt is consumed exactly once
    or refunded exactly once. Check every `.await` between reservation and
-   `disarm()` for cancellation.
+   `transfer()` for cancellation.
 3. **Concurrency.** Check-and-act under a single lock; no lock held across
    database or network work; SQLite writes serialized (`busy_timeout`,
    immediate transactions for read-delete).

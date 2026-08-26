@@ -2,6 +2,7 @@
 
 use sha2::{Digest, Sha256};
 
+/// Returns lowercase hexadecimal SHA-256 for bytes supplied by a caller.
 pub(crate) fn sha256_hex(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);

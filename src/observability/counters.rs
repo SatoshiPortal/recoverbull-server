@@ -1,7 +1,10 @@
+//! Saturating security counters and their fixed-shape reporting snapshot.
+
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 #[derive(Default)]
+/// Concurrent counters that never wrap on overflow.
 pub struct SecurityCounters {
     store_accepted: AtomicU64,
     store_rejected: AtomicU64,
@@ -42,6 +45,7 @@ fn saturating_increment(counter: &AtomicU64) {
 
 macro_rules! counter_methods {
     ($($name:ident),+ $(,)?) => { $(
+        /// Increments this metric with saturation at `u64::MAX`.
         pub fn $name(&self) { saturating_increment(&self.$name); }
     )+ };
 }
@@ -80,7 +84,7 @@ impl SecurityCounters {
             .store(suppressed, Ordering::Relaxed);
     }
 
-    /// Resets one reporting window and returns fixed, dimensionless fields.
+    /// Resets one reporting window and returns its fixed-shape values.
     pub fn flush(&self) -> CounterSnapshot {
         CounterSnapshot {
             store_accepted: self.store_accepted.swap(0, Ordering::Relaxed),
@@ -105,6 +109,7 @@ impl SecurityCounters {
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
+/// Values atomically drained from one reporting window.
 pub struct CounterSnapshot {
     pub store_accepted: u64,
     pub store_rejected: u64,
@@ -125,6 +130,7 @@ pub struct CounterSnapshot {
     pub diagnostic_logs_suppressed: u64,
 }
 
+/// Spawns a detached reporter that drains counters at each bounded interval.
 pub(crate) fn spawn_reporter(state: super::ObservabilityState, period: Duration) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
@@ -135,6 +141,7 @@ pub(crate) fn spawn_reporter(state: super::ObservabilityState, period: Duration)
     });
 }
 
+/// Drains and emits one privacy-safe counter window.
 pub(crate) fn report_once(state: &super::ObservabilityState) {
     let snapshot = state.counters.flush();
     tracing::info!(

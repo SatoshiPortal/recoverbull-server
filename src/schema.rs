@@ -1,4 +1,6 @@
 // @generated automatically by Diesel CLI.
+//! Diesel schema generated from migrations; keep this file synchronized with
+//! the migration source and do not add domain behavior here.
 
 diesel::table! {
     secret (id) {

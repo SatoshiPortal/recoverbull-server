@@ -24,6 +24,7 @@ struct Bucket {
     last: Instant,
 }
 
+/// Separate token buckets limiting server-error and detail diagnostics.
 pub(crate) struct LogQuota {
     server_error: Mutex<Bucket>,
     detail: Mutex<Bucket>,
@@ -69,6 +70,7 @@ pub(crate) fn new_quota() -> Arc<LogQuota> {
     Arc::new(LogQuota::new())
 }
 
+/// Generates a process-local opaque request identifier for diagnostics.
 pub(crate) fn request_id() -> String {
     let sequence = REQUEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let pid = std::process::id();
@@ -83,6 +85,7 @@ pub(crate) fn request_id() -> String {
     hex::encode(hasher.finalize())
 }
 
+/// Maps only known paths to the diagnostic route allowlist.
 pub(crate) fn route_kind(path: &str) -> &'static str {
     match path {
         "/store" => "store",
@@ -108,6 +111,7 @@ pub(crate) fn method_kind(method: &str) -> &'static str {
     }
 }
 
+/// Reduces elapsed time to a non-sensitive fixed bucket.
 pub(crate) fn duration_bucket(duration: Duration) -> &'static str {
     match duration {
         d if d < Duration::from_millis(500) => "lt500ms",
@@ -117,6 +121,7 @@ pub(crate) fn duration_bucket(duration: Duration) -> &'static str {
     }
 }
 
+/// Maps status codes to the bounded diagnostic category set.
 pub(crate) fn status_category(status: u16) -> &'static str {
     match status {
         408 | 429 | 503 => "overload",
@@ -142,6 +147,8 @@ fn emit(
     class: QuotaClass,
     event: DiagnosticEvent<'_>,
 ) {
+    // Only the allowlisted route/method/category dimensions reach logs; quota
+    // decisions are made before emission and are reflected in counters.
     let level_enabled = match class {
         QuotaClass::ServerError => {
             tracing::enabled!(target: "request_diagnostics", tracing::Level::WARN)

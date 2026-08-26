@@ -1,3 +1,8 @@
+//! Environment loading, validation, and typed configuration passed to owners.
+//!
+//! Initialization reads required values, applies compatibility fallbacks, then
+//! validates limits in dependency order before constructing subsystem configs.
+
 use dotenvy::dotenv;
 #[cfg(test)]
 use std::sync::Arc;
@@ -26,6 +31,8 @@ where
 /// without this, all tests shared a single file and ran into each other's
 /// data under `cargo test`'s parallel execution.
 #[cfg(test)]
+/// Test-only lifetime guard for an isolated SQLite database and its sidecars;
+/// `cfg(test)` excludes this parallel-test seam from release builds.
 pub(crate) struct TestDatabaseGuard {
     path: std::path::PathBuf,
 }
@@ -45,6 +52,7 @@ impl Drop for TestDatabaseGuard {
 }
 
 #[cfg(test)]
+/// Test-only unique database allocation; each guard removes SQLite sidecars on drop.
 pub(crate) fn unique_test_database() -> (String, Arc<TestDatabaseGuard>) {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let count = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -192,6 +200,7 @@ pub fn canary_file_state(path: &std::path::Path) -> CanaryFileState {
 }
 
 #[derive(Clone)]
+/// Storage settings, including the bounded database concurrency owner.
 pub(crate) struct StorageConfig {
     pub(crate) database_url: String,
     pub(crate) database_max_concurrency: usize,
@@ -200,6 +209,7 @@ pub(crate) struct StorageConfig {
 }
 
 #[derive(Clone)]
+/// Recovery validation and global bucket settings.
 pub(crate) struct RecoveryConfig {
     pub(crate) store_rate_limit_burst: f64,
     pub(crate) store_rate_limit_refill: f64,
@@ -209,6 +219,7 @@ pub(crate) struct RecoveryConfig {
 }
 
 #[derive(Clone)]
+/// Attempt admission, map-capacity, and snapshot-cache settings.
 pub(crate) struct AttemptsConfig {
     pub(crate) rate_limit_cooldown_minutes: i64,
     pub(crate) rate_limit_max_attempts: u8,
@@ -219,6 +230,7 @@ pub(crate) struct AttemptsConfig {
 }
 
 #[derive(Clone)]
+/// `/info` canary settings, including whether the process environment wins.
 pub(crate) struct InfoConfig {
     pub(crate) canary: String,
     pub(crate) canary_from_env: bool,
@@ -226,6 +238,7 @@ pub(crate) struct InfoConfig {
 }
 
 #[derive(Clone)]
+/// Fully parsed and validated configuration used to build application state.
 pub(crate) struct ValidatedConfig {
     pub(crate) server_address: String,
     pub(crate) storage: StorageConfig,
@@ -234,6 +247,8 @@ pub(crate) struct ValidatedConfig {
     pub(crate) info: InfoConfig,
 }
 
+/// Loads environment and dotenv configuration, validates every configured
+/// bound, and returns the values consumed by the application owners.
 pub fn init() -> ValidatedConfig {
     // Whether CANARY comes from the process environment must be known before
     // dotenv loads the file: dotenvy never overrides an existing variable.

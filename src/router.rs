@@ -1,3 +1,8 @@
+//! Axum route graph and security middleware ordering.
+//!
+//! The timing floor is applied to sensitive POST routes, while diagnostics,
+//! timeout, and body limits wrap the graph without holding locks during sleep.
+
 use axum::{
     extract::{DefaultBodyLimit, Request},
     middleware::{from_fn, Next},
@@ -18,6 +23,7 @@ use crate::{
 // No CORS layers: clients are native apps reaching the server over Tor,
 // not browsers. Allowing any origin would let any web page conscript its
 // visitors' browsers into calling this API.
+/// Builds the production router with the production timing floor.
 pub fn new(app_state: AppState) -> Router {
     new_with_response_delay(app_state, PRODUCTION_MIN_RESPONSE_DELAY)
 }
@@ -53,6 +59,8 @@ pub(crate) fn new_with_response_delay(app_state: AppState, response_delay: Durat
 
     sensitive_routes
         .merge(public_routes)
+        // Layers are applied outside-in: diagnostics observes the final
+        // response, timeout bounds the request, and body limits precede JSON.
         // Legitimate JSON requests are below 320 bytes. Keep modest headroom
         // while rejecting oversized bodies before deserialization.
         .layer(DefaultBodyLimit::max(1024))
@@ -90,6 +98,7 @@ async fn diagnostic_middleware(
 }
 
 #[cfg(test)]
+/// Test-only zero-delay router constructor; excluded from release builds.
 pub(crate) fn new_for_tests(app_state: AppState) -> Router {
     new_with_response_delay(app_state, Duration::ZERO)
 }

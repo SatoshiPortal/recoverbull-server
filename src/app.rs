@@ -1,3 +1,9 @@
+//! Application state assembly and the shared runtime owners used by every route.
+//!
+//! The state is intentionally composed from cloneable handles: cloning the
+//! outer value shares semaphores, ledgers, counters, and cancellation-aware
+//! workers rather than duplicating their limits or mutable collections.
+
 use crate::{
     attempts::{AttemptsPolicy, AttemptsState},
     config::ValidatedConfig,
@@ -11,6 +17,7 @@ use std::{path::PathBuf, sync::Arc};
 use tokio::sync::Semaphore;
 
 #[derive(Clone)]
+/// State needed by `/info`, including the canary source and read serialization.
 pub(crate) struct InfoState {
     canary: String,
     canary_from_env: bool,
@@ -22,11 +29,14 @@ pub(crate) struct InfoState {
 }
 
 #[derive(Clone)]
+/// Public server settings retained separately from subsystem configuration.
 pub(crate) struct AppConfig {
+    /// Loopback listener address configured for the process.
     pub(crate) server_address: String,
 }
 
 #[derive(Clone)]
+/// Complete application graph shared with Axum handlers by clone-on-state.
 pub(crate) struct AppState {
     components: AppComponents,
 }
@@ -74,6 +84,8 @@ impl std::ops::DerefMut for AppState {
 
 /// Composes the shared application owners from validated configuration.
 pub(crate) fn build(config: ValidatedConfig) -> AppState {
+    // Each subsystem is built once; clones below share ownership handles so
+    // handlers, detached recovery work, and background tasks observe one state.
     let storage = SqliteStorage::from_config(config.storage);
     let attempts = AttemptsState::new(config.attempts);
     let observability = ObservabilityState::new();
@@ -209,11 +221,13 @@ impl AppState {
 }
 
 #[cfg(test)]
+/// Test-only state constructor; this seam is excluded from release builds.
 pub(crate) fn init() -> AppState {
     build(crate::config::init())
 }
 
 impl InfoState {
+    /// Creates the information view while sharing policy and counters.
     fn new(
         config: &crate::config::InfoConfig,
         secret_max_length: usize,
@@ -230,7 +244,11 @@ impl InfoState {
             counters,
         }
     }
+    /// Returns the authoritative process canary or reads the dotenv canary on
+    /// one bounded blocking worker, applying documented fallback semantics.
     pub(crate) async fn current_canary(&self) -> String {
+        // The semaphore blocks concurrent file reads; the blocking task keeps
+        // synchronous filesystem work out of the async executor.
         if self.canary_from_env {
             return self.canary.clone();
         }
@@ -254,29 +272,36 @@ impl InfoState {
             }
         }
     }
+    /// Returns the configured maximum encrypted payload length.
     pub(crate) fn secret_max_length(&self) -> usize {
         self.secret_max_length
     }
+    /// Returns the shared attempts policy view used by `/info`.
     pub(crate) fn policy(&self) -> &AttemptsPolicy {
         &self.policy
     }
     #[cfg(test)]
+    /// Test-only observation seam; excluded from release builds.
     pub(crate) fn canary_for_test(&self) -> &str {
         &self.canary
     }
     #[cfg(test)]
+    /// Test-only canary-source seam; excluded from release builds.
     pub(crate) fn set_canary_from_env_for_test(&mut self, value: bool) {
         self.canary_from_env = value;
     }
     #[cfg(test)]
+    /// Test-only canary-path seam; excluded from release builds.
     pub(crate) fn set_canary_path_for_test(&self, path: PathBuf) {
         *self.canary_path.write().unwrap() = path;
     }
     #[cfg(test)]
+    /// Test-only semaphore observation seam; excluded from release builds.
     pub(crate) fn canary_read_semaphore_for_test(&self) -> Arc<Semaphore> {
         self.canary_read_semaphore.clone()
     }
     #[cfg(test)]
+    /// Test-only semaphore replacement seam; excluded from release builds.
     pub(crate) fn set_canary_read_semaphore_for_test(&mut self, semaphore: Arc<Semaphore>) {
         self.canary_read_semaphore = semaphore;
     }

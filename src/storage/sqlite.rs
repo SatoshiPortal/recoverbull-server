@@ -1,3 +1,9 @@
+//! SQLite persistence implementation; Diesel remains confined to this module.
+//!
+//! Initialization verifies `secure_delete` and WAL, while leased operations
+//! retain their permit through blocking work and trash uses an immediate
+//! transaction.
+
 use crate::schema::secret::dsl::*;
 
 use crate::config::StorageConfig;
@@ -15,6 +21,7 @@ use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 
 #[derive(Insertable, Queryable, Selectable)]
 #[diesel(table_name = crate::schema::secret)]
+/// Diesel row and insert shape for the opaque secret table.
 pub(crate) struct Secret {
     pub(crate) id: String,
     pub(crate) created_at: String,
@@ -40,6 +47,7 @@ pub(crate) struct SqliteOperation {
 }
 
 #[derive(Clone)]
+/// Insert value passed from recovery without exposing Diesel types upstream.
 pub(crate) struct NewStoredSecret {
     pub(crate) id: String,
     pub(crate) created_at: String,
@@ -62,6 +70,7 @@ pub(crate) enum StorageError {
 }
 
 impl SqliteStorage {
+    /// Creates storage and its bounded shared database semaphore.
     pub(crate) fn from_config(config: StorageConfig) -> Self {
         Self {
             database_url: config.database_url,
@@ -127,6 +136,7 @@ impl SqliteStorage {
 }
 
 impl SqliteOperation {
+    /// Inserts idempotently while retaining the opaque lease until completion.
     pub(crate) fn store(self, new_secret: NewStoredSecret) -> Result<(), StorageError> {
         let _permit = self.permit;
         #[cfg(test)]
@@ -144,10 +154,12 @@ impl SqliteOperation {
         .map_err(|_| StorageError::Database)
     }
 
+    /// Reads without deleting the stored row.
     pub(crate) fn fetch(self, secret_id: String) -> Result<Option<StoredSecret>, StorageError> {
         self.lookup(secret_id, false)
     }
 
+    /// Reads and deletes the row in one immediate transaction.
     pub(crate) fn trash(self, secret_id: String) -> Result<Option<StoredSecret>, StorageError> {
         self.lookup(secret_id, true)
     }
@@ -172,11 +184,14 @@ impl SqliteOperation {
     }
 }
 
+/// Embedded schema migrations applied during startup.
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!();
 const INITIAL_MIGRATION_VERSION: &str = "0001";
+/// Minimum SQLite runtime version required by the service.
 pub const MINIMUM_SQLITE_VERSION: &str = "3.51.3";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+/// Startup failures for SQLite capability, migration, and journal checks.
 pub enum ConnectionSetupError {
     Open,
     Version,
@@ -338,6 +353,7 @@ fn establish_connection_without_wal_check(
     Ok(connection)
 }
 
+/// Opens a worker connection and rejects runtimes that are not in WAL mode.
 pub fn establish_connection(
     database_url: String,
 ) -> Result<SqliteConnection, ConnectionSetupError> {
@@ -354,6 +370,7 @@ pub fn establish_connection(
     Ok(connection)
 }
 
+/// Inserts a secret without revealing whether its identifier already exists.
 pub fn write(
     connection: &mut SqliteConnection,
     new_secret: &Secret,
@@ -369,6 +386,7 @@ pub fn write(
         .map(|_| ())
 }
 
+/// Reads one row, preserving database errors distinct from a missing row.
 pub fn read_secret_by_id(
     connection: &mut SqliteConnection,
     secret_id: &str,
@@ -382,6 +400,7 @@ pub fn read_secret_by_id(
         .optional()
 }
 
+/// Atomically reads and deletes one row using SQLite's immediate transaction.
 pub fn read_and_trash_secret_by_id(
     connection: &mut SqliteConnection,
     secret_id: &str,

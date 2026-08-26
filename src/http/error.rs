@@ -6,10 +6,12 @@ use axum::{
     Json,
 };
 
+/// Encodes the stable JSON error envelope used by HTTP handlers.
 pub(crate) fn error_body(error: impl Into<String>) -> serde_json::Value {
     serde_json::json!({ "error": error.into() })
 }
 
+/// Builds an error envelope and numeric `Retry-After` response header.
 pub(crate) fn retry_after_response(
     status: StatusCode,
     retry_after_secs: u64,

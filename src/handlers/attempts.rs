@@ -1,3 +1,5 @@
+//! `/attempts` telemetry snapshot extraction and conditional response mapping.
+
 use crate::{
     http::error::{error_body, retry_after_response},
     AppState,

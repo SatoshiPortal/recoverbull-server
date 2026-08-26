@@ -1,3 +1,5 @@
+//! `/info` operational metadata response construction.
+
 use axum::extract::State;
 use axum::{http::StatusCode, Json};
 use serde_json::{json, Value};
@@ -6,6 +8,7 @@ use crate::app::AppState;
 use crate::attempts::snapshot::truncate_to_hour;
 use crate::http::contract::Info;
 
+/// Returns public operational limits and the live canary state.
 pub async fn get_info(State(state): State<AppState>) -> (StatusCode, Json<Value>) {
     let info_state = state.info_state();
     let canary = info_state.current_canary().await;

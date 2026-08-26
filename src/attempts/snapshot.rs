@@ -20,6 +20,8 @@ type AttemptsBuildReceiver = watch::Receiver<Option<Result<AttemptsSnapshotCache
 
 #[cfg(test)]
 #[derive(Default)]
+/// Test-only single-flight probe; cfg(test) excludes synchronization controls
+/// from release builds.
 pub(crate) struct AttemptsBuildProbe {
     pub(crate) started: std::sync::atomic::AtomicUsize,
     pub(crate) hold: std::sync::atomic::AtomicBool,
@@ -29,6 +31,7 @@ pub(crate) struct AttemptsBuildProbe {
 }
 
 #[derive(Clone)]
+/// Shared cache, single-flight watcher, collection clock, and TTL.
 pub(crate) struct AttemptsSnapshotState {
     cache: Arc<Mutex<Option<AttemptsSnapshotCache>>>,
     build: Arc<Mutex<Option<AttemptsBuildReceiver>>>,
@@ -39,6 +42,7 @@ pub(crate) struct AttemptsSnapshotState {
 }
 
 impl AttemptsSnapshotState {
+    /// Creates an empty cache with a fixed validated TTL.
     pub(crate) fn new(ttl: std::time::Duration) -> Self {
         Self {
             cache: Arc::new(Mutex::new(None)),
@@ -50,10 +54,12 @@ impl AttemptsSnapshotState {
         }
     }
 
+    /// Returns the UTC start of the current telemetry collection window.
     pub(crate) async fn collection_started_at(&self) -> chrono::DateTime<chrono::Utc> {
         *self.collection_started_at.lock().await
     }
 
+    /// Returns a fresh-or-cached immutable gzip snapshot for one request.
     pub(crate) async fn snapshot_for_request(
         &self,
         ledger: &AttemptsLedgerState,
@@ -69,6 +75,8 @@ impl AttemptsSnapshotState {
                 }
             }
         }
+        // `watch` makes all concurrent callers observe one build (single
+        // flight), while the TTL bounds how long its immutable result lives.
         let mut build_slot = self.build.lock().await;
         let mut receiver = if let Some(receiver) = build_slot.as_ref() {
             receiver.clone()
@@ -147,6 +155,7 @@ impl AttemptsSnapshotState {
         .map_err(|_| ())?
     }
 
+    /// Wipes ledger telemetry and invalidates the cached representation.
     pub(crate) async fn clear_and_reset_collection(
         &self,
         ledger: &AttemptsLedgerState,
@@ -160,6 +169,7 @@ impl AttemptsSnapshotState {
         count
     }
 
+    /// Computes a positive HTTP cache lifetime remaining under the TTL.
     pub(crate) fn remaining_max_age(&self, created_at: Instant) -> u64 {
         let remaining = self.ttl.saturating_sub(created_at.elapsed());
         (remaining.as_secs() + u64::from(remaining.subsec_nanos() > 0)).max(1)
@@ -184,6 +194,7 @@ impl AttemptsSnapshotState {
 }
 
 #[derive(Serialize, Deserialize)]
+/// One privacy-preserving identifier entry in the HTTP snapshot.
 pub(crate) struct AttemptEntry {
     /// SHA-256 of the raw identifier bytes, so clients can recognize their
     /// own identifier without exposing it (pre-image resistance).
@@ -200,6 +211,7 @@ pub(crate) struct AttemptEntry {
 }
 
 #[derive(Serialize, Deserialize)]
+/// Versioned `/attempts` payload; timestamps are intentionally hour-truncated.
 pub(crate) struct AttemptsSnapshot {
     pub(crate) version: u8,
     /// Hour-truncated start of the in-memory collection. A changed value
@@ -208,6 +220,7 @@ pub(crate) struct AttemptsSnapshot {
     pub(crate) entries: Vec<AttemptEntry>,
 }
 
+/// Truncates a UTC timestamp to the precision promised by the telemetry API.
 pub(crate) fn truncate_to_hour(
     timestamp: chrono::DateTime<chrono::Utc>,
 ) -> chrono::DateTime<chrono::Utc> {

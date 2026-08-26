@@ -1,3 +1,5 @@
+//! Global token-bucket implementation for unauthenticated request damping.
+//!
 /// A simple global token bucket, used to dampen unauthenticated writes.
 /// Behind an onion service every connection arrives from 127.0.0.1, so
 /// per-IP limiting is useless: the bucket is deliberately global. It slows
@@ -11,6 +13,7 @@ pub struct TokenBucket {
 }
 
 impl TokenBucket {
+    /// Creates a full bucket with the configured capacity and refill rate.
     pub fn new(capacity: f64, refill_per_second: f64) -> Self {
         Self {
             tokens: capacity,

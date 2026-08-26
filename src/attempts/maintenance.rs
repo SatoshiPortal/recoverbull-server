@@ -14,12 +14,14 @@ pub(crate) struct AttemptsMaintenanceState {
 }
 
 impl AttemptsMaintenanceState {
+    /// Creates the independent `/attempts` request bucket.
     pub(crate) fn new(capacity: f64, refill_per_second: f64) -> Self {
         Self {
             request_bucket: Arc::new(Mutex::new(TokenBucket::new(capacity, refill_per_second))),
         }
     }
 
+    /// Attempts to consume one telemetry request token.
     pub(crate) async fn try_consume_request(&self) -> bool {
         self.request_bucket.lock().await.try_consume()
     }
@@ -42,9 +44,9 @@ pub(crate) async fn sweep_expired_identifiers(ledger: &AttemptsLedgerState, cool
     ledger.retain_active(chrono::Utc::now(), cooldown).await;
 }
 
-/// Clears identifiers, resets the collection timestamp and invalidates the
-/// cache through the snapshot owner. The snapshot owner preserves
-/// `cache -> map -> timestamp` while this transitional API remains in use.
+/// Clears identifiers, resets collection time, and invalidates the cache.
+/// The owner preserves `cache -> map -> timestamp`; deadlines are explicit so
+/// sweep and wipe work cannot hold locks while logging.
 pub(crate) async fn wipe_identifier_rate_limit(
     ledger: &AttemptsLedgerState,
     snapshot: &AttemptsSnapshotState,
@@ -55,6 +57,7 @@ pub(crate) async fn wipe_identifier_rate_limit(
     tracing::info!(target: "security", count, "daily telemetry wipe completed");
 }
 
+/// Computes the first wipe deadline without an immediate startup wipe.
 pub(crate) fn global_wiper_first_deadline(
     now: tokio::time::Instant,
     period: std::time::Duration,
@@ -64,6 +67,7 @@ pub(crate) fn global_wiper_first_deadline(
 
 /// Owns the detached periodic wiper task; the caller must retain its handle
 /// and fail closed if it exits unexpectedly.
+/// Spawns the detached periodic wipe task with the supplied deadline period.
 pub(crate) fn spawn_global_wiper(
     ledger: AttemptsLedgerState,
     snapshot: AttemptsSnapshotState,
@@ -81,6 +85,7 @@ pub(crate) fn spawn_global_wiper(
     })
 }
 
+/// Spawns the detached ten-minute expiry sweeper.
 pub(crate) fn spawn_sweeper(ledger: AttemptsLedgerState, cooldown: TimeDelta) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(SWEEP_INTERVAL);
@@ -91,6 +96,7 @@ pub(crate) fn spawn_sweeper(ledger: AttemptsLedgerState, cooldown: TimeDelta) {
     });
 }
 
+/// Spawns the production daily wipe task.
 pub(crate) fn spawn_production_wiper(
     ledger: AttemptsLedgerState,
     snapshot: AttemptsSnapshotState,

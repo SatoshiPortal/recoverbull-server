@@ -404,10 +404,11 @@ async fn test_attempts_last_attempt_at_is_last_distinct_candidate() {
 
 #[tokio::test]
 async fn test_attempts_rate_limit_bucket() {
-    let mut state = crate::env::init();
-    state.attempts_token_bucket = std::sync::Arc::new(tokio::sync::Mutex::new(
-        crate::rate_limit::TokenBucket::new(1.0, 0.0),
-    ));
+    let state = crate::env::init();
+    state
+        .attempts_maintenance
+        .set_bucket_for_test(crate::rate_limit::TokenBucket::new(1.0, 0.0))
+        .await;
     crate::storage::sqlite::try_init_db(state.clone()).unwrap();
     let server = axum_test::TestServer::new(crate::router::new_for_tests(state)).unwrap();
 

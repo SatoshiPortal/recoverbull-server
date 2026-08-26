@@ -340,10 +340,10 @@ pub fn init() -> AppState {
             lookup_rate_limit_burst,
             lookup_rate_limit_refill,
         ))),
-        attempts_token_bucket: Arc::new(Mutex::new(crate::rate_limit::TokenBucket::new(
+        attempts_maintenance: crate::attempts::maintenance::AttemptsMaintenanceState::new(
             attempts_rate_limit_burst,
             attempts_rate_limit_refill,
-        ))),
+        ),
         rate_limit_max_identifiers,
         database_semaphore: Arc::new(Semaphore::new(database_max_concurrency)),
         attempts_snapshot: crate::attempts::snapshot::AttemptsSnapshotState::new(

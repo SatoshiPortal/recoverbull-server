@@ -271,7 +271,11 @@ async fn test_canary_updates_and_wipe_do_not_log_canary_value() {
     let (_, first_logs) = capture(async { server.get("/info").await }).await;
     std::fs::write(&canary_path, format!("CANARY={second}\n")).unwrap();
     let (_, second_logs) = capture(async {
-        crate::rate_limit::wipe_identifier_rate_limit(&state).await;
+        crate::attempts::maintenance::wipe_identifier_rate_limit(
+            &state.identifier_rate_limit,
+            &state.attempts_snapshot,
+        )
+        .await;
         server.get("/info").await
     })
     .await;

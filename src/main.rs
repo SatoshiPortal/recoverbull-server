@@ -71,7 +71,7 @@ struct AppState {
     rate_limit_max_attempts: u8,
     store_token_bucket: Arc<Mutex<rate_limit::TokenBucket>>,
     lookup_token_bucket: Arc<Mutex<rate_limit::TokenBucket>>,
-    attempts_token_bucket: Arc<Mutex<rate_limit::TokenBucket>>,
+    attempts_maintenance: attempts::maintenance::AttemptsMaintenanceState,
     rate_limit_max_identifiers: usize,
     database_semaphore: Arc<Semaphore>,
     attempts_snapshot: attempts::snapshot::AttemptsSnapshotState,
@@ -110,8 +110,14 @@ async fn main() {
         std::time::Duration::from_secs(300),
     );
 
-    crate::rate_limit::spawn_sweeper(app_state.clone());
-    let mut wiper = crate::rate_limit::spawn_production_wiper(app_state.clone());
+    crate::attempts::maintenance::spawn_sweeper(
+        app_state.identifier_rate_limit.clone(),
+        app_state.rate_limit_cooldown,
+    );
+    let mut wiper = crate::attempts::maintenance::spawn_production_wiper(
+        app_state.identifier_rate_limit.clone(),
+        app_state.attempts_snapshot.clone(),
+    );
 
     let app = router::new(app_state.clone());
 

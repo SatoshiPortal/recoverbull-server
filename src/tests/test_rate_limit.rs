@@ -20,7 +20,11 @@ async fn test_global_wipe_clears_candidates_resets_timestamp_and_snapshot() {
             .insert("candidate-tag".to_owned(), CandidateState::Committed);
         map.insert(SHA256_111111.to_owned(), info);
     }
-    crate::rate_limit::wipe_identifier_rate_limit(&state).await;
+    crate::attempts::maintenance::wipe_identifier_rate_limit(
+        &state.identifier_rate_limit,
+        &state.attempts_snapshot,
+    )
+    .await;
     assert!(state.identifier_rate_limit.lock_for_test().await.is_empty());
     assert!(!state.attempts_snapshot.is_cached_for_test().await);
     assert!(state.attempts_snapshot.collection_started_at().await > before);
@@ -31,7 +35,7 @@ fn test_global_wiper_first_deadline_is_delayed_by_period() {
     let now = tokio::time::Instant::now();
     let period = Duration::from_secs(24 * 60 * 60);
     assert_eq!(
-        crate::rate_limit::global_wiper_first_deadline(now, period),
+        crate::attempts::maintenance::global_wiper_first_deadline(now, period),
         now + period
     );
 }
@@ -39,7 +43,7 @@ fn test_global_wiper_first_deadline_is_delayed_by_period() {
 #[test]
 fn test_production_global_wipe_interval_is_24_hours() {
     assert_eq!(
-        crate::rate_limit::PRODUCTION_GLOBAL_WIPE_INTERVAL,
+        crate::attempts::maintenance::PRODUCTION_GLOBAL_WIPE_INTERVAL,
         Duration::from_secs(24 * 60 * 60)
     );
 }
@@ -77,7 +81,11 @@ async fn test_sweep_removes_only_expired_entries() {
         );
     }
 
-    crate::rate_limit::sweep_expired_identifiers(&state).await;
+    crate::attempts::maintenance::sweep_expired_identifiers(
+        &state.identifier_rate_limit,
+        state.rate_limit_cooldown,
+    )
+    .await;
 
     let identifier_rate_limit = state.identifier_rate_limit.lock_for_test().await;
     assert!(

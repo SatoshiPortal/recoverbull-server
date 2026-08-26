@@ -32,8 +32,7 @@ const GLOBAL_OVERLOAD_RETRY_AFTER_SECS: u64 = 1;
 /// one cache entry.
 pub async fn get_attempts(State(state): State<AppState>, headers: HeaderMap) -> Response {
     {
-        let mut bucket = state.attempts_token_bucket.lock().await;
-        if !bucket.try_consume() {
+        if !state.attempts_maintenance.try_consume_request().await {
             state.security_counters.attempts_rate_limited();
             return retry_after_response(
                 StatusCode::SERVICE_UNAVAILABLE,

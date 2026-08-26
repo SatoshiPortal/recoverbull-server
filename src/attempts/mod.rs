@@ -20,4 +20,5 @@ pub(crate) struct AttemptStatus {
 }
 
 pub(crate) mod ledger;
+pub(crate) mod maintenance;
 pub(crate) mod snapshot;

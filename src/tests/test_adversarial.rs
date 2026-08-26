@@ -1036,7 +1036,11 @@ async fn test_info_and_snapshot_collection_started_at_agree() {
 
     assert_eq!(info_collection, snapshot_collection);
 
-    crate::rate_limit::wipe_identifier_rate_limit(&state).await;
+    crate::attempts::maintenance::wipe_identifier_rate_limit(
+        &state.identifier_rate_limit,
+        &state.attempts_snapshot,
+    )
+    .await;
     let info = server.get("/info").expect_success().await;
     let info_collection = info.json::<serde_json::Value>()["attempts_collection_started_at"]
         .as_str()
@@ -1424,7 +1428,10 @@ async fn test_info_is_not_rate_limited() {
 
     *state.lookup_token_bucket.lock().await = crate::rate_limit::TokenBucket::new(0.0, 0.0);
     *state.store_token_bucket.lock().await = crate::rate_limit::TokenBucket::new(0.0, 0.0);
-    *state.attempts_token_bucket.lock().await = crate::rate_limit::TokenBucket::new(0.0, 0.0);
+    state
+        .attempts_maintenance
+        .set_bucket_for_test(crate::rate_limit::TokenBucket::new(0.0, 0.0))
+        .await;
 
     let response = server.get("/info").expect_success().await;
     assert_eq!(response.status_code(), StatusCode::OK);

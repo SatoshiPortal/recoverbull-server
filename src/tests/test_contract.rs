@@ -376,7 +376,10 @@ async fn test_global_buckets_use_503_without_targeted_metadata() {
         .is_ok());
 
     // exhaust the global attempts bucket
-    *state.attempts_token_bucket.lock().await = crate::rate_limit::TokenBucket::new(0.0, 0.0);
+    state
+        .attempts_maintenance
+        .set_bucket_for_test(crate::rate_limit::TokenBucket::new(0.0, 0.0))
+        .await;
     let response = server.get("/attempts").expect_failure().await;
     assert_eq!(response.status_code(), StatusCode::SERVICE_UNAVAILABLE);
     let body = response.json::<serde_json::Value>();

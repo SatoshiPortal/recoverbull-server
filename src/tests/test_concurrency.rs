@@ -3,21 +3,24 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 /// Starts the app on a real TCP listener so requests are truly concurrent,
 /// handled in parallel by the multi-threaded runtime.
 async fn spawn_server() -> (std::net::SocketAddr, crate::AppState) {
-    let mut app_state = crate::env::init();
+    let app_state = crate::app::init();
     // Dedicated generous buckets: these tests drive 30-100 requests and must
     // not depend on the environment-provided buckets (code defaults: store
     // burst 10, lookup burst 100) — see SECURITY.md "Test-writing traps".
-    app_state.store_token_bucket = std::sync::Arc::new(tokio::sync::Mutex::new(
-        crate::rate_limit::TokenBucket::new(10_000.0, 10_000.0),
-    ));
-    app_state.lookup_token_bucket = std::sync::Arc::new(tokio::sync::Mutex::new(
-        crate::rate_limit::TokenBucket::new(10_000.0, 10_000.0),
-    ));
-    crate::database::try_init_db(app_state.clone()).unwrap();
+    app_state
+        .recovery
+        .set_store_bucket_for_test(crate::rate_limit::TokenBucket::new(10_000.0, 10_000.0))
+        .await;
+    app_state
+        .recovery
+        .set_lookup_bucket_for_test(crate::rate_limit::TokenBucket::new(10_000.0, 10_000.0))
+        .await;
+    app_state.storage.initialize().unwrap();
     let app = crate::router::new_for_tests(app_state.clone());
 
     let mut connection =
-        crate::database::establish_connection(app_state.clone().database_url).unwrap();
+        crate::storage::sqlite::establish_connection(app_state.storage.database_url_for_test())
+            .unwrap();
     crate::tests::test_server::clear_table_secret(&mut connection).await;
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -127,15 +130,19 @@ async fn test_rate_limit_holds_under_concurrency() {
 
     assert_eq!(other, 0, "unexpected status codes");
     assert_eq!(
-        unauthorized, state.rate_limit_max_attempts as usize,
+        unauthorized,
+        state.attempts.policy.max_attempts() as usize,
         "rate limit bypassed: more guesses consumed than allowed"
     );
-    assert_eq!(too_many, N - state.rate_limit_max_attempts as usize);
+    assert_eq!(too_many, N - state.attempts.policy.max_attempts() as usize);
 }
 
-/// A duplicate arriving while the first trash lookup is Pending is rejected;
-/// once committed, a replay is allowed to reach SQLite and is indistinguishable
-/// from a miss (covered by the distinct-candidate tests).
+/// A concurrent duplicate must not release the secret twice. The deterministic
+/// Pending and Committed branches are proved by
+/// `test_concurrent_trash_hit_does_not_count_the_losing_miss_as_a_guess` and
+/// `test_committed_trash_race_returns_accepted_and_unauthorized_without_failure`;
+/// this TCP test only checks the resulting one-release property across the
+/// scheduling race.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_concurrent_trash_releases_secret_once() {
     let (addr, _) = spawn_server().await;
@@ -154,10 +161,23 @@ async fn test_concurrent_trash_releases_secret_once() {
     );
     let first = tokio::spawn(raw_post(addr, "/trash", trash_body.clone()));
     let second = tokio::spawn(raw_post(addr, "/trash", trash_body));
-    let mut statuses = vec![first.await.unwrap(), second.await.unwrap()];
-    statuses.sort_unstable();
+    let statuses = [first.await.unwrap(), second.await.unwrap()];
+    assert_eq!(
+        statuses.iter().filter(|&&status| status == 202).count(),
+        1,
+        "exactly one concurrent trash request must release the secret"
+    );
 
-    assert_eq!(statuses, vec![202, 503]);
+    let other_status = statuses
+        .iter()
+        .find(|&&status| status != 202)
+        .copied()
+        .expect("one non-success status must accompany the accepted trash");
+    match other_status {
+        401 => {} // the Committed replay observes the already-trashed secret
+        503 => {} // the duplicate observes the first request while Pending
+        status => panic!("unexpected concurrent trash status: {status}"),
+    }
 }
 
 /// The F1 fix under race: 50 concurrent /store calls with the SAME payload
@@ -199,7 +219,9 @@ async fn test_concurrent_identical_store_is_idempotent() {
         "every concurrent identical store must return 201, got: {other:?}"
     );
 
-    let mut connection = crate::database::establish_connection(app_state.database_url).unwrap();
+    let mut connection =
+        crate::storage::sqlite::establish_connection(app_state.storage.database_url_for_test())
+            .unwrap();
     let rows: i64 = crate::schema::secret::table
         .count()
         .get_result(&mut connection)

@@ -1,22 +1,27 @@
-mod database;
-mod diagnostic;
-mod env;
+//! Recoverbull server entry point and bounded process lifecycle.
+//!
+//! Startup assembles shared owners, initializes SQLite, starts maintenance and
+//! reporting tasks, and shuts down with a finite grace period.
+
+mod app;
+mod attempts;
+mod config;
+mod digest;
 mod handlers;
-mod models;
+mod http;
+mod observability;
 mod rate_limit;
+mod recovery;
 mod router;
 mod schema;
-mod security_counters;
+mod storage;
+
+pub(crate) use app::AppState;
 
 #[cfg(test)]
 mod tests;
-mod utils;
 
-use std::{collections::HashMap, future::IntoFuture, sync::Arc, time::Instant};
-
-use axum::body::Bytes;
-use chrono::TimeDelta;
-use tokio::sync::{Mutex, Semaphore};
+use std::future::IntoFuture;
 
 const APP_GRACE_PERIOD: std::time::Duration = std::time::Duration::from_secs(35);
 
@@ -49,76 +54,8 @@ where
     }
 }
 
-/// Immutable `/attempts` representation: serialized and compressed at most
-/// once per TTL window, then shared by every response without copying.
-#[derive(Clone)]
-struct AttemptsSnapshotCache {
-    gzip_body: Arc<Bytes>,
-    etag: String,
-    created_at: Instant,
-}
-
-type AttemptsBuildReceiver =
-    tokio::sync::watch::Receiver<Option<Result<AttemptsSnapshotCache, ()>>>;
-
-#[cfg(test)]
-struct AttemptsBuildProbe {
-    started: std::sync::atomic::AtomicUsize,
-    hold: std::sync::atomic::AtomicBool,
-    released: std::sync::atomic::AtomicBool,
-    started_notify: tokio::sync::Notify,
-    release: tokio::sync::Notify,
-}
-
-#[cfg(test)]
-impl Default for AttemptsBuildProbe {
-    fn default() -> Self {
-        Self {
-            started: std::sync::atomic::AtomicUsize::new(0),
-            hold: std::sync::atomic::AtomicBool::new(false),
-            released: std::sync::atomic::AtomicBool::new(false),
-            started_notify: tokio::sync::Notify::new(),
-            release: tokio::sync::Notify::new(),
-        }
-    }
-}
-
-#[derive(Clone)]
-struct AppState {
-    server_address: String,
-    database_url: String,
-    #[cfg(test)]
-    _test_database_guard: Arc<env::TestDatabaseGuard>,
-    /// Warrant canary captured at startup for unavailable-file fallback, or
-    /// as the authoritative value when it came from process environment.
-    canary: String,
-    /// True when CANARY was provided by the process environment (dotenvy
-    /// never overrides it): the file is then ignored at request time.
-    canary_from_env: bool,
-    /// Dotenv file re-read for every `/info` request.
-    canary_path: std::path::PathBuf,
-    /// Serializes dotenv reads so `/info` cannot exhaust Tokio's blocking pool.
-    canary_read_semaphore: Arc<Semaphore>,
-    rate_limit_cooldown: TimeDelta,
-    identifier_rate_limit: Arc<Mutex<HashMap<String, models::RateLimitInfo>>>,
-    secret_max_length: usize,
-    rate_limit_max_attempts: u8,
-    store_token_bucket: Arc<Mutex<rate_limit::TokenBucket>>,
-    lookup_token_bucket: Arc<Mutex<rate_limit::TokenBucket>>,
-    attempts_token_bucket: Arc<Mutex<rate_limit::TokenBucket>>,
-    rate_limit_max_identifiers: usize,
-    database_semaphore: Arc<Semaphore>,
-    attempts_collection_started_at: Arc<Mutex<chrono::DateTime<chrono::Utc>>>,
-    attempts_snapshot: Arc<Mutex<Option<AttemptsSnapshotCache>>>,
-    attempts_snapshot_build: Arc<Mutex<Option<AttemptsBuildReceiver>>>,
-    #[cfg(test)]
-    attempts_build_probe: Arc<AttemptsBuildProbe>,
-    attempts_snapshot_ttl: std::time::Duration,
-    security_counters: Arc<security_counters::SecurityCounters>,
-    diagnostic_logs: Arc<diagnostic::LogQuota>,
-}
-
 #[tokio::main]
+/// Starts the server after configuration and SQLite capability checks.
 async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -127,34 +64,31 @@ async fn main() {
         )
         .init();
 
-    let app_state = crate::env::init();
+    let app_state = crate::app::build(crate::config::init());
 
-    if !app_state.server_address.starts_with("127.0.0.1")
-        && !app_state.server_address.starts_with("localhost")
-        && !app_state.server_address.starts_with("[::1]")
+    if !app_state.server_address().starts_with("127.0.0.1")
+        && !app_state.server_address().starts_with("localhost")
+        && !app_state.server_address().starts_with("[::1]")
     {
         eprintln!(
             "WARNING: SERVER_ADDRESS ({}) is not loopback. This server is designed to run behind a Tor onion service or a TLS-terminating proxy; never expose it directly on a public interface.",
-            app_state.server_address
+            app_state.server_address()
         );
     }
 
-    if let Err(error) = crate::database::try_init_db(app_state.clone()) {
+    if let Err(error) = app_state.initialize_storage() {
         eprintln!("Failed to initialize database: {error:?}");
         std::process::exit(1);
     }
     tracing::info!(target: "security", secure_delete = true, counter_window_seconds = 300, "security controls enabled");
-    crate::security_counters::spawn_reporter(
-        app_state.clone(),
-        std::time::Duration::from_secs(300),
-    );
+    app_state.spawn_security_reporter(std::time::Duration::from_secs(300));
 
-    crate::rate_limit::spawn_sweeper(app_state.clone());
-    let mut wiper = crate::rate_limit::spawn_production_wiper(app_state.clone());
+    app_state.spawn_attempts_sweeper();
+    let mut wiper = app_state.spawn_production_wiper();
 
     let app = router::new(app_state.clone());
 
-    let listener = tokio::net::TcpListener::bind(&app_state.server_address)
+    let listener = tokio::net::TcpListener::bind(app_state.server_address())
         .await
         .unwrap();
     let (shutdown_trigger, shutdown_request) = tokio::sync::oneshot::channel();

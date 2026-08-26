@@ -4,15 +4,14 @@
 //! integrity. They are written to attack the server, not to confirm it.
 
 use crate::{
-    models::{FetchSecret, StoreSecret},
+    http::contract::{FetchSecret, StoreSecret},
+    recovery::identifiers::identifier_hash,
     tests::{
         BASE64_ENCRYPTED_SECRET, NOT_PASSWORD_HASH, SHA256_111111, SHA256_222222,
         SHA256_CONCAT_111111_222222,
     },
-    utils::identifier_hash,
 };
 use axum::http::StatusCode;
-use diesel::RunQueryDsl;
 use std::io::Read;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -22,111 +21,6 @@ fn decode_snapshot(body: &[u8]) -> serde_json::Value {
     let mut decoded = Vec::new();
     decoder.read_to_end(&mut decoded).unwrap();
     serde_json::from_slice(&decoded).unwrap()
-}
-
-/// The decoded `/attempts` body as searchable text.
-fn snapshot_text(body: &[u8]) -> String {
-    let mut decoder = flate2::read::GzDecoder::new(body);
-    let mut decoded = Vec::new();
-    decoder.read_to_end(&mut decoded).unwrap();
-    String::from_utf8(decoded).unwrap()
-}
-
-// ---------------------------------------------------------------------------
-// Oracles: a wrong key must be indistinguishable whether or not a row exists
-// ---------------------------------------------------------------------------
-
-/// `/fetch` with a wrong key returns the same 401 shape for an unknown
-/// identifier and for a stored one: the only existence signal is the
-/// documented attempt counter, never a different status or body shape.
-#[tokio::test]
-async fn test_fetch_wrong_key_unknown_vs_known_identifier_same_shape() {
-    let (server, _) = crate::tests::test_server::new_test_server().await;
-
-    server
-        .post("/store")
-        .json(&StoreSecret {
-            identifier: SHA256_111111.to_string(),
-            authentication_key: SHA256_222222.to_string(),
-            encrypted_secret: BASE64_ENCRYPTED_SECRET.to_string(),
-        })
-        .expect_success()
-        .await;
-
-    let unknown = server
-        .post("/fetch")
-        .json(&FetchSecret {
-            identifier: SHA256_222222.to_string(),
-            authentication_key: NOT_PASSWORD_HASH.to_string(),
-        })
-        .expect_failure()
-        .await;
-    let known = server
-        .post("/fetch")
-        .json(&FetchSecret {
-            identifier: SHA256_111111.to_string(),
-            authentication_key: NOT_PASSWORD_HASH.to_string(),
-        })
-        .expect_failure()
-        .await;
-
-    assert_eq!(unknown.status_code(), StatusCode::UNAUTHORIZED);
-    assert_eq!(known.status_code(), StatusCode::UNAUTHORIZED);
-    let unknown_keys: Vec<String> = unknown
-        .json::<serde_json::Value>()
-        .as_object()
-        .unwrap()
-        .keys()
-        .cloned()
-        .collect();
-    let known_keys: Vec<String> = known
-        .json::<serde_json::Value>()
-        .as_object()
-        .unwrap()
-        .keys()
-        .cloned()
-        .collect();
-    assert_eq!(
-        unknown_keys, known_keys,
-        "the 401 body shape must not reveal whether the identifier exists"
-    );
-}
-
-/// `/trash` with a wrong key returns 401 whether or not a row exists: it must
-/// not become an identifier-existence oracle either.
-#[tokio::test]
-async fn test_trash_wrong_key_unknown_vs_known_identifier_same_status() {
-    let (server, _) = crate::tests::test_server::new_test_server().await;
-
-    server
-        .post("/store")
-        .json(&StoreSecret {
-            identifier: SHA256_111111.to_string(),
-            authentication_key: SHA256_222222.to_string(),
-            encrypted_secret: BASE64_ENCRYPTED_SECRET.to_string(),
-        })
-        .expect_success()
-        .await;
-
-    let unknown = server
-        .post("/trash")
-        .json(&FetchSecret {
-            identifier: SHA256_222222.to_string(),
-            authentication_key: NOT_PASSWORD_HASH.to_string(),
-        })
-        .expect_failure()
-        .await;
-    let known = server
-        .post("/trash")
-        .json(&FetchSecret {
-            identifier: SHA256_111111.to_string(),
-            authentication_key: NOT_PASSWORD_HASH.to_string(),
-        })
-        .expect_failure()
-        .await;
-
-    assert_eq!(unknown.status_code(), StatusCode::UNAUTHORIZED);
-    assert_eq!(known.status_code(), StatusCode::UNAUTHORIZED);
 }
 
 // ---------------------------------------------------------------------------
@@ -236,7 +130,7 @@ async fn test_successful_fetch_is_not_refunded() {
         .expect_success()
         .await;
 
-    let map = state.identifier_rate_limit.lock().await;
+    let map = state.attempts.ledger.lock_for_test().await;
     let info = &map[&identifier_hash(SHA256_111111).unwrap()];
     assert_eq!(info.candidate_count(), 1, "a 200 must not be refunded");
 }
@@ -248,7 +142,7 @@ async fn test_successful_fetch_is_not_refunded() {
 async fn test_429_does_not_consume_budget() {
     let (server, state) = crate::tests::test_server::new_test_server().await;
 
-    for index in 0..state.rate_limit_max_attempts as usize {
+    for index in 0..state.attempts.policy.max_attempts() as usize {
         server
             .post("/fetch")
             .json(&FetchSecret {
@@ -269,16 +163,16 @@ async fn test_429_does_not_consume_budget() {
         .expect_failure()
         .await;
 
-    let map = state.identifier_rate_limit.lock().await;
+    let map = state.attempts.ledger.lock_for_test().await;
     let info = &map[&identifier_hash(SHA256_111111).unwrap()];
     assert_eq!(
         info.candidate_count(),
-        state.rate_limit_max_attempts,
+        state.attempts.policy.max_attempts(),
         "a 429 must not consume budget"
     );
     assert_eq!(
         info.total_requests,
-        u64::from(state.rate_limit_max_attempts) + 1,
+        u64::from(state.attempts.policy.max_attempts()) + 1,
         "a rejected replay must still increase total_requests"
     );
 }
@@ -289,13 +183,13 @@ async fn test_429_does_not_consume_budget() {
 /// sacrificed to make room.
 #[tokio::test]
 async fn test_full_map_does_not_evict_protected_identifier() {
-    let mut state = crate::env::init();
-    state.rate_limit_max_identifiers = 1;
-    crate::database::try_init_db(state.clone()).unwrap();
+    let mut state = crate::app::init();
+    state.recovery.set_max_identifiers_for_test(1);
+    state.storage.initialize().unwrap();
     let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone())).unwrap();
 
     // lock out the first identifier
-    for index in 0..state.rate_limit_max_attempts as usize {
+    for index in 0..state.attempts.policy.max_attempts() as usize {
         server
             .post("/fetch")
             .json(&FetchSecret {
@@ -365,7 +259,7 @@ async fn test_remaining_attempts_relationship() {
     assert_eq!(total, 1);
     assert_eq!(
         remaining,
-        state.rate_limit_max_attempts - total,
+        state.attempts.policy.max_attempts() - total,
         "remaining must equal max - total_attempts"
     );
     assert_eq!(status["total_requests"], 1);
@@ -394,294 +288,10 @@ async fn test_remaining_attempts_relationship() {
     assert_eq!(total, 2);
     assert_eq!(
         remaining,
-        state.rate_limit_max_attempts - total,
+        state.attempts.policy.max_attempts() - total,
         "remaining must equal max - total_attempts"
     );
     assert_eq!(status["total_requests"], 3);
-}
-
-// ---------------------------------------------------------------------------
-// Input validation: reject anything that is not exactly the expected shape
-// ---------------------------------------------------------------------------
-
-/// A 64-char identifier containing a non-ASCII character (fullwidth lookalike)
-/// is rejected: hex is ASCII-only, and Unicode must never bypass the length
-/// check through multi-byte tricks.
-#[tokio::test]
-async fn test_unicode_identifier_rejected() {
-    let (server, _) = crate::tests::test_server::new_test_server().await;
-
-    // 63 ASCII hex chars + one fullwidth 'ａ' (U+FF41): 64 chars, not hex
-    let mut identifier = "a".repeat(63);
-    identifier.push('ａ');
-
-    let response = server
-        .post("/fetch")
-        .json(&FetchSecret {
-            identifier,
-            authentication_key: SHA256_222222.to_string(),
-        })
-        .expect_failure()
-        .await;
-    assert_eq!(response.status_code(), StatusCode::BAD_REQUEST);
-}
-
-/// An identifier with interior whitespace is rejected: it is not 64 hex
-/// characters, and normalization must not silently strip spaces into a valid
-/// one.
-#[tokio::test]
-async fn test_identifier_with_whitespace_rejected() {
-    let (server, _) = crate::tests::test_server::new_test_server().await;
-
-    let mut identifier = "a".repeat(32);
-    identifier.push(' ');
-    identifier.push_str(&"b".repeat(31));
-
-    let response = server
-        .post("/fetch")
-        .json(&FetchSecret {
-            identifier,
-            authentication_key: SHA256_222222.to_string(),
-        })
-        .expect_failure()
-        .await;
-    assert_eq!(response.status_code(), StatusCode::BAD_REQUEST);
-}
-
-/// Identifier and authentication_key must be exactly 64 hex characters:
-/// empty, 63, 65, and non-hex are all rejected before any lookup.
-#[tokio::test]
-async fn test_malformed_identifier_and_key_lengths_rejected() {
-    let (server, _) = crate::tests::test_server::new_test_server().await;
-
-    for identifier in [
-        String::new(),
-        "a".repeat(63),
-        "a".repeat(65),
-        "z".repeat(64), // not hex
-    ] {
-        let response = server
-            .post("/fetch")
-            .json(&FetchSecret {
-                identifier,
-                authentication_key: SHA256_222222.to_string(),
-            })
-            .expect_failure()
-            .await;
-        assert_eq!(response.status_code(), StatusCode::BAD_REQUEST);
-    }
-
-    for key in [
-        String::new(),
-        "a".repeat(63),
-        "a".repeat(65),
-        "z".repeat(64),
-    ] {
-        let response = server
-            .post("/fetch")
-            .json(&FetchSecret {
-                identifier: SHA256_111111.to_string(),
-                authentication_key: key,
-            })
-            .expect_failure()
-            .await;
-        assert_eq!(response.status_code(), StatusCode::BAD_REQUEST);
-    }
-}
-
-/// The 1024-byte body limit applies to `/fetch` and `/trash` too, not only
-/// `/store`: an oversized body is rejected before deserialization.
-#[tokio::test]
-async fn test_fetch_and_trash_reject_oversized_body() {
-    let (server, _) = crate::tests::test_server::new_test_server().await;
-
-    // serde ignores unknown fields, so a padded but otherwise valid body is
-    // the way to exceed the limit through the JSON extractor
-    let oversized = serde_json::json!({
-        "identifier": SHA256_111111,
-        "authentication_key": SHA256_222222,
-        "pad": "x".repeat(2048),
-    });
-
-    for path in ["/fetch", "/trash"] {
-        let response = server.post(path).json(&oversized).expect_failure().await;
-        assert_eq!(
-            response.status_code(),
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "{path} must enforce the body limit"
-        );
-    }
-}
-
-/// A maximally nested JSON body below the HTTP limit is rejected without
-/// crashing the worker. `FetchSecret` has no recursive fields, and serde's
-/// ignored-value path does not raise a separate recursion-limit error here;
-/// the 1024-byte body limit is therefore the effective nesting bound.
-#[tokio::test]
-async fn test_maximally_nested_under_body_limit_json_rejected_without_crash() {
-    let (server, _) = crate::tests::test_server::new_test_server().await;
-
-    const DEPTH: usize = 500;
-    let mut nested = String::from("{\"ignored\":");
-    for _ in 0..DEPTH {
-        nested.push('[');
-    }
-    nested.push('1');
-    for _ in 0..DEPTH {
-        nested.push(']');
-    }
-    nested.push('}');
-    assert!(
-        nested.len() < 1024,
-        "the nested payload must stay below the HTTP body limit, got {} bytes",
-        nested.len()
-    );
-
-    let response = server
-        .post("/fetch")
-        .bytes(nested.into())
-        .content_type("application/json")
-        .expect_failure()
-        .await;
-    assert!(
-        response.status_code() != StatusCode::PAYLOAD_TOO_LARGE,
-        "the recursion payload must not be rejected by the HTTP body limit"
-    );
-    assert_eq!(
-        response.status_code(),
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "serde JSON recursion errors must use Axum's 422 rejection"
-    );
-    let body = response.text();
-    assert!(
-        body.contains("missing field `identifier`"),
-        "the under-limit nested body must be rejected by the request schema, got: {body}"
-    );
-
-    // the server is still alive
-    let alive = server.get("/info").expect_success().await;
-    assert_eq!(alive.status_code(), StatusCode::OK);
-}
-
-// ---------------------------------------------------------------------------
-// Information disclosure: nothing secret ever leaves the server
-// ---------------------------------------------------------------------------
-
-/// The public `/attempts` snapshot never contains the raw identifier, the
-/// authentication_key, or the encrypted_secret — only the opaque id_hash and
-/// counters.
-#[tokio::test]
-async fn test_snapshot_never_contains_secret_material() {
-    let (server, _) = crate::tests::test_server::new_test_server().await;
-
-    server
-        .post("/store")
-        .json(&StoreSecret {
-            identifier: SHA256_111111.to_string(),
-            authentication_key: SHA256_222222.to_string(),
-            encrypted_secret: BASE64_ENCRYPTED_SECRET.to_string(),
-        })
-        .expect_success()
-        .await;
-    server
-        .post("/fetch")
-        .json(&FetchSecret {
-            identifier: SHA256_111111.to_string(),
-            authentication_key: SHA256_222222.to_string(),
-        })
-        .expect_success()
-        .await;
-
-    let snapshot = server.get("/attempts").expect_success().await;
-    let body = snapshot_text(snapshot.as_bytes());
-    assert!(!body.contains(SHA256_111111), "no raw identifier");
-    assert!(!body.contains(SHA256_222222), "no authentication_key");
-    assert!(
-        !body.contains(BASE64_ENCRYPTED_SECRET),
-        "no encrypted_secret"
-    );
-}
-
-/// Error responses (401, 429, 503) never contain the secret_id, the
-/// encrypted_secret, or the authentication_key.
-#[tokio::test]
-async fn test_error_responses_leak_no_secret_material() {
-    let (server, state) = crate::tests::test_server::new_test_server().await;
-
-    server
-        .post("/store")
-        .json(&StoreSecret {
-            identifier: SHA256_111111.to_string(),
-            authentication_key: SHA256_222222.to_string(),
-            encrypted_secret: BASE64_ENCRYPTED_SECRET.to_string(),
-        })
-        .expect_success()
-        .await;
-
-    // 401
-    let response = server
-        .post("/fetch")
-        .json(&FetchSecret {
-            identifier: SHA256_111111.to_string(),
-            authentication_key: NOT_PASSWORD_HASH.to_string(),
-        })
-        .expect_failure()
-        .await;
-    let body = response.text();
-    assert!(!body.contains(BASE64_ENCRYPTED_SECRET));
-    assert!(!body.contains(SHA256_222222));
-
-    // drive to 429
-    for index in 1..state.rate_limit_max_attempts as usize {
-        server
-            .post("/fetch")
-            .json(&FetchSecret {
-                identifier: SHA256_111111.to_string(),
-                authentication_key: crate::tests::distinct_candidate(index),
-            })
-            .expect_failure()
-            .await;
-    }
-    let response = server
-        .post("/fetch")
-        .json(&FetchSecret {
-            identifier: SHA256_111111.to_string(),
-            authentication_key: NOT_PASSWORD_HASH.to_string(),
-        })
-        .expect_failure()
-        .await;
-    assert_eq!(response.status_code(), StatusCode::TOO_MANY_REQUESTS);
-    let body = response.text();
-    assert!(!body.contains(BASE64_ENCRYPTED_SECRET));
-    assert!(!body.contains(SHA256_222222));
-}
-
-/// The 401's `requested_at` is the caller's own request time, never someone
-/// else's: a failed attempt must not leak when the victim last tried.
-#[tokio::test]
-async fn test_401_requested_at_is_the_callers_own_time() {
-    let (server, _) = crate::tests::test_server::new_test_server().await;
-
-    let before = chrono::Utc::now();
-    let response = server
-        .post("/fetch")
-        .json(&FetchSecret {
-            identifier: SHA256_111111.to_string(),
-            authentication_key: NOT_PASSWORD_HASH.to_string(),
-        })
-        .expect_failure()
-        .await;
-    let after = chrono::Utc::now();
-
-    let requested_at = response.json::<serde_json::Value>()["requested_at"]
-        .as_str()
-        .unwrap()
-        .parse::<chrono::DateTime<chrono::Utc>>()
-        .unwrap();
-    assert!(
-        requested_at >= before && requested_at <= after,
-        "the 401 requested_at must be the caller's own request time"
-    );
 }
 
 // ---------------------------------------------------------------------------
@@ -906,7 +516,7 @@ async fn test_resets_at_advances_with_each_distinct_candidate() {
 async fn test_429_requested_at_is_the_last_admitted_attempt() {
     let (server, state) = crate::tests::test_server::new_test_server().await;
 
-    for index in 0..state.rate_limit_max_attempts as usize {
+    for index in 0..state.attempts.policy.max_attempts() as usize {
         server
             .post("/fetch")
             .json(&FetchSecret {
@@ -948,12 +558,12 @@ async fn test_expired_entry_disappears_from_snapshot() {
 
     // insert an already-expired entry directly into the map
     {
-        let mut map = state.identifier_rate_limit.lock().await;
+        let mut map = state.attempts.ledger.lock_for_test().await;
         let expired_at =
-            chrono::Utc::now() - state.rate_limit_cooldown - chrono::Duration::minutes(1);
+            chrono::Utc::now() - state.attempts.policy.cooldown() - chrono::Duration::minutes(1);
         map.insert(
             identifier_hash(SHA256_111111).unwrap(),
-            crate::models::RateLimitInfo {
+            crate::attempts::ledger::RateLimitInfo {
                 window_started_at: expired_at,
                 last_candidate_at: expired_at,
                 last_request_at: expired_at,
@@ -1036,7 +646,11 @@ async fn test_info_and_snapshot_collection_started_at_agree() {
 
     assert_eq!(info_collection, snapshot_collection);
 
-    crate::rate_limit::wipe_identifier_rate_limit(&state).await;
+    crate::attempts::maintenance::wipe_identifier_rate_limit(
+        &state.attempts.ledger,
+        &state.attempts.snapshot,
+    )
+    .await;
     let info = server.get("/info").expect_success().await;
     let info_collection = info.json::<serde_json::Value>()["attempts_collection_started_at"]
         .as_str()
@@ -1141,7 +755,10 @@ async fn test_lookup_and_store_buckets_are_independent() {
     let (server, state) = crate::tests::test_server::new_test_server().await;
 
     // exhaust the lookup bucket: /fetch is 429 but /store still works
-    *state.lookup_token_bucket.lock().await = crate::rate_limit::TokenBucket::new(0.0, 0.0);
+    state
+        .recovery
+        .set_lookup_bucket_for_test(crate::rate_limit::TokenBucket::new(0.0, 0.0))
+        .await;
     let store = server
         .post("/store")
         .json(&StoreSecret {
@@ -1155,8 +772,14 @@ async fn test_lookup_and_store_buckets_are_independent() {
 
     // restore the lookup bucket, then exhaust the store bucket: /store is
     // 429 but /fetch still reaches the per-identifier path (401, not 429)
-    *state.lookup_token_bucket.lock().await = crate::rate_limit::TokenBucket::new(100.0, 100.0);
-    *state.store_token_bucket.lock().await = crate::rate_limit::TokenBucket::new(0.0, 0.0);
+    state
+        .recovery
+        .set_lookup_bucket_for_test(crate::rate_limit::TokenBucket::new(100.0, 100.0))
+        .await;
+    state
+        .recovery
+        .set_store_bucket_for_test(crate::rate_limit::TokenBucket::new(0.0, 0.0))
+        .await;
     let fetch = server
         .post("/fetch")
         .json(&FetchSecret {
@@ -1174,7 +797,10 @@ async fn test_lookup_and_store_buckets_are_independent() {
 async fn test_lookup_bucket_does_not_block_attempts() {
     let (server, state) = crate::tests::test_server::new_test_server().await;
 
-    *state.lookup_token_bucket.lock().await = crate::rate_limit::TokenBucket::new(0.0, 0.0);
+    state
+        .recovery
+        .set_lookup_bucket_for_test(crate::rate_limit::TokenBucket::new(0.0, 0.0))
+        .await;
     let snapshot = server.get("/attempts").expect_success().await;
     assert_eq!(snapshot.status_code(), StatusCode::OK);
 }
@@ -1274,7 +900,7 @@ async fn test_encrypted_secret_length_boundary() {
     let (server, state) = crate::tests::test_server::new_test_server().await;
 
     // exactly at the limit: accepted
-    let at_limit = "A".repeat(state.secret_max_length);
+    let at_limit = "A".repeat(state.recovery.max_secret_length());
     let response = server
         .post("/store")
         .json(&StoreSecret {
@@ -1286,7 +912,7 @@ async fn test_encrypted_secret_length_boundary() {
     assert_eq!(response.status_code(), StatusCode::CREATED);
 
     // one valid base64 quantum over the limit: rejected
-    let over_limit = "A".repeat(state.secret_max_length + 4);
+    let over_limit = "A".repeat(state.recovery.max_secret_length() + 4);
     let response = server
         .post("/store")
         .json(&StoreSecret {
@@ -1309,7 +935,7 @@ async fn test_encrypted_secret_length_boundary() {
 #[test]
 fn test_secret_id_and_id_hash_are_distinct_algorithms() {
     // generate_secret_id: sha256 over the concatenated hex strings
-    let secret_id = crate::utils::generate_secret_id(SHA256_111111, SHA256_222222);
+    let secret_id = crate::recovery::identifiers::generate_secret_id(SHA256_111111, SHA256_222222);
     assert_eq!(secret_id, SHA256_CONCAT_111111_222222);
 
     // id_hash: sha256 over the raw identifier bytes (shared client vector)
@@ -1326,7 +952,7 @@ fn test_secret_id_and_id_hash_are_distinct_algorithms() {
         hex::decode(SHA256_222222).unwrap(),
     ]
     .concat();
-    let raw_concat_hash = crate::utils::sha256_hex(&raw_concat);
+    let raw_concat_hash = crate::digest::sha256_hex(&raw_concat);
     assert_ne!(
         raw_concat_hash, secret_id,
         "secret_id is over the hex strings, not the raw bytes"
@@ -1337,45 +963,13 @@ fn test_secret_id_and_id_hash_are_distinct_algorithms() {
 // Error handling: no internal detail leaks, exact lockout boundary
 // ---------------------------------------------------------------------------
 
-/// A 500 returns a generic body: no SQL error, no schema detail, no internal
-/// path — the diesel error goes to the operator's logs, never to the client.
-#[tokio::test]
-async fn test_500_does_not_leak_internals() {
-    let (server, state) = crate::tests::test_server::new_test_server().await;
-
-    // force every query to fail
-    let mut connection = crate::database::establish_connection(state.clone().database_url).unwrap();
-    diesel::sql_query("DROP TABLE secret")
-        .execute(&mut connection)
-        .expect("failed to drop table");
-
-    let response = server
-        .post("/fetch")
-        .json(&FetchSecret {
-            identifier: SHA256_111111.to_string(),
-            authentication_key: SHA256_222222.to_string(),
-        })
-        .expect_failure()
-        .await;
-
-    assert_eq!(response.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
-    let body = response.text();
-    assert!(!body.contains("secret"), "no table name: {body}");
-    assert!(!body.contains("no such table"), "no SQL error: {body}");
-    assert!(!body.contains("sqlite"), "no engine detail: {body}");
-    assert!(!body.contains("database"), "no database detail: {body}");
-
-    // restore for the next test
-    crate::database::try_init_db(state.clone()).unwrap();
-}
-
 /// The exact lockout boundary: the max-th attempt is admitted (401), the
 /// (max+1)-th is rejected (429). An off-by-one here either gifts the attacker
 /// a free guess or locks the owner out early.
 #[tokio::test]
 async fn test_lockout_boundary_is_exact() {
     let (server, state) = crate::tests::test_server::new_test_server().await;
-    let max = state.rate_limit_max_attempts;
+    let max = state.attempts.policy.max_attempts();
 
     // the first `max` attempts are all admitted (401)
     for i in 0..max as usize {
@@ -1409,78 +1003,6 @@ async fn test_lockout_boundary_is_exact() {
         "attempt {} of {max} must be rejected",
         max + 1
     );
-}
-
-// ---------------------------------------------------------------------------
-// Route surface: methods, unknown routes, content-type, /info availability
-// ---------------------------------------------------------------------------
-
-/// `/info` is not rate-limited: it stays available even when every bucket is
-/// exhausted (it is the cheap liveness + canary endpoint).
-#[tokio::test]
-async fn test_info_is_not_rate_limited() {
-    let (server, state) = crate::tests::test_server::new_test_server().await;
-
-    *state.lookup_token_bucket.lock().await = crate::rate_limit::TokenBucket::new(0.0, 0.0);
-    *state.store_token_bucket.lock().await = crate::rate_limit::TokenBucket::new(0.0, 0.0);
-    *state.attempts_token_bucket.lock().await = crate::rate_limit::TokenBucket::new(0.0, 0.0);
-
-    let response = server.get("/info").expect_success().await;
-    assert_eq!(response.status_code(), StatusCode::OK);
-}
-
-/// Wrong method on a known route is 405, not 404 and not a handler bypass.
-#[tokio::test]
-async fn test_wrong_method_returns_405() {
-    let (server, _) = crate::tests::test_server::new_test_server().await;
-
-    for (method, path) in [
-        ("GET", "/fetch"),
-        ("GET", "/store"),
-        ("GET", "/trash"),
-        ("POST", "/attempts"),
-        ("POST", "/info"),
-    ] {
-        let response = match method {
-            "GET" => server.get(path).await,
-            _ => server.post(path).text("").await,
-        };
-        assert_eq!(
-            response.status_code(),
-            StatusCode::METHOD_NOT_ALLOWED,
-            "{method} {path} must be 405"
-        );
-    }
-}
-
-/// An unknown route is 404: no catch-all handler leaks into an endpoint.
-#[tokio::test]
-async fn test_unknown_route_returns_404() {
-    let (server, _) = crate::tests::test_server::new_test_server().await;
-
-    let response = server.get("/nonexistent").await;
-    assert_eq!(response.status_code(), StatusCode::NOT_FOUND);
-}
-
-/// A POST without a JSON content-type is 415: the Json extractor rejects it
-/// before any handler logic runs.
-#[tokio::test]
-async fn test_missing_or_wrong_content_type_returns_415() {
-    let (server, _) = crate::tests::test_server::new_test_server().await;
-
-    let body = format!(
-        "{{\"identifier\":\"{}\",\"authentication_key\":\"{}\"}}",
-        SHA256_111111, SHA256_222222
-    );
-
-    // wrong content-type
-    let response = server
-        .post("/fetch")
-        .add_header("content-type", "text/plain")
-        .text(body.clone())
-        .expect_failure()
-        .await;
-    assert_eq!(response.status_code(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
 }
 
 // ---------------------------------------------------------------------------
@@ -1565,17 +1087,17 @@ async fn test_resets_at_is_in_the_future_for_active_entry() {
 /// counter stays at 255 — no wrap-around to 0 that would unlock the budget.
 #[tokio::test]
 async fn test_attempts_counter_does_not_overflow_at_u8_max() {
-    let mut state = crate::env::init();
-    state.rate_limit_max_attempts = 255;
-    crate::database::try_init_db(state.clone()).unwrap();
+    let mut state = crate::app::init();
+    state.recovery.set_max_attempts_for_test(255);
+    state.storage.initialize().unwrap();
     let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone())).unwrap();
 
     // seed the map at 254 so only two requests are needed
     {
-        let mut map = state.identifier_rate_limit.lock().await;
+        let mut map = state.attempts.ledger.lock_for_test().await;
         map.insert(
             identifier_hash(SHA256_111111).unwrap(),
-            crate::models::RateLimitInfo {
+            crate::attempts::ledger::RateLimitInfo {
                 window_started_at: chrono::Utc::now(),
                 last_candidate_at: chrono::Utc::now(),
                 last_request_at: chrono::Utc::now(),
@@ -1583,7 +1105,7 @@ async fn test_attempts_counter_does_not_overflow_at_u8_max() {
                     .map(|i| {
                         (
                             format!("candidate-{i}"),
-                            crate::models::CandidateState::Committed,
+                            crate::attempts::ledger::CandidateState::Committed,
                         )
                     })
                     .collect(),
@@ -1615,7 +1137,7 @@ async fn test_attempts_counter_does_not_overflow_at_u8_max() {
         .await;
     assert_eq!(response.status_code(), StatusCode::TOO_MANY_REQUESTS);
 
-    let map = state.identifier_rate_limit.lock().await;
+    let map = state.attempts.ledger.lock_for_test().await;
     assert_eq!(
         map[&identifier_hash(SHA256_111111).unwrap()].candidate_count(),
         255,
@@ -1628,11 +1150,12 @@ async fn test_attempts_counter_does_not_overflow_at_u8_max() {
 /// under concurrency.
 #[tokio::test]
 async fn test_concurrent_attempts_polls_agree_on_etag() {
-    let app_state = crate::env::init();
-    crate::database::try_init_db(app_state.clone()).unwrap();
+    let app_state = crate::app::init();
+    app_state.storage.initialize().unwrap();
     let app = crate::router::new_for_tests(app_state.clone());
     let mut connection =
-        crate::database::establish_connection(app_state.clone().database_url).unwrap();
+        crate::storage::sqlite::establish_connection(app_state.storage.database_url_for_test())
+            .unwrap();
     crate::tests::test_server::clear_table_secret(&mut connection).await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

@@ -9,7 +9,7 @@ use tracing::instrument::WithSubscriber;
 use tracing_subscriber::layer::SubscriberExt;
 
 use crate::{
-    models::{FetchSecret, StoreSecret},
+    http::contract::{FetchSecret, StoreSecret},
     tests::{BASE64_ENCRYPTED_SECRET, SHA256_111111, SHA256_222222, SHA256_CONCAT_111111_222222},
 };
 
@@ -61,10 +61,13 @@ async fn capture<F: Future>(future: F) -> (F::Output, String) {
 }
 
 fn assert_no_sensitive_values(logs: &str, canary: &str) {
-    let id_hash = crate::utils::identifier_hash(SHA256_111111).unwrap();
-    let known_candidate = crate::utils::generate_secret_id(SHA256_111111, SHA256_222222);
-    let miss_candidate =
-        crate::utils::generate_secret_id(SHA256_111111, &crate::tests::distinct_candidate(0));
+    let id_hash = crate::recovery::identifiers::identifier_hash(SHA256_111111).unwrap();
+    let known_candidate =
+        crate::recovery::identifiers::generate_secret_id(SHA256_111111, SHA256_222222);
+    let miss_candidate = crate::recovery::identifiers::generate_secret_id(
+        SHA256_111111,
+        &crate::tests::distinct_candidate(0),
+    );
     for sensitive in [
         SHA256_111111,
         SHA256_222222,
@@ -85,7 +88,7 @@ fn assert_no_sensitive_values(logs: &str, canary: &str) {
 #[test]
 fn test_request_ids_are_fixed_width_and_non_repeating() {
     let ids: std::collections::HashSet<_> = (0..1_000)
-        .map(|_| crate::diagnostic::request_id())
+        .map(|_| crate::observability::diagnostic::request_id())
         .collect();
     assert_eq!(ids.len(), 1_000);
     assert!(ids
@@ -97,29 +100,41 @@ fn test_request_ids_are_fixed_width_and_non_repeating() {
 fn test_duration_bucket_boundaries_are_deterministic() {
     use std::time::Duration;
     assert_eq!(
-        crate::diagnostic::duration_bucket(Duration::from_millis(499)),
+        crate::observability::diagnostic::duration_bucket(Duration::from_millis(499)),
         "lt500ms"
     );
     assert_eq!(
-        crate::diagnostic::duration_bucket(Duration::from_millis(500)),
+        crate::observability::diagnostic::duration_bucket(Duration::from_millis(500)),
         "500ms_1s"
     );
     assert_eq!(
-        crate::diagnostic::duration_bucket(Duration::from_secs(1)),
+        crate::observability::diagnostic::duration_bucket(Duration::from_secs(1)),
         "1s_5s"
     );
     assert_eq!(
-        crate::diagnostic::duration_bucket(Duration::from_secs(5)),
+        crate::observability::diagnostic::duration_bucket(Duration::from_secs(5)),
         "gte5s"
     );
 }
 
 #[test]
 fn test_status_categories_are_deterministic() {
-    assert_eq!(crate::diagnostic::status_category(503), "overload");
-    assert_eq!(crate::diagnostic::status_category(500), "server_error");
-    assert_eq!(crate::diagnostic::status_category(429), "overload");
-    assert_eq!(crate::diagnostic::status_category(400), "client_error");
+    assert_eq!(
+        crate::observability::diagnostic::status_category(503),
+        "overload"
+    );
+    assert_eq!(
+        crate::observability::diagnostic::status_category(500),
+        "server_error"
+    );
+    assert_eq!(
+        crate::observability::diagnostic::status_category(429),
+        "overload"
+    );
+    assert_eq!(
+        crate::observability::diagnostic::status_category(400),
+        "client_error"
+    );
 }
 
 #[tokio::test]
@@ -167,7 +182,7 @@ async fn test_other_route_logs_do_not_contain_user_path_or_header() {
     assert!(!logs.contains("user-controlled"));
     assert!(!logs.contains("fixture-secret"));
     assert!(!logs.contains("client-controlled-id"));
-    assert!(state.security_counters.flush().diagnostic_logs_emitted > 0);
+    assert!(state.observability.counters.flush().diagnostic_logs_emitted > 0);
 }
 
 #[tokio::test]
@@ -187,7 +202,7 @@ async fn test_debug_request_logging_is_quota_bounded() {
         detailed <= 10,
         "request diagnostics escaped quota: {detailed}"
     );
-    let counters = state.security_counters.flush();
+    let counters = state.observability.counters.flush();
     assert_eq!(
         counters.diagnostic_logs_emitted + counters.diagnostic_logs_suppressed,
         1_000
@@ -243,13 +258,13 @@ async fn test_sensitive_operations_do_not_log_secret_material() {
     assert_eq!(responses.2, StatusCode::UNAUTHORIZED);
     assert_eq!(responses.3, StatusCode::ACCEPTED);
     assert_eq!(responses.4, StatusCode::UNAUTHORIZED);
-    assert_no_sensitive_values(&logs, &state.canary);
+    assert_no_sensitive_values(&logs, state.info.canary_for_test());
 }
 
 #[tokio::test]
 async fn test_canary_updates_and_wipe_do_not_log_canary_value() {
-    let mut state = crate::env::init();
-    state.canary_from_env = false;
+    let mut state = crate::app::init();
+    state.info.set_canary_from_env_for_test(false);
     let canary_path = std::env::temp_dir().join(format!(
         "recoverbull-test-logging-canary-{}-{}",
         std::process::id(),
@@ -258,8 +273,8 @@ async fn test_canary_updates_and_wipe_do_not_log_canary_value() {
             .unwrap()
             .as_nanos()
     ));
-    state.canary_path = canary_path.clone();
-    crate::database::try_init_db(state.clone()).unwrap();
+    state.info.set_canary_path_for_test(canary_path.clone());
+    state.storage.initialize().unwrap();
     let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone())).unwrap();
     let first = "logging-canary-first";
     let second = "logging-canary-second";
@@ -268,7 +283,11 @@ async fn test_canary_updates_and_wipe_do_not_log_canary_value() {
     let (_, first_logs) = capture(async { server.get("/info").await }).await;
     std::fs::write(&canary_path, format!("CANARY={second}\n")).unwrap();
     let (_, second_logs) = capture(async {
-        crate::rate_limit::wipe_identifier_rate_limit(&state).await;
+        crate::attempts::maintenance::wipe_identifier_rate_limit(
+            &state.attempts.ledger,
+            &state.attempts.snapshot,
+        )
+        .await;
         server.get("/info").await
     })
     .await;
@@ -290,7 +309,9 @@ async fn test_database_error_logs_are_diagnostic_without_sensitive_details() {
     use diesel::RunQueryDsl;
 
     let (server, state) = crate::tests::test_server::new_test_server().await;
-    let mut connection = crate::database::establish_connection(state.database_url.clone()).unwrap();
+    let mut connection =
+        crate::storage::sqlite::establish_connection(state.storage.database_url_for_test())
+            .unwrap();
     diesel::sql_query("DROP TABLE secret")
         .execute(&mut connection)
         .unwrap();
@@ -301,9 +322,9 @@ async fn test_database_error_logs_are_diagnostic_without_sensitive_details() {
 
     let (response, logs) = capture(async { server.post("/fetch").json(&request).await }).await;
     assert_eq!(response.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
-    assert_no_sensitive_values(&logs, &state.canary);
+    assert_no_sensitive_values(&logs, state.info.canary_for_test());
     assert!(
-        !logs.contains(&state.database_url),
+        !logs.contains(&state.storage.database_url_for_test()),
         "log leaked the database path: {logs}"
     );
     assert!(!logs.contains("SELECT"));
@@ -317,7 +338,10 @@ async fn test_database_error_logs_are_diagnostic_without_sensitive_details() {
 #[tokio::test]
 async fn test_global_lookup_rejection_logging_is_bounded() {
     let (server, state) = crate::tests::test_server::new_test_server().await;
-    *state.lookup_token_bucket.lock().await = crate::rate_limit::TokenBucket::new(1.0, 0.0);
+    state
+        .recovery
+        .set_lookup_bucket_for_test(crate::rate_limit::TokenBucket::new(1.0, 0.0))
+        .await;
     let request = FetchSecret {
         identifier: SHA256_111111.to_owned(),
         authentication_key: SHA256_222222.to_owned(),
@@ -344,12 +368,15 @@ async fn test_global_lookup_rejection_logging_is_bounded() {
         warning_lines <= 2,
         "expected O(1) rejection warnings, observed {warning_lines}: {logs}"
     );
-    assert_eq!(state.security_counters.flush().lookup_rate_limited, 999);
+    assert_eq!(
+        state.observability.counters.flush().lookup_rate_limited,
+        999
+    );
 }
 
 #[test]
 fn test_security_counter_saturates_and_flush_resets() {
-    let counters = crate::security_counters::SecurityCounters::default();
+    let counters = crate::observability::counters::SecurityCounters::default();
     counters.set_database_error_for_test(u64::MAX - 1);
     counters.database_error();
     counters.database_error();
@@ -359,7 +386,7 @@ fn test_security_counter_saturates_and_flush_resets() {
 
 #[test]
 fn test_diagnostic_counters_saturate_and_flush() {
-    let counters = crate::security_counters::SecurityCounters::default();
+    let counters = crate::observability::counters::SecurityCounters::default();
     counters.set_diagnostic_logs_for_test(u64::MAX - 1, u64::MAX - 1);
     counters.diagnostic_logs_emitted();
     counters.diagnostic_logs_emitted();
@@ -375,11 +402,11 @@ fn test_diagnostic_counters_saturate_and_flush() {
 #[tokio::test]
 async fn test_counter_report_is_one_line_and_resets_window() {
     let (_, state) = crate::tests::test_server::new_test_server().await;
-    state.security_counters.store_rejected();
+    state.observability.counters.store_rejected();
     let (_, logs) = capture(async {
-        crate::security_counters::report_once(&state);
+        crate::observability::counters::report_once(&state.observability);
     })
     .await;
     assert_eq!(logs.lines().count(), 1, "unexpected counter report: {logs}");
-    assert_eq!(state.security_counters.flush().store_rejected, 0);
+    assert_eq!(state.observability.counters.flush().store_rejected, 0);
 }

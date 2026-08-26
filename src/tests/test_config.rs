@@ -1,4 +1,4 @@
-use crate::env::{
+use crate::config::{
     canary_file_state, unique_test_database, validate_capacity, validate_config,
     validate_snapshot_ttl, validate_token_bucket, CanaryFileState, MAX_DATABASE_CONCURRENCY,
     MAX_RATE_LIMIT_IDENTIFIERS,

@@ -1,9 +1,5 @@
-use axum::{
-    extract::Request,
-    http::{HeaderValue, Method},
-    middleware::Next,
-    response::Response,
-};
+//! Request diagnostics with privacy-preserving IDs and separate log quotas.
+
 use sha2::{Digest, Sha256};
 use std::{
     sync::{
@@ -13,7 +9,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use crate::{security_counters::SecurityCounters, AppState};
+use crate::observability::{ObservabilityState, SecurityCounters};
 
 static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -28,6 +24,7 @@ struct Bucket {
     last: Instant,
 }
 
+/// Separate token buckets limiting server-error and detail diagnostics.
 pub(crate) struct LogQuota {
     server_error: Mutex<Bucket>,
     detail: Mutex<Bucket>,
@@ -73,6 +70,7 @@ pub(crate) fn new_quota() -> Arc<LogQuota> {
     Arc::new(LogQuota::new())
 }
 
+/// Generates a process-local opaque request identifier for diagnostics.
 pub(crate) fn request_id() -> String {
     let sequence = REQUEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let pid = std::process::id();
@@ -87,6 +85,7 @@ pub(crate) fn request_id() -> String {
     hex::encode(hasher.finalize())
 }
 
+/// Maps only known paths to the diagnostic route allowlist.
 pub(crate) fn route_kind(path: &str) -> &'static str {
     match path {
         "/store" => "store",
@@ -98,8 +97,9 @@ pub(crate) fn route_kind(path: &str) -> &'static str {
     }
 }
 
-pub(crate) fn method_kind(method: &Method) -> &'static str {
-    match method.as_str() {
+/// Maps known HTTP methods while collapsing others to `other`.
+pub(crate) fn method_kind(method: &str) -> &'static str {
+    match method {
         "GET" => "GET",
         "POST" => "POST",
         "PUT" => "PUT",
@@ -111,6 +111,7 @@ pub(crate) fn method_kind(method: &Method) -> &'static str {
     }
 }
 
+/// Reduces elapsed time to a non-sensitive fixed bucket.
 pub(crate) fn duration_bucket(duration: Duration) -> &'static str {
     match duration {
         d if d < Duration::from_millis(500) => "lt500ms",
@@ -120,6 +121,7 @@ pub(crate) fn duration_bucket(duration: Duration) -> &'static str {
     }
 }
 
+/// Maps status codes to the bounded diagnostic category set.
 pub(crate) fn status_category(status: u16) -> &'static str {
     match status {
         408 | 429 | 503 => "overload",
@@ -145,6 +147,8 @@ fn emit(
     class: QuotaClass,
     event: DiagnosticEvent<'_>,
 ) {
+    // Only the allowlisted route/method/category dimensions reach logs; quota
+    // decisions are made before emission and are reflected in counters.
     let level_enabled = match class {
         QuotaClass::ServerError => {
             tracing::enabled!(target: "request_diagnostics", tracing::Level::WARN)
@@ -186,15 +190,15 @@ fn emit(
     }
 }
 
-pub(crate) async fn middleware(state: AppState, mut request: Request, next: Next) -> Response {
-    // A client-supplied value must not reach handlers or influence diagnostics.
-    request.headers_mut().remove("x-request-id");
-    let request_id = request_id();
-    let route = route_kind(request.uri().path());
-    let method = method_kind(request.method());
-    let started = Instant::now();
-    let mut response = next.run(request).await;
-    let status = response.status().as_u16();
+/// Emits one quota-controlled diagnostic event from transport-neutral values.
+pub(crate) fn record(
+    state: &ObservabilityState,
+    request_id: &str,
+    route: &'static str,
+    method: &'static str,
+    status: u16,
+    duration: Duration,
+) {
     let category = status_category(status);
     let class = if category == "server_error" {
         QuotaClass::ServerError
@@ -202,20 +206,16 @@ pub(crate) async fn middleware(state: AppState, mut request: Request, next: Next
         QuotaClass::Detail
     };
     emit(
-        &state.diagnostic_logs,
-        &state.security_counters,
+        &state.log_quota,
+        &state.counters,
         class,
         DiagnosticEvent {
-            request_id: &request_id,
+            request_id,
             route,
             method,
             status,
             category,
-            duration: duration_bucket(started.elapsed()),
+            duration: duration_bucket(duration),
         },
     );
-    if let Ok(value) = HeaderValue::from_str(&request_id) {
-        response.headers_mut().insert("x-request-id", value);
-    }
-    response
 }

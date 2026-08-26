@@ -8,14 +8,15 @@ pub async fn new_test_server() -> (TestServer, crate::AppState) {
 }
 
 pub async fn new_test_server_with_delay(response_delay: Duration) -> (TestServer, crate::AppState) {
-    let app_state = crate::env::init();
+    let app_state = crate::app::init();
 
-    crate::database::try_init_db(app_state.clone()).unwrap();
+    app_state.storage.initialize().unwrap();
 
     let app = crate::router::new_with_response_delay(app_state.clone(), response_delay);
 
     let mut connection =
-        crate::database::establish_connection(app_state.clone().database_url).unwrap();
+        crate::storage::sqlite::establish_connection(app_state.storage.database_url_for_test())
+            .unwrap();
     clear_table_secret(&mut connection).await;
 
     (TestServer::new(app).unwrap(), app_state)

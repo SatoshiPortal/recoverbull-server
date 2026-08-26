@@ -1,9 +1,12 @@
-use chrono::Duration;
-use dotenvy::dotenv;
-use std::{collections::HashMap, env, fmt::Display, str::FromStr, sync::Arc};
-use tokio::sync::{Mutex, Semaphore};
+//! Environment loading, validation, and typed configuration passed to owners.
+//!
+//! Initialization reads required values, applies compatibility fallbacks, then
+//! validates limits in dependency order before constructing subsystem configs.
 
-use crate::AppState;
+use dotenvy::dotenv;
+#[cfg(test)]
+use std::sync::Arc;
+use std::{env, fmt::Display, str::FromStr};
 
 fn optional_env<T>(name: &str, default: T) -> T
 where
@@ -24,10 +27,12 @@ where
 }
 
 /// Builds a database path unique to this call, under the OS temp directory.
-/// Every test calls `env::init()`, so each test gets its own SQLite file:
+/// Every test calls `app::init()`, so each test gets its own SQLite file:
 /// without this, all tests shared a single file and ran into each other's
 /// data under `cargo test`'s parallel execution.
 #[cfg(test)]
+/// Test-only lifetime guard for an isolated SQLite database and its sidecars;
+/// `cfg(test)` excludes this parallel-test seam from release builds.
 pub(crate) struct TestDatabaseGuard {
     path: std::path::PathBuf,
 }
@@ -47,6 +52,7 @@ impl Drop for TestDatabaseGuard {
 }
 
 #[cfg(test)]
+/// Test-only unique database allocation; each guard removes SQLite sidecars on drop.
 pub(crate) fn unique_test_database() -> (String, Arc<TestDatabaseGuard>) {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let count = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -193,7 +199,57 @@ pub fn canary_file_state(path: &std::path::Path) -> CanaryFileState {
     CanaryFileState::Removed
 }
 
-pub fn init() -> AppState {
+#[derive(Clone)]
+/// Storage settings, including the bounded database concurrency owner.
+pub(crate) struct StorageConfig {
+    pub(crate) database_url: String,
+    pub(crate) database_max_concurrency: usize,
+    #[cfg(test)]
+    pub(crate) test_database_guard: Arc<TestDatabaseGuard>,
+}
+
+#[derive(Clone)]
+/// Recovery validation and global bucket settings.
+pub(crate) struct RecoveryConfig {
+    pub(crate) store_rate_limit_burst: f64,
+    pub(crate) store_rate_limit_refill: f64,
+    pub(crate) lookup_rate_limit_burst: f64,
+    pub(crate) lookup_rate_limit_refill: f64,
+    pub(crate) secret_max_length: usize,
+}
+
+#[derive(Clone)]
+/// Attempt admission, map-capacity, and snapshot-cache settings.
+pub(crate) struct AttemptsConfig {
+    pub(crate) rate_limit_cooldown_minutes: i64,
+    pub(crate) rate_limit_max_attempts: u8,
+    pub(crate) rate_limit_max_identifiers: usize,
+    pub(crate) attempts_rate_limit_burst: f64,
+    pub(crate) attempts_rate_limit_refill: f64,
+    pub(crate) snapshot_ttl: std::time::Duration,
+}
+
+#[derive(Clone)]
+/// `/info` canary settings, including whether the process environment wins.
+pub(crate) struct InfoConfig {
+    pub(crate) canary: String,
+    pub(crate) canary_from_env: bool,
+    pub(crate) canary_path: std::path::PathBuf,
+}
+
+#[derive(Clone)]
+/// Fully parsed and validated configuration used to build application state.
+pub(crate) struct ValidatedConfig {
+    pub(crate) server_address: String,
+    pub(crate) storage: StorageConfig,
+    pub(crate) recovery: RecoveryConfig,
+    pub(crate) attempts: AttemptsConfig,
+    pub(crate) info: InfoConfig,
+}
+
+/// Loads environment and dotenv configuration, validates every configured
+/// bound, and returns the values consumed by the application owners.
+pub fn init() -> ValidatedConfig {
     // Whether CANARY comes from the process environment must be known before
     // dotenv loads the file: dotenvy never overrides an existing variable.
     // An environment-provided canary is authoritative (file edits are
@@ -319,40 +375,33 @@ pub fn init() -> AppState {
         std::process::exit(1);
     }
 
-    AppState {
+    ValidatedConfig {
         server_address: server_addr,
-        database_url,
-        #[cfg(test)]
-        _test_database_guard: test_database_guard,
-        canary,
-        canary_from_env,
-        canary_path: dotenv_path.unwrap_or_else(|| std::path::PathBuf::from(".env")),
-        canary_read_semaphore: Arc::new(Semaphore::new(1)),
-        rate_limit_cooldown: Duration::minutes(rate_limit_cooldown as i64),
-        identifier_rate_limit: Arc::new(Mutex::new(HashMap::new())),
-        secret_max_length,
-        rate_limit_max_attempts,
-        store_token_bucket: Arc::new(Mutex::new(crate::rate_limit::TokenBucket::new(
+        storage: StorageConfig {
+            database_url,
+            database_max_concurrency,
+            #[cfg(test)]
+            test_database_guard,
+        },
+        recovery: RecoveryConfig {
             store_rate_limit_burst,
             store_rate_limit_refill,
-        ))),
-        lookup_token_bucket: Arc::new(Mutex::new(crate::rate_limit::TokenBucket::new(
             lookup_rate_limit_burst,
             lookup_rate_limit_refill,
-        ))),
-        attempts_token_bucket: Arc::new(Mutex::new(crate::rate_limit::TokenBucket::new(
+            secret_max_length,
+        },
+        attempts: AttemptsConfig {
+            rate_limit_cooldown_minutes: rate_limit_cooldown,
+            rate_limit_max_attempts,
+            rate_limit_max_identifiers,
             attempts_rate_limit_burst,
             attempts_rate_limit_refill,
-        ))),
-        rate_limit_max_identifiers,
-        database_semaphore: Arc::new(Semaphore::new(database_max_concurrency)),
-        attempts_collection_started_at: Arc::new(tokio::sync::Mutex::new(chrono::Utc::now())),
-        attempts_snapshot: Arc::new(Mutex::new(None)),
-        attempts_snapshot_build: Arc::new(Mutex::new(None)),
-        #[cfg(test)]
-        attempts_build_probe: Arc::new(crate::AttemptsBuildProbe::default()),
-        attempts_snapshot_ttl: std::time::Duration::from_secs(attempts_snapshot_ttl_seconds),
-        security_counters: Arc::new(crate::security_counters::SecurityCounters::default()),
-        diagnostic_logs: crate::diagnostic::new_quota(),
+            snapshot_ttl: std::time::Duration::from_secs(attempts_snapshot_ttl_seconds),
+        },
+        info: InfoConfig {
+            canary,
+            canary_from_env,
+            canary_path: dotenv_path.unwrap_or_else(|| std::path::PathBuf::from(".env")),
+        },
     }
 }

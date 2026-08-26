@@ -1,7 +1,7 @@
 use axum::http::StatusCode;
 
 use crate::{
-    models::{FetchSecret, Secret, StoreSecret},
+    http::contract::{FetchSecret, StoreSecret},
     tests::{BASE64_ENCRYPTED_SECRET, SHA256_111111, SHA256_222222},
 };
 
@@ -52,8 +52,8 @@ async fn test_duplicate_store_is_indistinguishable_and_does_not_overwrite() {
         })
         .expect_success()
         .await
-        .json::<Secret>();
-    assert_eq!(fetched.encrypted_secret, BASE64_ENCRYPTED_SECRET);
+        .json::<serde_json::Value>();
+    assert_eq!(fetched["encrypted_secret"], BASE64_ENCRYPTED_SECRET);
 }
 
 #[tokio::test]
@@ -110,7 +110,8 @@ async fn test_failure_encrypted_secret_invalid_base64() {
 async fn test_store_checks_length_before_base64() {
     let (server, state) = crate::tests::test_server::new_test_server().await;
 
-    let oversized_invalid = "!".repeat(state.secret_max_length + 4 - (state.secret_max_length % 4));
+    let oversized_invalid = "!"
+        .repeat(state.recovery.max_secret_length() + 4 - (state.recovery.max_secret_length() % 4));
     let response = server
         .post("/store")
         .json(&StoreSecret {
@@ -139,7 +140,9 @@ async fn test_store_database_error_returns_coherent_body() {
     let (server, state) = crate::tests::test_server::new_test_server().await;
 
     // Force the write to fail: drop the table out from under the server.
-    let mut connection = crate::database::establish_connection(state.clone().database_url).unwrap();
+    let mut connection =
+        crate::storage::sqlite::establish_connection(state.storage.database_url_for_test())
+            .unwrap();
     diesel::sql_query("DROP TABLE secret")
         .execute(&mut connection)
         .expect("failed to drop table");

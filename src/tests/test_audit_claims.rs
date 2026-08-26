@@ -8,7 +8,7 @@
 //! behavior — that breakage is the signal that the fix landed.
 
 use crate::{
-    models::{FetchSecret, StoreSecret},
+    http::contract::{FetchSecret, StoreSecret},
     tests::{BASE64_ENCRYPTED_SECRET, NOT_PASSWORD_HASH, SHA256_111111, SHA256_222222},
 };
 use axum::http::StatusCode;
@@ -25,14 +25,16 @@ async fn test_audit_f1_store_gives_no_existence_signal() {
     // depend on the environment-provided bucket (burst defaults to 10 in the
     // README while CI and the repo .env set 10000), otherwise the final
     // assertion fails on a 503 for a reason unrelated to the oracle.
-    let mut app_state = crate::env::init();
-    app_state.store_token_bucket = std::sync::Arc::new(tokio::sync::Mutex::new(
-        crate::rate_limit::TokenBucket::new(12.0, 0.0),
-    ));
-    crate::database::try_init_db(app_state.clone()).unwrap();
+    let app_state = crate::app::init();
+    app_state
+        .recovery
+        .set_store_bucket_for_test(crate::rate_limit::TokenBucket::new(12.0, 0.0))
+        .await;
+    app_state.storage.initialize().unwrap();
     let app = crate::router::new_for_tests(app_state.clone());
     let mut connection =
-        crate::database::establish_connection(app_state.clone().database_url).unwrap();
+        crate::storage::sqlite::establish_connection(app_state.storage.database_url_for_test())
+            .unwrap();
     crate::tests::test_server::clear_table_secret(&mut connection).await;
     let server = axum_test::TestServer::new(app).unwrap();
 
@@ -77,7 +79,7 @@ async fn test_audit_f1_planted_rows_cannot_reset_fetch_rate_limit() {
         .expect_success()
         .await;
 
-    for i in 0..state.rate_limit_max_attempts {
+    for i in 0..state.attempts.policy.max_attempts() {
         let guessed_key = format!("{:064x}", i + 1);
         let marker = "dGVzdA==";
 
@@ -171,14 +173,16 @@ async fn test_audit_f2_attacker_failures_deny_legitimate_owner() {
 /// for determinism.
 #[tokio::test]
 async fn test_audit_f9_store_writes_are_token_bucketed() {
-    let mut app_state = crate::env::init();
-    app_state.store_token_bucket = std::sync::Arc::new(tokio::sync::Mutex::new(
-        crate::rate_limit::TokenBucket::new(3.0, 0.0),
-    ));
-    crate::database::try_init_db(app_state.clone()).unwrap();
+    let app_state = crate::app::init();
+    app_state
+        .recovery
+        .set_store_bucket_for_test(crate::rate_limit::TokenBucket::new(3.0, 0.0))
+        .await;
+    app_state.storage.initialize().unwrap();
     let app = crate::router::new_for_tests(app_state.clone());
     let mut connection =
-        crate::database::establish_connection(app_state.clone().database_url).unwrap();
+        crate::storage::sqlite::establish_connection(app_state.storage.database_url_for_test())
+            .unwrap();
     crate::tests::test_server::clear_table_secret(&mut connection).await;
     let server = axum_test::TestServer::new(app).unwrap();
 
@@ -203,11 +207,12 @@ async fn test_audit_f9_store_writes_are_token_bucketed() {
 
 #[tokio::test]
 async fn test_lookup_flood_is_globally_token_bucketed() {
-    let mut state = crate::env::init();
-    state.lookup_token_bucket = std::sync::Arc::new(tokio::sync::Mutex::new(
-        crate::rate_limit::TokenBucket::new(1.0, 0.0),
-    ));
-    crate::database::try_init_db(state.clone()).unwrap();
+    let state = crate::app::init();
+    state
+        .recovery
+        .set_lookup_bucket_for_test(crate::rate_limit::TokenBucket::new(1.0, 0.0))
+        .await;
+    state.storage.initialize().unwrap();
     let server = axum_test::TestServer::new(crate::router::new_for_tests(state)).unwrap();
 
     let first = server

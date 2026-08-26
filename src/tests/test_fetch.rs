@@ -1,7 +1,7 @@
 use crate::{
-    models::{FetchSecret, Secret, StoreSecret},
+    http::contract::{FetchSecret, StoreSecret},
+    recovery::identifiers::identifier_hash,
     tests::{BASE64_ENCRYPTED_SECRET, SHA256_111111, SHA256_222222, SHA256_CONCAT_111111_222222},
-    utils::identifier_hash,
 };
 use axum::http::StatusCode;
 
@@ -26,9 +26,9 @@ async fn test_fetch_success() {
 
     assert_eq!(response.status_code(), StatusCode::OK);
 
-    let secret = response.json::<Secret>();
-    assert_eq!(secret.id, SHA256_CONCAT_111111_222222);
-    assert_eq!(secret.encrypted_secret, BASE64_ENCRYPTED_SECRET);
+    let body = response.json::<serde_json::Value>();
+    assert_eq!(body["id"], SHA256_CONCAT_111111_222222);
+    assert_eq!(body["encrypted_secret"], BASE64_ENCRYPTED_SECRET);
 }
 
 #[tokio::test]
@@ -56,7 +56,7 @@ async fn test_fetch_success_reports_exact_attempt_status() {
     assert_eq!(status["failed_attempts"], 0);
     assert_eq!(
         status["remaining_attempts"],
-        state.rate_limit_max_attempts - 1
+        state.attempts.policy.max_attempts() - 1
     );
     assert!(status["previous_attempt_at"].is_null());
 
@@ -75,7 +75,7 @@ async fn test_fetch_success_reports_exact_attempt_status() {
         .unwrap();
     assert_eq!(
         resets_at - window_started_at,
-        state.rate_limit_cooldown,
+        state.attempts.policy.cooldown(),
         "first window: resets_at is one cooldown after the first attempt"
     );
 
@@ -139,7 +139,7 @@ async fn test_fetch_rate_limit_enforced_and_reset_after_cooldown() {
     server.post("/store").json(&store).expect_success().await;
 
     // trigger rate limit by attempting many fail attempts
-    for i in 0..state.rate_limit_max_attempts as usize {
+    for i in 0..state.attempts.policy.max_attempts() as usize {
         let fetch_wrong_authentication_key = FetchSecret {
             identifier: SHA256_111111.to_string(),
             authentication_key: crate::tests::distinct_candidate(i),
@@ -166,19 +166,22 @@ async fn test_fetch_rate_limit_enforced_and_reset_after_cooldown() {
         .await;
 
     let failed_attempt = response.json::<serde_json::Value>();
-    assert_eq!(failed_attempt["attempts"], state.rate_limit_max_attempts);
+    assert_eq!(
+        failed_attempt["attempts"],
+        state.attempts.policy.max_attempts()
+    );
     assert_eq!(response.status_code(), StatusCode::TOO_MANY_REQUESTS);
 
     // Simulate cooldown expiry by aging the in-memory entry directly instead
     // of sleeping for the real cooldown duration: the suite must stay fast
     // and must not depend on wall-clock time.
     {
-        let mut identifier_rate_limit = state.identifier_rate_limit.lock().await;
+        let mut identifier_rate_limit = state.attempts.ledger.lock_for_test().await;
         let info = identifier_rate_limit
             .get_mut(&identifier_hash(SHA256_111111).unwrap())
             .unwrap();
         let expired_at =
-            chrono::Utc::now() - state.rate_limit_cooldown - chrono::Duration::minutes(1);
+            chrono::Utc::now() - state.attempts.policy.cooldown() - chrono::Duration::minutes(1);
         info.window_started_at = expired_at;
         info.last_candidate_at = expired_at;
         info.last_request_at = expired_at;
@@ -193,14 +196,14 @@ async fn test_fetch_rate_limit_enforced_and_reset_after_cooldown() {
         .expect_success()
         .await;
 
-    let secret = response.json::<Secret>();
+    let body = response.json::<serde_json::Value>();
 
-    assert_eq!(secret.id, SHA256_CONCAT_111111_222222);
-    assert_eq!(secret.encrypted_secret, BASE64_ENCRYPTED_SECRET);
+    assert_eq!(body["id"], SHA256_CONCAT_111111_222222);
+    assert_eq!(body["encrypted_secret"], BASE64_ENCRYPTED_SECRET);
 
     // A successful lookup consumes the first attempt of the new window and
     // must not clear the security counter.
-    let identifier_rate_limit = state.identifier_rate_limit.lock().await;
+    let identifier_rate_limit = state.attempts.ledger.lock_for_test().await;
     let info = identifier_rate_limit
         .get(&identifier_hash(SHA256_111111).unwrap())
         .unwrap();

@@ -4,6 +4,8 @@ The server provides secret storage without relying on traditional credentials sy
 
 For the threat model, the risks accepted by design, the security invariants
 guarded by tests and the reviewer checklist, see [SECURITY.md](SECURITY.md).
+For the implementation ownership map and audit reading path, start with the
+`Reviewer reading map` and `Ownership and dependency map` in [SECURITY.md](SECURITY.md).
 Operational templates are in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) and
 [docs/RETENTION.md](docs/RETENTION.md), with versioned files under `deploy/`.
 The SQLite backup and restore procedure is in [deploy/backup/README.md](deploy/backup/README.md).
@@ -215,26 +217,9 @@ listed in [SECURITY.md](SECURITY.md).
 
 
 
-### Privacy and security goals
+### Privacy and recovery security summary
 
-A user can store multiple secrets and the server is not able to link any secret to a specific user. Each secret has a random `identifier`. The `secret_id` is built from the hash of the `identifier` and `authentication_key`.
-
-If the `identifier` is found and used by a malicious person, the server is not able to link it to a specific `secret`.
-**To mitigate targeted brute-force on a specific `secret`, the server temporarily caches the bucket `sha256(identifier)` and up to the configured maximum of derived CandidateTags in memory. CandidateTags are not exposed, logged, or snapshotted; all state is wiped at the daily global boundary or restart, while the cooldown sweep removes shorter-lived entries sooner.** This improves availability and signal for distinct guesses, at the cost of temporarily retaining up to `max` non-exposed derived tags and increasing behavioral state in memory.
-
-The server cannot read users secrets because they are encrypted client-side using the `encryption_key` derived from `password`, the secret encryption mitigate the risk of database leak, attackers would have access to: `secret_id`, `created_at` and `encrypted_secret`.
-
-If an attacker can steal informations to a targeted user such as `salt` and have access to a database leak or `encrypted_secret`, the encryption of the `encrypted_secret` will be as weak as the user `password`.
-
-### Recovery lockout (known design tension)
-
-The rate-limit bucket is keyed on `sha256(identifier)` and checked **before** membership or credentials are verified. Every distinct candidate counts; every request is telemetry/global-bucketed. A targeted lockout by three distinct candidates remains an accepted risk: an attacker holding a victim's Backup File can consume that identifier's candidate budget and delay recovery. This change improves availability and signal; it is not a vulnerability correction. Other identifiers retain independent budgets.
-
-Mitigations available today:
-- **Detection**: clients should poll `/attempts` — an identifier under attack shows attempts the user did not make, and an unexpected `429` is itself an alarm. A user who still has wallet access should rotate keys immediately.
-- **Redundancy** (client-side): an exported copy of the Backup Key, social recovery, or a second independent Key Server makes the lockout of a single server non-fatal.
-
-Protocol roadmap: escalating backoff (delay without permanent denial), client proof-of-work (cost per guess instead of a hard cap), or multi-server storage.
+The protocol's privacy goals and accepted recovery-lockout trade-off are defined by the whitepaper. Implementation invariants, candidate accounting, telemetry limits, and review evidence are maintained in [SECURITY.md](SECURITY.md); clients must follow the wire contracts above and operators must follow the deployment runbook below.
 
 
 ## Deployment

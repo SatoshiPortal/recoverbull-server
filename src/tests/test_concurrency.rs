@@ -133,9 +133,12 @@ async fn test_rate_limit_holds_under_concurrency() {
     assert_eq!(too_many, N - state.rate_limit_max_attempts as usize);
 }
 
-/// A duplicate arriving while the first trash lookup is Pending is rejected;
-/// once committed, a replay is allowed to reach SQLite and is indistinguishable
-/// from a miss (covered by the distinct-candidate tests).
+/// A concurrent duplicate must not release the secret twice. The deterministic
+/// Pending and Committed branches are proved by
+/// `test_concurrent_trash_hit_does_not_count_the_losing_miss_as_a_guess` and
+/// `test_committed_trash_race_returns_accepted_and_unauthorized_without_failure`;
+/// this TCP test only checks the resulting one-release property across the
+/// scheduling race.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_concurrent_trash_releases_secret_once() {
     let (addr, _) = spawn_server().await;
@@ -154,10 +157,23 @@ async fn test_concurrent_trash_releases_secret_once() {
     );
     let first = tokio::spawn(raw_post(addr, "/trash", trash_body.clone()));
     let second = tokio::spawn(raw_post(addr, "/trash", trash_body));
-    let mut statuses = vec![first.await.unwrap(), second.await.unwrap()];
-    statuses.sort_unstable();
+    let statuses = [first.await.unwrap(), second.await.unwrap()];
+    assert_eq!(
+        statuses.iter().filter(|&&status| status == 202).count(),
+        1,
+        "exactly one concurrent trash request must release the secret"
+    );
 
-    assert_eq!(statuses, vec![202, 503]);
+    let other_status = statuses
+        .iter()
+        .find(|&&status| status != 202)
+        .copied()
+        .expect("one non-success status must accompany the accepted trash");
+    match other_status {
+        401 => {} // the Committed replay observes the already-trashed secret
+        503 => {} // the duplicate observes the first request while Pending
+        status => panic!("unexpected concurrent trash status: {status}"),
+    }
 }
 
 /// The F1 fix under race: 50 concurrent /store calls with the SAME payload

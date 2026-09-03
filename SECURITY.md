@@ -52,10 +52,11 @@ budget, and it must stay wrong-proof in both directions:
 - `3xx` is `success`, so the `304` of a conditional `GET /attempts` — the
   caching path the README tells clients to use — raises no false alarm and
   spends no server-error token.
-- `408`/`429`/`503` stay in the detail class **even though `503 >= 500`**.
+- `429`/`503` stay in the detail class **even though `503 >= 500`**.
   Overload responses are the most frequent failures under load; promoting them
   to WARN would starve the budget exactly as effectively as the `304` defect
-  did.
+  did. The `408` arm is kept in that class although the router no longer
+  emits it: the request timeout answers `503`.
 
 Every status this service can return has an explicit arm, so the
 unexpected-status fallback is unreachable from a client and can keep
@@ -69,7 +70,8 @@ client-supplied values are discarded.
 Request events contain only the generated request ID, static route and method
 enums, numeric status, static status category, and static duration bucket.
 Categories are `success` (`2xx`/`3xx`), `client_error` (`4xx`), `overload`
-(`408`/`429`/`503`), and `server_error` (`5xx` and any unexpected status);
+(`429`/`503`, plus a `408` arm the router no longer produces), and
+`server_error` (`5xx` and any unexpected status);
 duration buckets are `lt500ms`, `500ms_1s`, `1s_5s`, and `gte5s`.
 They never contain raw URIs or query strings, headers, bodies, remote IPs,
 database paths, identifiers, hashes, tags, keys, ciphertexts, canary values,
@@ -401,6 +403,7 @@ code, keep the invariant — and run the guarding test.
 | Errors are classified by HTTP status only: `429` = targeted lockout, `503` = global pressure, both with `Retry-After` | `http::{contract,error}`, `router` | Clients must not match on error text | `test_503_responses_have_no_machine_code`, `test_global_buckets_use_503_without_targeted_metadata`, `test_targeted_429_has_targeted_metadata` |
 | POST requests matching `/store`, `/fetch`, and `/trash` have a uniform minimum server-side response time, including extractor rejections; `/info`, `/attempts`, 404s, 405s, other routes, and already-slow processing are excluded | `router` | Reduce fast success/failure timing differences without holding database resources or pretending to equalize network time | `production_router_applies_the_500_millisecond_floor`, `sensitive_post_success_and_failures_have_the_configured_floor`, `default_body_limit_rejection_is_also_delayed` |
 | The snapshot is a projection of ledger counters, never a copy of ledger state: replacing every retained CandidateTag leaves the published bytes and the ETag identical | `AttemptsLedgerState::snapshot_entries`, `AttemptsLedgerEntry` | A CandidateTag must be unable to reach the payload, and the snapshot's peak cost must not scale with the candidate budget (measured: the snapshot's marginal cost fell from 37,530 to 199 bytes per entry at `RATE_LIMIT_MAX_ATTEMPTS=255`) | `test_snapshot_is_independent_of_candidate_tags`, `test_snapshot_never_contains_secret_material`, `test_attempts_snapshot_at_full_map_scale` |
+| The request timeout is an application response: an expired request receives `503` with `Retry-After` and the JSON error envelope, recorded by diagnostics as `overload` | `router::request_timeout_middleware` | Clients classify by status only and are told to retry `503`; the framework's bare `408` with an empty body is outside the documented status set and would not trigger the backoff the contract expects | `test_request_timeout_is_a_503_with_retry_after_and_error_body` |
 | A snapshot built from a pre-wipe copy of the ledger is never published after the wipe: the wipe advances a collection epoch under the cache lock, and a build publishes only if the epoch it captured before copying is unchanged | `attempts::snapshot::{wipe_epoch,build_and_publish}` | The 24-hour wipe is a retention boundary; a build that copied the ledger before the wipe and finished after it used to refill the cache with purged entries, attached to the new `collection_started_at` | `test_wipe_during_in_flight_build_after_ledger_copy_publishes_nothing_pre_wipe`, `test_wipe_during_in_flight_build_after_collection_read_publishes_nothing_pre_wipe`, `test_global_wipe_clears_candidates_resets_timestamp_and_snapshot` |
 | A snapshot build that dies without publishing releases the single-flight slot, so `/attempts` recovers on the next request | `attempts::snapshot::BuildSlotGuard` | An occupied slot whose sender is gone makes every later `/attempts` request a `500`, permanently, since a new build only starts when the slot is empty | `test_attempts_recovers_after_a_snapshot_build_dies`, `test_cancelled_attempts_request_keeps_single_rebuild_in_flight` |
 | Cooldown expiry decides on the monotonic clock; wall-clock values remain the published timestamps and the finalization generation token | `attempts::ledger::is_expired`, `RateLimitInfo::last_candidate_instant` | A forward `CLOCK_REALTIME` step larger than the cooldown would otherwise expire every entry at once and reset every per-identifier budget — the server's only control against password brute-force | `test_a_forward_wall_clock_jump_does_not_reset_a_saturated_budget`, `test_a_forward_wall_clock_jump_does_not_sweep_active_entries`, `test_sweep_removes_only_expired_entries`, `test_fetch_expires_sub_threshold_entry_after_cooldown` |

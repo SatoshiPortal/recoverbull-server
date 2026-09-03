@@ -129,7 +129,7 @@ retry or security decision.
 | `400` | Invalid request data. | Fix the request. |
 | `401` | Invalid credentials. | Treat as an authentication failure. |
 | `429` | The targeted identifier's distinct-candidate budget is locked. This is the only security alarm. | Surface the targeted lockout and honor `Retry-After`. |
-| `503` | Server pressure or unavailability, including global lookup/store/telemetry limits, a full rate-limit map, or a busy database. | Back off and retry using `Retry-After`. |
+| `503` | Server pressure or unavailability, including global lookup/store/telemetry limits, a full rate-limit map, a busy database, or a request the server could not finish within its 30-second timeout. | Back off and retry using `Retry-After`. |
 | `500` | Internal server error. | Treat as a server failure. |
 
 Every `429` and `503` response carries `Retry-After`, in seconds. Framework-generated

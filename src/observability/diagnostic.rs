@@ -132,14 +132,16 @@ pub(crate) fn duration_bucket(duration: Duration) -> &'static str {
 ///   *success* path of a conditional `GET /attempts`, which the README tells
 ///   clients to use; routing it to the server-error budget made benign polling
 ///   raise false alarms and starve the budget genuine `500`s need.
-/// - `408`/`429`/`503` stay `Detail` even though `503 >= 500`. Overload
-///   responses are the most frequent failures under load, and promoting them
-///   to WARN would reintroduce the same starvation from the other side.
+/// - `429`/`503` stay `Detail` even though `503 >= 500`. Overload responses
+///   are the most frequent failures under load, and promoting them to WARN
+///   would reintroduce the same starvation from the other side. The `408` arm
+///   is kept for the same reason although the router no longer emits it: its
+///   request timeout answers `503`.
 ///
 /// Every status this service can actually return (`200`, `201`, `202`, `304`,
-/// `400`, `401`, `404`, `405`, `408`, `413`, `415`, `422`, `429`, `500`,
-/// `503`) is covered by an explicit arm, so the fallback is unreachable from a
-/// client and can safely keep server-error visibility for a genuine anomaly.
+/// `400`, `401`, `404`, `405`, `413`, `415`, `422`, `429`, `500`, `503`) is
+/// covered by an explicit arm, so the fallback is unreachable from a client
+/// and can safely keep server-error visibility for a genuine anomaly.
 fn classify(status: u16) -> (&'static str, QuotaClass) {
     match status {
         408 | 429 | 503 => ("overload", QuotaClass::Detail),

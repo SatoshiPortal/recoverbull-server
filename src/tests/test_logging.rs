@@ -43,7 +43,7 @@ impl LogBuffer {
     }
 }
 
-async fn capture<F: Future>(future: F) -> (F::Output, String) {
+pub(crate) async fn capture<F: Future>(future: F) -> (F::Output, String) {
     let buffer = LogBuffer::default();
     let subscriber = tracing_subscriber::registry()
         .with(tracing_subscriber::filter::LevelFilter::TRACE)

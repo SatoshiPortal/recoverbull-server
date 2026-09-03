@@ -32,13 +32,24 @@ pub fn new(app_state: AppState) -> Router {
 /// including requests rejected during extraction.
 pub const PRODUCTION_MIN_RESPONSE_DELAY: Duration = Duration::from_millis(500);
 
+/// Production bound on the total duration of one request, including body
+/// reads: a client dribbling its request byte by byte (slow-loris) sees it
+/// expire. Header reads happen before the service and remain a proxy concern.
+pub const PRODUCTION_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Builds the router with an explicit floor so timing behavior can be tested
 /// without making the ordinary test suite sleep for the production floor.
 pub(crate) fn new_with_response_delay(app_state: AppState, response_delay: Duration) -> Router {
-    // Bound the total request duration, including body reads: a client
-    // dribbling its request byte by byte (slow-loris) sees it expire.
-    // Header reads happen before the service and remain a proxy concern.
-    let timeout = tower_http::timeout::TimeoutLayer::new(Duration::from_secs(30));
+    new_with_limits(app_state, response_delay, PRODUCTION_REQUEST_TIMEOUT)
+}
+
+/// Builds the router with both time bounds explicit, so the timeout response
+/// can be tested without waiting for the production value.
+pub(crate) fn new_with_limits(
+    app_state: AppState,
+    response_delay: Duration,
+    request_timeout: Duration,
+) -> Router {
     let security_counters = app_state.request_diagnostics_state().counters.clone();
 
     let sensitive_routes = Router::new()
@@ -60,14 +71,44 @@ pub(crate) fn new_with_response_delay(app_state: AppState, response_delay: Durat
     sensitive_routes
         .merge(public_routes)
         // Layers are applied outside-in: diagnostics observes the final
-        // response, timeout bounds the request, and body limits precede JSON.
+        // response (including a timeout's 503), the timeout bounds the
+        // request, and body limits precede JSON.
         // Legitimate JSON requests are below 320 bytes. Keep modest headroom
         // while rejecting oversized bodies before deserialization.
         .layer(DefaultBodyLimit::max(1024))
-        .layer(timeout)
+        .layer(from_fn(move |request, next| {
+            request_timeout_middleware(request, next, request_timeout)
+        }))
         .layer(from_fn(move |request, next| {
             diagnostic_middleware(app_state.request_diagnostics_state(), request, next)
         }))
+}
+
+/// Advisory backoff for an expired request: there is no deadline to derive,
+/// only "the server could not finish in time, try again shortly".
+const REQUEST_TIMEOUT_RETRY_AFTER_SECS: u64 = 1;
+
+/// Bounds one request's total duration, body reads included, and answers an
+/// expired request with the contractual service-pressure response.
+///
+/// Clients classify by status only, and the documented meaning of `503` is
+/// "back off and retry using `Retry-After`". A request the server could not
+/// finish in time is exactly that, whatever the cause (slow storage, a held
+/// lock, a dribbled body), so it must not surface as the framework's bare
+/// `408 Request Timeout` with an empty body: that status is outside the
+/// documented set, and a client following the README is not told to retry
+/// it. Dropping the inner future cancels the handler, which refunds any
+/// reservation not yet transferred to detached storage work. Diagnostics
+/// wrap this layer and therefore record the final `503`.
+async fn request_timeout_middleware(request: Request, next: Next, timeout: Duration) -> Response {
+    match tokio::time::timeout(timeout, next.run(request)).await {
+        Ok(response) => response,
+        Err(_elapsed) => crate::http::error::retry_after_response(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            REQUEST_TIMEOUT_RETRY_AFTER_SECS,
+            "Request timed out, retry later",
+        ),
+    }
 }
 
 /// Adapts Axum requests and responses to the transport-neutral diagnostics API.
@@ -101,6 +142,13 @@ async fn diagnostic_middleware(
 /// Test-only zero-delay router constructor; excluded from release builds.
 pub(crate) fn new_for_tests(app_state: AppState) -> Router {
     new_with_response_delay(app_state, Duration::ZERO)
+}
+
+#[cfg(test)]
+/// Test-only constructor with a short request timeout; excluded from release
+/// builds.
+pub(crate) fn new_for_tests_with_timeout(app_state: AppState, request_timeout: Duration) -> Router {
+    new_with_limits(app_state, Duration::ZERO, request_timeout)
 }
 
 async fn minimum_response_delay(

@@ -180,11 +180,14 @@ async fn test_fetch_rate_limit_enforced_and_reset_after_cooldown() {
         let info = identifier_rate_limit
             .get_mut(&identifier_hash(SHA256_111111).unwrap())
             .unwrap();
-        let expired_at =
-            chrono::Utc::now() - state.attempts.policy.cooldown() - chrono::Duration::minutes(1);
+        let age = state.attempts.policy.cooldown() + chrono::Duration::minutes(1);
+        let expired_at = chrono::Utc::now() - age;
         info.window_started_at = expired_at;
         info.last_candidate_at = expired_at;
         info.last_request_at = expired_at;
+        // Expiry decides on the monotonic clock, so aging the published
+        // wall-clock fields alone would leave the entry active.
+        info.set_monotonic_age_for_test(age.to_std().unwrap());
     }
 
     let response = server

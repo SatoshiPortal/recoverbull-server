@@ -281,3 +281,55 @@ async fn test_audit_f12_hex_case_is_canonicalized() {
         .await;
     assert_eq!(response.status_code(), StatusCode::OK);
 }
+
+/// The public `/attempts` representation does not depend on Host or query
+/// parameters. Both supported reverse proxies must therefore collapse such
+/// attacker-controlled variants into one cache entry. Caddy has an executable
+/// smoke for the resulting one-upstream-call property; this source-level guard
+/// prevents either maintained config from silently dropping the key controls.
+#[test]
+fn test_attempts_proxy_cache_keys_ignore_host_and_query_variants() {
+    let nginx = include_str!("../../deploy/nginx/recoverbull.conf");
+    let attempts_location = nginx
+        .split_once("location = /attempts {")
+        .expect("nginx must define the exact /attempts location")
+        .1
+        .split_once("\n    }")
+        .expect("nginx /attempts location must be closed")
+        .0;
+    let cache_keys: Vec<_> = attempts_location
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with('#') && line.starts_with("proxy_cache_key "))
+        .collect();
+    assert_eq!(
+        cache_keys,
+        ["proxy_cache_key $scheme$proxy_host$uri;"],
+        "nginx /attempts must have exactly one query-independent cache key"
+    );
+
+    let caddy = include_str!("../../deploy/caddy/Caddyfile");
+    let attempts_route = caddy
+        .split_once("route @attempts {")
+        .expect("Caddy must define the /attempts route")
+        .1;
+    for control in [
+        "disable_host",
+        "disable_query",
+        "disable_body",
+        "disable_scheme",
+    ] {
+        assert!(
+            attempts_route.contains(control),
+            "Caddy /attempts cache key is missing {control}"
+        );
+    }
+
+    let caddy_smoke = include_str!("../../deploy/caddy/smoke.py");
+    assert!(
+        caddy_smoke.contains("/attempts?first=1")
+            && caddy_smoke.contains("/attempts?second=2")
+            && caddy_smoke.contains("Backend.calls.get(\"/attempts\", 0) - attempts_before == 1"),
+        "Caddy smoke must prove Host/query variants make one backend call"
+    );
+}

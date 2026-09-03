@@ -18,8 +18,14 @@ const GLOBAL_OVERLOAD_RETRY_AFTER_SECS: u64 = 1;
 
 /// Public lookup telemetry.
 ///
-/// Publishes the identifiers currently rate-limited for fetch/trash lookups,
-/// hashed with SHA-256 over the raw identifier bytes so that:
+/// Publishes *every* identifier with an active fetch/trash entry, not only
+/// the saturated ones: a single admitted candidate creates an entry, and the
+/// entry is published until it expires. The count of published entries is
+/// therefore the live size of the rate-limit map, and its ratio to the
+/// `max_attempt_identifiers` advertised by `/info` is the aggregate
+/// map-pressure signal (see the map-filling accepted risk in SECURITY.md).
+///
+/// Identifiers are hashed with SHA-256 over the raw identifier bytes so that:
 /// - a client can recognize its own identifier (it knows the raw value),
 /// - nobody else can recover a raw identifier from the list (pre-image
 ///   resistance), which keeps the list useless for griefing or lockout.

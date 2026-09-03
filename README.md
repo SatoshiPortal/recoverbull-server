@@ -167,8 +167,23 @@ Identifiers are kept and published hashed, never raw. The entire identifier map,
 
 The body is **always gzip-compressed JSON** (`Content-Encoding: gzip`); clients must be gzip-capable. This initial telemetry contract, version `1`, reports distinct-candidate counters plus `total_requests` and never exposes CandidateTags. The snapshot is rebuilt at most once per minute and served as immutable shared bytes with a strong `ETag`: send `If-None-Match` to receive a bodyless `304` when nothing changed. `Cache-Control: public, max-age=<remaining seconds>` reflects the real freshness. A dedicated global token bucket (`ATTEMPTS_RATE_LIMIT_*`) bounds cache-bypass traffic; production deployments must additionally cache and rate-limit this route at the reverse proxy (see Deployment). Nginx is the reference template; Caddy is a conditional, mutually exclusive alternative under `deploy/caddy/`.
 
-Detection semantics a client should implement:
-- **Poll `/attempts` proactively** (e.g. at app start, no more often than the snapshot freshness): if your identifier hash appears with attempts you did not make, someone is probing your backup.
+Server deployment and wallet rollout are two stages of the same detection
+feature. Bull Mobile does not currently poll `/attempts`, so deploying this
+server alone leaves proactive detection temporarily incomplete; a compatible
+Bull Mobile release is required to finish the rollout. That release should
+poll regularly while the app is in the foreground and use best-effort
+background scheduling where the operating system permits it. Requests should
+be jittered, respect snapshot freshness and `ETag`, and travel through Tor and
+the shared proxy cache. The global request does not reveal the identifier being
+checked because matching happens locally. It does add observable wallet-online
+timing; a private per-identifier endpoint or push subscription would be more
+linkable because it would reveal the target or require stable device/account
+state. `attempt_status` remains the passive signal available when a lookup
+already occurs.
+
+If a client opts into proactive detection, it should implement these semantics:
+- **Poll `/attempts` proactively** while foregrounded and, where supported, from a best-effort background task (never more often than the snapshot freshness, and with jitter): if your identifier hash appears with attempts you did not make, someone is probing your backup.
+- **Check the fill ratio, not only your own hash.** Compare the number of published entries with `max_attempt_identifiers` from `/info`. A saturated map means new identifiers are being refused with `503`, and **a victim in that situation has no entry of its own to find**: an attacker filling the map with identifiers it chose never touches yours. Recognizing your own `id_hash` is therefore not sufficient as a detection strategy — a high ratio is itself a first-order alarm. At the default capacity this costs an attacker about 1.16 requests per second sustained and roughly 50 MB of traffic per day, so a saturated ratio is cheap to produce and must be treated as expected, not exceptional.
 - **Treat a `429` or unexpected snapshot activity as an alarm**: global service pressure uses `503` instead. If the wallet is still accessible, rotate/transfer immediately; otherwise recovery availability depends on a **previously exported** Backup Key or a second independent server. See [Error responses](#error-responses) for the full table; do not match on the `error` text.
 - **`attempt_status` on a successful fetch is the freshest signal**: it needs no extra request and stays available even when `/attempts` is overloaded. Failures older than the cooldown expire (entries are swept and forgotten), but a success never resets the counters early.
 - **Telemetry is advisory**: the server cannot distinguish an attacker from the user or another of the user's devices, and a compromised server can fabricate or suppress counters. Clients must warn, never act automatically.
@@ -180,8 +195,10 @@ fields: `attempts_collection_started_at` (hour-truncated, same value as the
 snapshot — a cheap wipe check during the existing connection check) and
 `max_attempt_identifiers` (the configured map capacity, so a client can
 compute the snapshot fullness ratio and warn when the service is under
-pressure). `/info` never exposes a live identifier count: that would make
-map-filling campaigns cheap to monitor.
+pressure). `/info` does not carry a live identifier count, but that is a
+shape choice, not a protection: `/attempts` publishes **every** active
+entry, so counting them yields the live map size exactly. Treat the ratio as
+public.
 
 The canary from the dotenv file is read on a blocking worker for every `/info`
 request, without cache metadata. File reads are serialized by a dedicated
@@ -277,6 +294,9 @@ server {
         proxy_connect_timeout 2s;
         proxy_read_timeout 35s;
         proxy_cache recoverbull_cache;
+        # /attempts ignores query parameters. Exclude them from the key so an
+        # attacker cannot mint one cache entry per random query string.
+        proxy_cache_key $scheme$proxy_host$uri;
         proxy_cache_lock on;
         proxy_cache_valid 200 30s;
         limit_req zone=recoverbull_attempts burst=20 nodelay;
@@ -300,7 +320,7 @@ Tor logs. Application log guarantees do not cover reverse-proxy or system logs
 unless this runbook is applied. The five-minute global counters retain coarse
 activity metadata and also require restricted access and retention.
 
-All Tor connections reach nginx from loopback, so these connection and request limits are intentionally global. The backend already serves `/attempts` precompressed: nginx caches that exact body instead of recompressing per request. `limit_rate` caps per-connection throughput; multiplied by the connection limit it bounds aggregate snapshot egress. The proxy is also what lets slow clients take their time: with default `proxy_buffering`, nginx drains Axum quickly (within its 30s route timeout) and feeds the client at its own pace.
+All Tor connections reach nginx from loopback, so these connection and request limits are intentionally global. The backend already serves `/attempts` precompressed: nginx caches that exact body instead of recompressing per request. The explicit cache key uses `$uri`, not the default `$request_uri`, because `/attempts` ignores query parameters: `/attempts?x=1` and `/attempts?x=2` must share one entry and one cache-fill lock. The Caddy alternative enforces the same invariant with `disable_query` and `disable_host`, and its smoke test proves that different Host/query values cause only one backend call. `limit_rate` caps per-connection throughput; multiplied by the connection limit it bounds aggregate snapshot egress. The proxy is also what lets slow clients take their time: with default `proxy_buffering`, nginx drains Axum quickly (within its 30s route timeout) and feeds the client at its own pace.
 
 > **Conditional requests behind nginx**: when serving `/attempts` from `proxy_cache`, nginx answers with the cached `200` body without evaluating the client's `If-None-Match` — the bodyless `304` path only benefits clients reaching Axum directly. Clients behind nginx therefore re-download the snapshot body whenever nginx's cache entry has expired (30s) and the content changed. This is an egress tradeoff, not a correctness issue: clients must still compare the received `ETag` to detect change, and aggregate egress stays bounded by `limit_conn` × `limit_rate`.
 
@@ -367,6 +387,7 @@ echo "ATTEMPTS_RATE_LIMIT_BURST=20" >> .env && \
 echo "ATTEMPTS_RATE_LIMIT_REFILL_PER_SECOND=2" >> .env && \
 echo "ATTEMPTS_SNAPSHOT_TTL_SECONDS=60" >> .env && \
 echo "RATE_LIMIT_MAX_IDENTIFIERS=100000" >> .env && \
+echo "RATE_LIMIT_MEMORY_BUDGET_MB=512" >> .env && \
 echo "DATABASE_MAX_CONCURRENCY=16" >> .env
 ```
 This configuration admits two `/store` requests per second (172,800 per day)
@@ -403,15 +424,39 @@ is full. Each bucket's CandidateTag set is bounded by the distinct-candidate
 budget. SQLite work is limited to
 16 concurrent blocking operations, and requests waiting more than one second
 for a slot receive `503` without consuming their per-identifier attempt.
-Both capacities are range-checked at startup: `RATE_LIMIT_MAX_IDENTIFIERS`
-must be in `[1, 10000000]` and `DATABASE_MAX_CONCURRENCY` in `[1, 1024]` —
-a zero or an absurdly large value would silently disable the protection, so
-the server refuses to start instead.
+Both capacities are checked at startup, and a zero or over-budget value
+makes the server refuse to start rather than run unbounded.
+`DATABASE_MAX_CONCURRENCY` must be in `[1, 1024]`.
+`RATE_LIMIT_MAX_IDENTIFIERS` is not bounded by a fixed ceiling: it is
+validated against the **lower** of `RATE_LIMIT_MEMORY_BUDGET_MB` (default
+`512`, matching `MemoryMax=512M` in the systemd template) and the memory limit
+the kernel actually enforces on the process, read from the cgroup
+(v2 `memory.max`, walked up the hierarchy, or v1 `memory.limit_in_bytes`). The
+enforced limit wins whenever it is lower, and startup warns when it does, so
+lowering `MemoryMax` without lowering the declared budget cannot silently
+disable the check. With no discoverable cgroup limit, only the declared budget
+applies. The model uses the measured per-entry cost,
+which also depends on `RATE_LIMIT_MAX_ATTEMPTS` because each retained
+CandidateTag is a 64-character string. The model reserves 64 MiB of the
+budget for the base process, SQLite, and worker stacks, then requires
+`capacity x (1100 + 150 x max_attempts)` bytes to fit what remains. At the
+default budget that admits about 303,000 identifiers at
+`RATE_LIMIT_MAX_ATTEMPTS=3`, and about 11,900 at the `255` ceiling. Raising
+the capacity means declaring the budget that pays for it — set
+`RATE_LIMIT_MEMORY_BUDGET_MB` to the deployment's real cgroup limit. The
+error names the offending values and the maximum capacity that would fit.
+
+This replaced a fixed `10000000` ceiling whose justification (150-180 bytes
+per entry, "~2 GB") was low by roughly an order of magnitude: that capacity
+actually costs about 14.4 GiB at snapshot peak, so the ceiling admitted the
+silent memory-exhaustion kill it was meant to prevent. With
+`Restart=no` in the systemd template, such a kill leaves the service down
+until an operator intervenes.
 Token bursts are validated mathematically: they must be finite, contain at
 least one token, and `burst - 1.0` must differ from `burst` in `f64`. This
 rejects numerically ineffective values without an arbitrary throughput cap.
-The identifier maximum is unchanged; operators must set a memory gate with
-headroom or lower capacity.
+Operators must still set a memory gate with headroom: the budget check uses
+a conservative estimate, not a guarantee.
 The release bundles SQLite 3.51.3 through `libsqlite3-sys`, the upstream WAL
 reset fix. Startup verifies the runtime version and exactly
 `journal_mode=wal`; every application connection verifies exactly
@@ -448,10 +493,16 @@ database, WAL, and Litestream copies; test restore and rollback, including the
 WAL. Run canary/wipe and store/fetch/trash smoke checks before admitting traffic.
 Debug logging is temporary only and must be disabled before canary exposure.
 
-At the default `RATE_LIMIT_MAX_IDENTIFIERS=100000`, a dynamic audit measured
-22.1 MB JSON, 4.01 MB gzip, and about 254 MiB peak RSS on one host. These are
-measurements, not a universal guarantee: set service memory and capacity with
-headroom or lower the capacity.
+At the default `RATE_LIMIT_MAX_IDENTIFIERS=100000` with
+`RATE_LIMIT_MAX_ATTEMPTS=3`, a release build measured 22.1 MB JSON,
+4.01 MB gzip, and **117 MB peak RSS** (1121 bytes per entry). An earlier
+audit recorded about 254 MiB peak on a different host with the same 4.01 MB
+gzip body; the snapshot no longer copies the ledger's CandidateTag sets,
+which removed 27% of the peak at this candidate budget and about half of it
+at larger ones. These are measurements on specific hosts, not a universal
+guarantee: set service memory and capacity with headroom, and re-measure
+after changing `RATE_LIMIT_MAX_ATTEMPTS`, which is the term that dominates
+per-entry cost.
 
 ### Run the app
 

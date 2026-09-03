@@ -18,6 +18,36 @@ pub(crate) struct AttemptsSnapshotCache {
 
 type AttemptsBuildReceiver = watch::Receiver<Option<Result<AttemptsSnapshotCache, ()>>>;
 
+type AttemptsBuildSlot = Arc<Mutex<Option<AttemptsBuildReceiver>>>;
+
+/// Releases the single-flight slot when a build task ends, on every path
+/// including an unwind.
+///
+/// The slot must not outlive its build task. A slot still holding the
+/// receiver of a task that died without sending makes every later
+/// `/attempts` request clone that receiver, observe a dropped sender, and
+/// return `500` — permanently, because a new build is only started when the
+/// slot is empty. Clearing on `Drop` bounds that failure to the requests
+/// already waiting on the dead build.
+struct BuildSlotGuard {
+    build: AttemptsBuildSlot,
+}
+
+impl Drop for BuildSlotGuard {
+    /// Drop cannot await, so it releases the slot immediately when the lock is
+    /// free and defers to a task when another operation owns it.
+    fn drop(&mut self) {
+        if let Ok(mut slot) = self.build.try_lock() {
+            *slot = None;
+        } else {
+            let build = self.build.clone();
+            tokio::spawn(async move {
+                *build.lock().await = None;
+            });
+        }
+    }
+}
+
 #[cfg(test)]
 #[derive(Default)]
 /// Test-only single-flight probe; cfg(test) excludes synchronization controls
@@ -28,13 +58,16 @@ pub(crate) struct AttemptsBuildProbe {
     pub(crate) released: std::sync::atomic::AtomicBool,
     pub(crate) started_notify: tokio::sync::Notify,
     pub(crate) release: tokio::sync::Notify,
+    /// Forces the build task to unwind before it can publish a result, so a
+    /// test can prove the single-flight slot is still released.
+    pub(crate) panic_before_send: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Clone)]
 /// Shared cache, single-flight watcher, collection clock, and TTL.
 pub(crate) struct AttemptsSnapshotState {
     cache: Arc<Mutex<Option<AttemptsSnapshotCache>>>,
-    build: Arc<Mutex<Option<AttemptsBuildReceiver>>>,
+    build: AttemptsBuildSlot,
     collection_started_at: Arc<Mutex<chrono::DateTime<chrono::Utc>>>,
     ttl: std::time::Duration,
     #[cfg(test)]
@@ -86,12 +119,21 @@ impl AttemptsSnapshotState {
             let snapshot_state = self.clone();
             let ledger = ledger.clone();
             tokio::spawn(async move {
-                let result = snapshot_state.build(&ledger, cooldown).await;
-                if let Ok(snapshot) = &result {
-                    *snapshot_state.cache.lock().await = Some(snapshot.clone());
-                }
+                // The guard lives in an inner scope so it drops *before*
+                // `sender`, on the success path and while unwinding alike. A
+                // waiter therefore never observes a failed build while the
+                // slot it would have to replace is still occupied.
+                let result = {
+                    let _slot = BuildSlotGuard {
+                        build: snapshot_state.build.clone(),
+                    };
+                    let result = snapshot_state.build(&ledger, cooldown).await;
+                    if let Ok(snapshot) = &result {
+                        *snapshot_state.cache.lock().await = Some(snapshot.clone());
+                    }
+                    result
+                };
                 let _ = sender.send(Some(result));
-                *snapshot_state.build.lock().await = None;
             });
             receiver
         };
@@ -118,20 +160,22 @@ impl AttemptsSnapshotState {
             {
                 self.probe.release.notified().await;
             }
+            if self.probe.panic_before_send.load(Ordering::SeqCst) {
+                panic!("attempts build probe: forced unwind before send");
+            }
         }
-        let now = chrono::Utc::now();
-        ledger.retain_active(now, cooldown).await;
+        ledger.retain_active(cooldown).await;
         let mut entries: Vec<AttemptEntry> = ledger
             .snapshot_entries()
             .await
             .into_iter()
-            .map(|(id_hash, info)| AttemptEntry {
-                id_hash,
-                total_attempts: info.candidate_count(),
-                failed_attempts: info.failed_candidates,
-                total_requests: info.total_requests,
-                window_started_at: truncate_to_hour(info.window_started_at),
-                last_attempt_at: truncate_to_hour(info.last_candidate_at),
+            .map(|entry| AttemptEntry {
+                id_hash: entry.id_hash,
+                total_attempts: entry.candidate_count,
+                failed_attempts: entry.failed_candidates,
+                total_requests: entry.total_requests,
+                window_started_at: truncate_to_hour(entry.window_started_at),
+                last_attempt_at: truncate_to_hour(entry.last_candidate_at),
             })
             .collect();
         entries.sort_by(|a, b| a.id_hash.cmp(&b.id_hash));

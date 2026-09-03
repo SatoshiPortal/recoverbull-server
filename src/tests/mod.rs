@@ -29,3 +29,14 @@ static BASE64_ENCRYPTED_SECRET: &str = "4a1dl1T8cxcP2pnvxwYWDwm/I68vVd9oWMY0nTOm
 pub(crate) fn distinct_candidate(index: usize) -> String {
     format!("{:064x}", index + 1)
 }
+
+/// A monotonic reading `age` in the past. Expiry reads the monotonic clock, so
+/// a test that synthesizes an already-expired entry must back-date this value
+/// as well as the published wall-clock timestamps. Underflow on a
+/// just-booted host falls back to the present, which makes such a test fail
+/// loudly rather than pass for the wrong reason.
+pub(crate) fn monotonic_age(age: std::time::Duration) -> tokio::time::Instant {
+    tokio::time::Instant::now()
+        .checked_sub(age)
+        .unwrap_or_else(tokio::time::Instant::now)
+}

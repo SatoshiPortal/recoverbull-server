@@ -63,6 +63,9 @@ http://:3000 {
 					size 16
 				}
 			}
+			# /attempts has one public representation. Never let attacker-controlled
+			# Host, query, body, or scheme values mint independent cache entries.
+			# deploy/caddy/smoke.py asserts that variants cause one backend call.
 			key {
 				disable_host
 				disable_query

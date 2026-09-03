@@ -121,15 +121,47 @@ pub(crate) fn duration_bucket(duration: Duration) -> &'static str {
     }
 }
 
-/// Maps status codes to the bounded diagnostic category set.
-pub(crate) fn status_category(status: u16) -> &'static str {
+/// Maps a status to its category **and** its quota class in one decision.
+///
+/// The two must never disagree, so they are derived from a single match rather
+/// than the class being inferred from the category string. Only this table
+/// decides what reaches the WARN-level budget, and getting it wrong is
+/// expensive in both directions:
+///
+/// - `3xx` is `success`, not the unexpected-status fallback. `304` is the
+///   *success* path of a conditional `GET /attempts`, which the README tells
+///   clients to use; routing it to the server-error budget made benign polling
+///   raise false alarms and starve the budget genuine `500`s need.
+/// - `408`/`429`/`503` stay `Detail` even though `503 >= 500`. Overload
+///   responses are the most frequent failures under load, and promoting them
+///   to WARN would reintroduce the same starvation from the other side.
+///
+/// Every status this service can actually return (`200`, `201`, `202`, `304`,
+/// `400`, `401`, `404`, `405`, `408`, `413`, `415`, `422`, `429`, `500`,
+/// `503`) is covered by an explicit arm, so the fallback is unreachable from a
+/// client and can safely keep server-error visibility for a genuine anomaly.
+fn classify(status: u16) -> (&'static str, QuotaClass) {
     match status {
-        408 | 429 | 503 => "overload",
-        200..=299 => "success",
-        400..=499 => "client_error",
-        500..=599 => "server_error",
-        _ => "server_error",
+        408 | 429 | 503 => ("overload", QuotaClass::Detail),
+        200..=399 => ("success", QuotaClass::Detail),
+        400..=499 => ("client_error", QuotaClass::Detail),
+        500..=599 => ("server_error", QuotaClass::ServerError),
+        _ => ("server_error", QuotaClass::ServerError),
     }
+}
+
+#[cfg(test)]
+/// Test-only view of the category half of `classify`; production reads both
+/// halves together so they cannot drift apart. Excluded from release builds.
+pub(crate) fn status_category(status: u16) -> &'static str {
+    classify(status).0
+}
+
+#[cfg(test)]
+/// Test-only view of the quota routing: `true` when a status spends the
+/// WARN-level server-error budget. Excluded from release builds.
+pub(crate) fn spends_server_error_budget(status: u16) -> bool {
+    matches!(classify(status).1, QuotaClass::ServerError)
 }
 
 struct DiagnosticEvent<'a> {
@@ -199,12 +231,7 @@ pub(crate) fn record(
     status: u16,
     duration: Duration,
 ) {
-    let category = status_category(status);
-    let class = if category == "server_error" {
-        QuotaClass::ServerError
-    } else {
-        QuotaClass::Detail
-    };
+    let (category, class) = classify(status);
     emit(
         &state.log_quota,
         &state.counters,

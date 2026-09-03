@@ -353,6 +353,7 @@ async fn test_old_trash_completion_cannot_update_a_replaced_rate_limit_window() 
             window_started_at: fresh_at,
             last_candidate_at: fresh_at,
             last_request_at: fresh_at,
+            last_candidate_instant: tokio::time::Instant::now(),
             candidates: std::collections::HashMap::new(),
             failed_candidates: 0,
             total_requests: 0,

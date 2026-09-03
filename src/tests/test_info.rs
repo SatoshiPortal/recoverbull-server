@@ -51,7 +51,10 @@ async fn test_info_exposes_no_live_identifier_count() {
     let response = server.get("/info").expect_success().await;
     let body = response.text();
 
-    // a live count would make map-filling campaigns cheap to monitor
+    // `/info` carries the configured capacity, not a live occupancy count.
+    // This is a response-shape contract, not a protection: `/attempts`
+    // publishes every active entry, so the live count is already derivable
+    // from it. See the map-filling accepted risk in SECURITY.md.
     assert!(!body.contains("active"));
     assert!(!body.contains("count"));
 }

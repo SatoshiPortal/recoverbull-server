@@ -41,7 +41,7 @@ pub(crate) const PRODUCTION_GLOBAL_WIPE_INTERVAL: std::time::Duration =
 
 /// Clears expired ledger entries without retaining locks across logging.
 pub(crate) async fn sweep_expired_identifiers(ledger: &AttemptsLedgerState, cooldown: TimeDelta) {
-    ledger.retain_active(chrono::Utc::now(), cooldown).await;
+    ledger.retain_active(cooldown).await;
 }
 
 /// Clears identifiers, resets collection time, and invalidates the cache.

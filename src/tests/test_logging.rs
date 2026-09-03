@@ -135,6 +135,117 @@ fn test_status_categories_are_deterministic() {
         crate::observability::diagnostic::status_category(400),
         "client_error"
     );
+    assert_eq!(
+        crate::observability::diagnostic::status_category(200),
+        "success"
+    );
+    assert_eq!(
+        crate::observability::diagnostic::status_category(201),
+        "success"
+    );
+}
+
+/// Only a genuine `5xx` may spend the WARN-level server-error budget.
+///
+/// The category and the quota class come from one table, so they cannot drift
+/// apart. This pins both directions of the trap: a benign status must never
+/// reach the WARN budget (that was the `304` defect), and an overload status
+/// must not either even though `503 >= 500` — `503` is the most frequent
+/// failure under load, so promoting it would starve the budget just as
+/// effectively.
+#[test]
+fn test_only_genuine_server_errors_spend_the_warn_budget() {
+    use crate::observability::diagnostic::spends_server_error_budget as warns;
+
+    // every status this service can actually return
+    for status in [
+        200u16, 201, 202, 304, 400, 401, 404, 405, 408, 413, 415, 422, 429, 503,
+    ] {
+        assert!(
+            !warns(status),
+            "{status} must not spend the server-error budget"
+        );
+    }
+    assert!(warns(500), "a genuine 500 must reach the WARN budget");
+    assert!(warns(502));
+
+    // the category and the class never disagree
+    for status in [
+        200u16, 201, 202, 304, 400, 401, 404, 405, 408, 413, 415, 422, 429, 500, 503,
+    ] {
+        let category = crate::observability::diagnostic::status_category(status);
+        assert_eq!(
+            warns(status),
+            category == "server_error",
+            "category and quota class disagree for {status}"
+        );
+    }
+}
+
+/// A conditional `GET /attempts` that returns `304` is the success path the
+/// README tells clients to use. It must not be categorized as a server error.
+///
+/// `304` used to fall through to the unexpected-status fallback, so every
+/// conditional poll was classified `server_error` and routed to the WARN
+/// quota class. WARN is enabled by the default `RUST_LOG=info` filter, so
+/// benign polling both raised false server-error alarms in production logs
+/// and spent the 10-token server-error budget that a genuine `500` needs.
+#[tokio::test]
+async fn test_not_modified_is_not_a_server_error() {
+    assert_eq!(
+        crate::observability::diagnostic::status_category(304),
+        "success",
+        "304 is a successful conditional response, not a server error"
+    );
+
+    let (server, state) = crate::tests::test_server::new_test_server().await;
+    // Dedicated telemetry bucket: the default burst is 20, so the polling
+    // below would otherwise turn into 503s for a reason unrelated to what
+    // this test guards (see SECURITY.md "Test-writing traps").
+    state
+        .attempts
+        .maintenance
+        .set_bucket_for_test(crate::rate_limit::TokenBucket::new(10_000.0, 10_000.0))
+        .await;
+    let first = server.get("/attempts").expect_success().await;
+    let etag = first.header("etag").to_str().unwrap().to_string();
+
+    let (statuses, logs) = capture(async {
+        let mut statuses = Vec::new();
+        for _ in 0..40 {
+            statuses.push(
+                server
+                    .get("/attempts")
+                    .add_header("If-None-Match", etag.clone())
+                    .await
+                    .status_code(),
+            );
+        }
+        statuses
+    })
+    .await;
+
+    assert!(
+        statuses
+            .iter()
+            .all(|status| *status == StatusCode::NOT_MODIFIED),
+        "every conditional poll must be a 304, got {statuses:?}"
+    );
+    // The capture subscriber enables every level, so the detail events are
+    // visible here; what must never appear is a WARN-level event, because
+    // that is the class the default production filter lets through.
+    assert!(
+        !logs.contains("WARN"),
+        "conditional polling must not produce WARN-level diagnostics: {logs}"
+    );
+    assert!(
+        !logs.contains("category=\"server_error\""),
+        "a 304 must not be reported as a server error: {logs}"
+    );
+    assert!(
+        logs.contains("status=304") && logs.contains("category=\"success\""),
+        "the 304 must still be observable as a success at detail level: {logs}"
+    );
 }
 
 #[tokio::test]

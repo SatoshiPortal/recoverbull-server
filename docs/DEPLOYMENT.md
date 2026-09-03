@@ -21,10 +21,31 @@ For the SQLite backup, verification, and restore drill, follow
 The application grace period is 35 seconds. systemd allows 40 seconds for
 stop, and `Restart=no` avoids turning a crash loop into repeated budget resets.
 `LimitCORE=0`, `UMask=0077`, and the SQLite-compatible sandbox are intentional.
-`MemoryMax=512M` is a reference gate, not a universal guarantee: the README's
-default-capacity measurement reached about 254 MiB peak RSS on one host, so
-measure RSS
-with the configured identifier cap and snapshot size before selecting a value.
+`MemoryMax=512M` is a reference gate, not a universal guarantee. Startup reads
+the limit the kernel will actually enforce on the process from the cgroup and
+sizes `RATE_LIMIT_MAX_IDENTIFIERS` against the lower of that and
+`RATE_LIMIT_MEMORY_BUDGET_MB`, using the measured per-entry cost and the
+configured `RATE_LIMIT_MAX_ATTEMPTS`. It refuses to start rather than let the
+cgroup kill a full map mid-snapshot — which, with `Restart=no`, would leave the
+service down until an operator intervenes. Lowering `MemoryMax` therefore
+tightens the capacity check automatically, and startup warns when the enforced
+limit overrides the declared budget. Still declare
+`RATE_LIMIT_MEMORY_BUDGET_MB`: it is the only bound when the service runs
+without a cgroup memory limit.
+
+At the default capacity (100,000 identifiers, 3 candidates) a release build
+measured 117 MB peak RSS, 22.1 MB JSON, and 4.01 MB gzip; an earlier audit
+recorded about 254 MiB peak on a different host with the same gzip size. Both
+are far above the 150-180 bytes per entry the code used to claim, which is why
+the fixed capacity ceiling was replaced by the budget check. Per-entry cost is
+dominated by the candidate budget, so re-measure RSS after changing
+`RATE_LIMIT_MAX_ATTEMPTS` or the identifier cap before selecting a value:
+
+```sh
+# with the service running under its real configuration, after the map has
+# filled and at least one /attempts snapshot has been built
+grep VmHWM /proc/$(systemctl show -p MainPID --value recoverbull)/status
+```
 
 ## Reproducible installation
 

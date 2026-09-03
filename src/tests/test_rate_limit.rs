@@ -63,6 +63,12 @@ async fn test_sweep_removes_only_expired_entries() {
                 window_started_at: expired_at,
                 last_candidate_at: expired_at,
                 last_request_at: expired_at,
+                // expiry decides on the monotonic clock: back-date it too
+                last_candidate_instant: crate::tests::monotonic_age(
+                    (state.attempts.policy.cooldown() + chrono::Duration::minutes(1))
+                        .to_std()
+                        .unwrap(),
+                ),
                 candidates: std::collections::HashMap::new(),
                 failed_candidates: 2,
                 total_requests: 2,
@@ -74,6 +80,7 @@ async fn test_sweep_removes_only_expired_entries() {
                 window_started_at: now,
                 last_candidate_at: now,
                 last_request_at: now,
+                last_candidate_instant: tokio::time::Instant::now(),
                 candidates: std::collections::HashMap::new(),
                 failed_candidates: 1,
                 total_requests: 1,
@@ -113,6 +120,12 @@ async fn test_fetch_expires_sub_threshold_entry_after_cooldown() {
                 window_started_at,
                 last_candidate_at: window_started_at,
                 last_request_at: window_started_at,
+                // expiry decides on the monotonic clock: back-date it too
+                last_candidate_instant: crate::tests::monotonic_age(
+                    (state.attempts.policy.cooldown() + chrono::Duration::minutes(1))
+                        .to_std()
+                        .unwrap(),
+                ),
                 candidates: std::collections::HashMap::new(),
                 failed_candidates: 2,
                 total_requests: 2,
@@ -541,5 +554,105 @@ async fn test_deferred_refund_runs_when_drop_finds_the_lock_contended() {
     assert!(
         settled.is_ok(),
         "the deferred refund task did not run: the reservation leaked"
+    );
+}
+
+/// A forward `CLOCK_REALTIME` jump must not reset a per-identifier budget.
+///
+/// Expiry decides on the monotonic clock, so an entry whose *published*
+/// wall-clock timestamps are far older than the cooldown — the state the map
+/// is in right after the system clock is stepped forward — keeps its
+/// saturated budget. Deciding on wall-clock time instead would hand an
+/// attacker a full budget reset for every clock step, on a server whose only
+/// control against password brute-force is that budget.
+#[tokio::test]
+async fn test_a_forward_wall_clock_jump_does_not_reset_a_saturated_budget() {
+    let (server, state) = crate::tests::test_server::new_test_server().await;
+    let max = state.attempts.policy.max_attempts();
+
+    // saturate the identifier through the ordinary admission path
+    for index in 0..max as usize {
+        server
+            .post("/fetch")
+            .json(&FetchSecret {
+                identifier: SHA256_111111.to_string(),
+                authentication_key: crate::tests::distinct_candidate(index),
+            })
+            .expect_failure()
+            .await;
+    }
+    let response = server
+        .post("/fetch")
+        .json(&FetchSecret {
+            identifier: SHA256_111111.to_string(),
+            authentication_key: NOT_PASSWORD_HASH.to_string(),
+        })
+        .expect_failure()
+        .await;
+    assert_eq!(response.status_code(), StatusCode::TOO_MANY_REQUESTS);
+
+    // Step the wall clock far forward: only the published timestamps move,
+    // the monotonic reading the expiry decision uses does not.
+    let jump = state.attempts.policy.cooldown() + chrono::Duration::hours(24);
+    {
+        let mut map = state.attempts.ledger.lock_for_test().await;
+        let info = map
+            .get_mut(&identifier_hash(SHA256_111111).unwrap())
+            .expect("the saturated entry is present");
+        info.window_started_at -= jump;
+        info.last_candidate_at -= jump;
+        info.last_request_at -= jump;
+    }
+
+    let response = server
+        .post("/fetch")
+        .json(&FetchSecret {
+            identifier: SHA256_111111.to_string(),
+            authentication_key: crate::tests::distinct_candidate(max as usize + 1),
+        })
+        .expect_failure()
+        .await;
+    assert_eq!(
+        response.status_code(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "a forward wall-clock jump must not grant a fresh candidate budget"
+    );
+
+    let map = state.attempts.ledger.lock_for_test().await;
+    let info = &map[&identifier_hash(SHA256_111111).unwrap()];
+    assert_eq!(
+        info.candidate_count(),
+        max,
+        "the budget must still be fully consumed after the jump"
+    );
+}
+
+/// The expiry sweeper follows the same monotonic decision: a forward
+/// wall-clock jump must not sweep the whole map and reset every budget.
+#[tokio::test]
+async fn test_a_forward_wall_clock_jump_does_not_sweep_active_entries() {
+    let (_, state) = crate::tests::test_server::new_test_server().await;
+
+    let jumped_past =
+        chrono::Utc::now() - state.attempts.policy.cooldown() - chrono::Duration::hours(24);
+    {
+        let mut map = state.attempts.ledger.lock_for_test().await;
+        // published timestamps far in the past, monotonic reading fresh
+        let mut info = RateLimitInfo::new(jumped_past);
+        info.failed_candidates = 2;
+        info.total_requests = 2;
+        map.insert(identifier_hash(SHA256_111111).unwrap(), info);
+    }
+
+    crate::attempts::maintenance::sweep_expired_identifiers(
+        &state.attempts.ledger,
+        state.attempts.policy.cooldown(),
+    )
+    .await;
+
+    let map = state.attempts.ledger.lock_for_test().await;
+    assert!(
+        map.contains_key(&identifier_hash(SHA256_111111).unwrap()),
+        "an entry that is only wall-clock-old must survive the sweep"
     );
 }

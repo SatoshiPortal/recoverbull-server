@@ -567,6 +567,12 @@ async fn test_expired_entry_disappears_from_snapshot() {
                 window_started_at: expired_at,
                 last_candidate_at: expired_at,
                 last_request_at: expired_at,
+                // expiry decides on the monotonic clock: back-date it too
+                last_candidate_instant: crate::tests::monotonic_age(
+                    (state.attempts.policy.cooldown() + chrono::Duration::minutes(1))
+                        .to_std()
+                        .unwrap(),
+                ),
                 candidates: std::collections::HashMap::new(),
                 failed_candidates: 3,
                 total_requests: 3,
@@ -1101,6 +1107,7 @@ async fn test_attempts_counter_does_not_overflow_at_u8_max() {
                 window_started_at: chrono::Utc::now(),
                 last_candidate_at: chrono::Utc::now(),
                 last_request_at: chrono::Utc::now(),
+                last_candidate_instant: tokio::time::Instant::now(),
                 candidates: (0..254)
                     .map(|i| {
                         (
@@ -1216,4 +1223,85 @@ async fn raw_get_attempts(addr: std::net::SocketAddr) -> (u16, String) {
         .map(|l| l[5..].trim().to_string())
         .unwrap_or_default();
     (status, etag)
+}
+
+/// Map filling denies recovery to a victim *without* creating any warning
+/// entry for that victim.
+///
+/// This pins the real detection semantics. The attacker fills the map with
+/// identifiers of its own, never touching the victim's: the victim's fresh
+/// `/fetch` is refused with `503` and it has no `/attempts` entry to notice,
+/// so "the attack and the alarm are the same event" does not hold for a
+/// flood. The signal that does exist is the aggregate one — the ratio of
+/// published entries to the `max_attempt_identifiers` advertised by `/info`
+/// — and this test pins that it is observable and saturated.
+#[tokio::test]
+async fn test_map_filling_denies_a_victim_without_creating_its_warning_entry() {
+    let capacity = 8usize;
+    let mut state = crate::app::init();
+    state.attempts.policy.set_max_identifiers_for_test(capacity);
+    state
+        .attempts
+        .policy
+        .set_cooldown_for_test(chrono::TimeDelta::hours(24));
+    state
+        .attempts
+        .snapshot
+        .set_ttl_for_test(std::time::Duration::ZERO);
+    state.storage.initialize().unwrap();
+    let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone())).unwrap();
+
+    // The attacker fills the map with identifiers it chose itself.
+    let attacker_key = crate::tests::distinct_candidate(0);
+    for index in 0..capacity {
+        let identifier = crate::digest::sha256_hex(format!("flood-{index}").as_bytes());
+        server
+            .post("/fetch")
+            .json(&FetchSecret {
+                identifier,
+                authentication_key: attacker_key.clone(),
+            })
+            .expect_failure()
+            .await;
+    }
+
+    // A victim identifier the attacker never submitted.
+    let victim = crate::digest::sha256_hex(b"a victim identifier never probed");
+    let response = server
+        .post("/fetch")
+        .json(&FetchSecret {
+            identifier: victim.clone(),
+            authentication_key: crate::tests::distinct_candidate(1),
+        })
+        .expect_failure()
+        .await;
+    assert_eq!(
+        response.status_code(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "a full map denies a never-probed victim"
+    );
+
+    let snapshot = server.get("/attempts").expect_success().await;
+    let body = decode_snapshot(snapshot.as_bytes());
+    let entries = body["entries"].as_array().unwrap();
+    let victim_hash = identifier_hash(&victim).unwrap();
+    assert!(
+        !entries.iter().any(|e| e["id_hash"] == victim_hash),
+        "the denied victim must not be expected to find a warning entry of its own: \
+         the flood creates none"
+    );
+
+    // The aggregate signal is the one a client can act on: /info advertises
+    // the capacity, /attempts publishes every active entry, and their ratio
+    // is saturated.
+    let info = server.get("/info").expect_success().await;
+    let advertised = info.json::<serde_json::Value>()["max_attempt_identifiers"]
+        .as_u64()
+        .unwrap() as usize;
+    assert_eq!(advertised, capacity);
+    assert_eq!(
+        entries.len(),
+        capacity,
+        "the fill ratio must be observable and saturated"
+    );
 }

@@ -75,6 +75,7 @@ jobs:
           LOOKUP_RATE_LIMIT_REFILL_PER_SECOND: 10000
           RATE_LIMIT_MAX_IDENTIFIERS: 100000
           DATABASE_MAX_CONCURRENCY: 16
+          ATTEMPTS_SNAPSHOT_TTL_SECONDS: 30
 
   audit:
     runs-on: ubuntu-latest

@@ -72,10 +72,9 @@ pub(crate) fn new_with_limits(
         .merge(public_routes)
         // Layers are applied outside-in: diagnostics observes the final
         // response (including a timeout's 503), the timeout bounds the
-        // request, and body limits precede JSON.
-        // Legitimate JSON requests are below 320 bytes. Keep modest headroom
-        // while rejecting oversized bodies before deserialization.
-        .layer(DefaultBodyLimit::max(1024))
+        // request, and body limits precede JSON. The body limit is the bound
+        // `SECRET_MAX_LENGTH` is validated against at startup.
+        .layer(DefaultBodyLimit::max(crate::config::MAX_REQUEST_BODY_BYTES))
         .layer(from_fn(move |request, next| {
             request_timeout_middleware(request, next, request_timeout)
         }))

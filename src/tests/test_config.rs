@@ -11,7 +11,7 @@ const DEFAULT_BUDGET: usize = DEFAULT_MEMORY_BUDGET_MB * 1024 * 1024;
 #[test]
 fn test_validate_config_accepts_valid_values() {
     assert!(validate_config(1440, 128, 3).is_ok());
-    assert!(validate_config(1, 1, 1).is_ok());
+    assert!(validate_config(1, 128, 1).is_ok());
 }
 
 #[test]
@@ -25,10 +25,10 @@ fn test_validate_config_rejects_non_positive_cooldown() {
 
 #[test]
 fn test_validate_config_rejects_absurdly_large_cooldown() {
-    // chrono::TimeDelta::minutes panics on out-of-range values
+    // chrono::TimeDelta::minutes panics on out-of-range values; the daily
+    // wipe bounds the accepted range far below that anyway
     assert!(validate_config(525_601, 128, 3).is_err());
     assert!(validate_config(i64::MAX, 128, 3).is_err());
-    assert!(validate_config(525_600, 128, 3).is_ok());
 }
 
 #[test]
@@ -269,16 +269,70 @@ fn test_validate_token_bucket_rejects_infinity() {
 
 #[test]
 fn test_validate_snapshot_ttl_accepts_valid_values() {
-    assert!(validate_snapshot_ttl(1).is_ok());
-    assert!(validate_snapshot_ttl(60).is_ok());
-    assert!(validate_snapshot_ttl(u64::MAX).is_ok());
+    assert!(validate_snapshot_ttl(1, 1_440).is_ok());
+    assert!(validate_snapshot_ttl(60, 1_440).is_ok());
+    assert!(validate_snapshot_ttl(86_399, 1_440).is_ok());
 }
 
 #[test]
 fn test_validate_snapshot_ttl_rejects_zero() {
     // a zero TTL forces a fresh snapshot computation on every request,
     // defeating the point of caching
-    assert!(validate_snapshot_ttl(0).is_err());
+    assert!(validate_snapshot_ttl(0, 1_440).is_err());
+}
+
+/// The cache is invalidated only by the TTL and the daily wipe, never by a
+/// new attempt. With a TTL at or above the cooldown, an attempt admitted just
+/// after a rebuild can expire before the next rebuild and never appear in
+/// `/attempts`: the configuration is accepted and the detection is silently
+/// neutralized. `u64::MAX` used to be accepted.
+#[test]
+fn test_validate_snapshot_ttl_must_be_shorter_than_the_cooldown() {
+    assert!(validate_snapshot_ttl(59, 1).is_ok());
+    assert!(
+        validate_snapshot_ttl(60, 1).is_err(),
+        "equal is not shorter"
+    );
+    assert!(validate_snapshot_ttl(86_400, 1_440).is_err());
+    assert!(validate_snapshot_ttl(u64::MAX, 1_440).is_err());
+    assert!(validate_snapshot_ttl(60, 0).is_err());
+    assert!(validate_snapshot_ttl(60, -1).is_err());
+}
+
+/// The cooldown ceiling is the wipe interval itself, not a separately typed
+/// number that could drift from it.
+#[test]
+fn test_max_cooldown_is_the_global_wipe_interval() {
+    assert_eq!(
+        u64::try_from(crate::config::MAX_RATE_LIMIT_COOLDOWN_MINUTES).unwrap() * 60,
+        crate::attempts::maintenance::PRODUCTION_GLOBAL_WIPE_INTERVAL.as_secs()
+    );
+}
+
+/// The envelope constant behind `MAX_SECRET_LENGTH` is pinned to the real
+/// compact serialization of a `/store` body, and the derived bound is the
+/// largest Base64 length that fits the body limit.
+#[test]
+fn test_store_envelope_constant_matches_the_serialized_body() {
+    use crate::config::{MAX_REQUEST_BODY_BYTES, MAX_SECRET_LENGTH, STORE_JSON_ENVELOPE_BYTES};
+
+    let body = |secret: String| {
+        serde_json::to_vec(&crate::http::contract::StoreSecret {
+            identifier: "a".repeat(64),
+            authentication_key: "b".repeat(64),
+            encrypted_secret: secret,
+        })
+        .unwrap()
+        .len()
+    };
+    assert_eq!(body(String::new()), STORE_JSON_ENVELOPE_BYTES);
+    assert_eq!(MAX_SECRET_LENGTH, 832);
+    assert!(
+        MAX_SECRET_LENGTH.is_multiple_of(4),
+        "Base64 lengths are multiples of four"
+    );
+    assert!(body("c".repeat(MAX_SECRET_LENGTH)) <= MAX_REQUEST_BODY_BYTES);
+    assert!(body("c".repeat(MAX_SECRET_LENGTH + 4)) > MAX_REQUEST_BODY_BYTES);
 }
 
 fn unique_temp_path(tag: &str) -> std::path::PathBuf {
@@ -374,4 +428,38 @@ fn test_detected_memory_limit_is_best_effort() {
     if let Some(limit) = crate::config::detected_memory_limit_bytes() {
         assert!(limit > 0, "a reported limit must be positive");
     }
+}
+
+/// The whole ledger is wiped every 24 hours, so a cooldown longer than that
+/// can never be applied as configured: the budget it announces through
+/// `/info` and `resets_at` disappears at the next wipe. Such a value is a
+/// misconfiguration, not a longer budget, and startup must refuse it.
+#[test]
+fn test_validate_config_rejects_a_cooldown_longer_than_the_wipe_interval() {
+    assert!(
+        validate_config(1_440, 128, 3).is_ok(),
+        "one day is the maximum"
+    );
+    assert!(validate_config(1_441, 128, 3).is_err());
+    assert!(validate_config(525_600, 128, 3).is_err());
+    assert!(validate_config(i64::MAX, 128, 3).is_err());
+}
+
+/// `SECRET_MAX_LENGTH` is bounded on both sides by facts outside the
+/// variable: a Profile 1 encrypted secret is 128 Base64 characters, so a
+/// smaller value refuses every conforming backup; and the 1024-byte body
+/// limit leaves room for at most 832 Base64 characters in the compact
+/// `/store` JSON, so a larger value is advertised by `/info` but unreachable
+/// through `/store`, which answers `413` instead.
+#[test]
+fn test_validate_config_bounds_secret_max_length_to_the_profile_and_the_body_limit() {
+    assert!(validate_config(1_440, 128, 3).is_ok(), "Profile 1");
+    assert!(
+        validate_config(1_440, 832, 3).is_ok(),
+        "largest transportable"
+    );
+    assert!(validate_config(1_440, 127, 3).is_err());
+    assert!(validate_config(1_440, 1, 3).is_err());
+    assert!(validate_config(1_440, 833, 3).is_err());
+    assert!(validate_config(1_440, usize::MAX, 3).is_err());
 }

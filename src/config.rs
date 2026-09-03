@@ -70,11 +70,46 @@ pub(crate) fn unique_test_database() -> (String, Arc<TestDatabaseGuard>) {
     (url, Arc::new(TestDatabaseGuard { path }))
 }
 
+/// Longest cooldown the ledger can honor, in minutes. The whole in-memory
+/// ledger is wiped every 24 hours
+/// (`attempts::maintenance::PRODUCTION_GLOBAL_WIPE_INTERVAL`), so a longer
+/// value announces a budget through `/info` and `resets_at` that the next
+/// wipe silently discards: the operator believes a weak PIN gets three
+/// candidates per week and it gets three per day.
+pub const MAX_RATE_LIMIT_COOLDOWN_MINUTES: i64 = 24 * 60;
+
+/// Length of a RecoverBull Profile 1 encrypted secret in Base64 characters:
+/// a 16-byte IV, a 48-byte AES-CBC ciphertext (32 bytes plus one PKCS#7
+/// block) and a 32-byte HMAC-SHA256 make 96 bytes, which Base64 encodes as
+/// 128 characters. A smaller `SECRET_MAX_LENGTH` refuses every conforming
+/// backup.
+pub const PROFILE_1_ENCRYPTED_SECRET_LENGTH: usize = 128;
+
+/// Bound on any request body the router accepts, applied before
+/// deserialization. Legitimate JSON requests are below 320 bytes.
+pub const MAX_REQUEST_BODY_BYTES: usize = 1024;
+
+/// Bytes of a compact `/store` JSON body outside the `encrypted_secret`
+/// value: the three keys, two 64-character hex strings, quotes and
+/// punctuation. Pinned against a real serialization by
+/// `test_store_envelope_constant_matches_the_serialized_body`.
+pub const STORE_JSON_ENVELOPE_BYTES: usize = 191;
+
+/// Largest `SECRET_MAX_LENGTH` a compact `/store` body can carry under the
+/// body limit. A valid Base64 string has a length that is a multiple of
+/// four, so the remaining room is rounded down. A larger value would be
+/// advertised by `/info` yet unreachable through `/store`, which answers
+/// `413` before the business validation runs.
+pub const MAX_SECRET_LENGTH: usize = (MAX_REQUEST_BODY_BYTES - STORE_JSON_ENVELOPE_BYTES) / 4 * 4;
+
 /// Validates the security-critical configuration values.
 ///
 /// A non-positive rate-limit cooldown would silently disable rate-limiting
-/// entirely (the cooldown check would always be elapsed), and a zero
-/// max_attempts or secret_max_length makes the service unusable.
+/// entirely (the cooldown check would always be elapsed), a cooldown longer
+/// than the daily wipe announces a budget the wipe discards, a zero
+/// max_attempts makes the service unusable, and a secret length outside
+/// `[PROFILE_1_ENCRYPTED_SECRET_LENGTH, MAX_SECRET_LENGTH]` either refuses
+/// every conforming backup or advertises a length `/store` cannot accept.
 /// The server must refuse to start rather than run degraded.
 pub fn validate_config(
     rate_limit_cooldown: i64,
@@ -87,16 +122,23 @@ pub fn validate_config(
             rate_limit_cooldown
         ));
     }
-    // chrono::TimeDelta panics on out-of-range values; keep the cooldown
-    // within a sane range (at most one year in minutes).
-    if rate_limit_cooldown > 525_600 {
+    if rate_limit_cooldown > MAX_RATE_LIMIT_COOLDOWN_MINUTES {
         return Err(format!(
-            "RATE_LIMIT_COOLDOWN must be at most 525600 minutes (1 year), got {}",
-            rate_limit_cooldown
+            "RATE_LIMIT_COOLDOWN must be at most {} minutes (the whole ledger is wiped every \
+             24 hours, so a longer cooldown cannot be honored), got {}",
+            MAX_RATE_LIMIT_COOLDOWN_MINUTES, rate_limit_cooldown
         ));
     }
-    if secret_max_length == 0 {
-        return Err("SECRET_MAX_LENGTH must be greater than 0".to_string());
+    if !(PROFILE_1_ENCRYPTED_SECRET_LENGTH..=MAX_SECRET_LENGTH).contains(&secret_max_length) {
+        return Err(format!(
+            "SECRET_MAX_LENGTH must be between {} (a Profile 1 encrypted secret) and {} (the \
+             largest Base64 value a compact /store body can carry under the {}-byte body \
+             limit), got {}",
+            PROFILE_1_ENCRYPTED_SECRET_LENGTH,
+            MAX_SECRET_LENGTH,
+            MAX_REQUEST_BODY_BYTES,
+            secret_max_length
+        ));
     }
     if rate_limit_max_attempts == 0 {
         return Err("RATE_LIMIT_MAX_ATTEMPTS must be at least 1".to_string());
@@ -339,11 +381,31 @@ pub fn validate_token_bucket(name: &str, burst: f64, refill: f64) -> Result<(), 
     Ok(())
 }
 
-/// Validates the `/attempts` snapshot TTL: zero would force a fresh snapshot
-/// computation on every request, defeating the point of caching.
-pub fn validate_snapshot_ttl(seconds: u64) -> Result<(), String> {
+/// Validates the `/attempts` snapshot TTL against the cooldown it must be
+/// shorter than.
+///
+/// Zero would force a fresh snapshot computation on every request, defeating
+/// the point of caching. A TTL at or above the cooldown neutralizes the
+/// detection the snapshot exists for: the cache is only invalidated by the
+/// TTL or the daily wipe, so an attempt admitted just after a rebuild could
+/// expire from the ledger before the next rebuild and never appear in
+/// `/attempts` at all. `rate_limit_cooldown_minutes` is expected to have
+/// passed `validate_config` already.
+pub fn validate_snapshot_ttl(seconds: u64, rate_limit_cooldown_minutes: i64) -> Result<(), String> {
     if seconds == 0 {
         return Err("ATTEMPTS_SNAPSHOT_TTL_SECONDS must be greater than 0".to_string());
+    }
+    let cooldown_seconds = u64::try_from(rate_limit_cooldown_minutes)
+        .ok()
+        .and_then(|minutes| minutes.checked_mul(60))
+        .ok_or_else(|| "RATE_LIMIT_COOLDOWN must be a positive number of minutes".to_string())?;
+    if seconds >= cooldown_seconds {
+        return Err(format!(
+            "ATTEMPTS_SNAPSHOT_TTL_SECONDS must be shorter than RATE_LIMIT_COOLDOWN ({} minutes = \
+             {} seconds), got {}: an attempt could otherwise expire between two snapshot \
+             rebuilds and never be published",
+            rate_limit_cooldown_minutes, cooldown_seconds, seconds
+        ));
     }
     Ok(())
 }
@@ -580,7 +642,7 @@ pub fn init() -> ValidatedConfig {
     }
 
     let attempts_snapshot_ttl_seconds = optional_env("ATTEMPTS_SNAPSHOT_TTL_SECONDS", 60u64);
-    if let Err(e) = validate_snapshot_ttl(attempts_snapshot_ttl_seconds) {
+    if let Err(e) = validate_snapshot_ttl(attempts_snapshot_ttl_seconds, rate_limit_cooldown) {
         println!("Error: {e}");
         std::process::exit(1);
     }

@@ -417,7 +417,11 @@ and deletion policies for those copies.
 The attempts bucket is a third global limit for `GET /attempts`, sized for
 direct cache-bypass traffic; the reverse-proxy cache absorbs normal reads.
 `ATTEMPTS_SNAPSHOT_TTL_SECONDS` controls how long a snapshot is reused
-before being rebuilt (at most one rebuild per window, single-flight).
+before being rebuilt (at most one rebuild per window, single-flight). It must
+be shorter than `RATE_LIMIT_COOLDOWN`: the cache is invalidated only by the
+TTL and the daily wipe, never by a new attempt, so with a TTL at or above the
+cooldown an attempt admitted just after a rebuild could expire before the next
+one and never appear in `/attempts`. Startup refuses such a value.
 The identifier cap bounds the number of `sha256(identifier)` buckets without
 evicting active security entries; new identifiers receive `503` while the cap
 is full. Each bucket's CandidateTag set is bounded by the distinct-candidate
@@ -464,6 +468,17 @@ reset fix. Startup verifies the runtime version and exactly
 the bundled process and is not re-queried on every request connection.
 > `SECRET_MAX_LENGTH=128` represents the size of a 96 octets encrypted secret encoded using base64
 > 96 octets =  `nonce` (16 octets) | `ciphertext` (32 octets) | `hmac` (32 octets) + 16 octets padding to round up to 32 octets blocks
+
+Startup accepts `SECRET_MAX_LENGTH` between `128` and `832`. Below 128 every
+Profile 1 backup is refused; above 832 `/info` advertises a length that a
+compact `/store` body cannot carry under the 1024-byte request body limit
+(191 bytes of JSON envelope plus a Base64 value whose length is a multiple of
+four), so `/store` would answer `413` for a payload `/info` calls acceptable.
+`RATE_LIMIT_COOLDOWN` is bounded by the daily wipe: the whole ledger is
+cleared every 24 hours, so a cooldown above `1440` minutes would announce a
+budget through `/info` and `resets_at` that the next wipe discards, and
+startup refuses it. The wipe or a restart can still end a window earlier than
+`resets_at` says.
 
 ### Migrations
 

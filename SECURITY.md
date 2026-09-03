@@ -8,9 +8,8 @@ The documentation hierarchy is explicit. The [RecoverBull whitepaper repository]
 
 Start with `.env.example`, then read the implementation in the order below.
 Configuration is mandatory with no code defaults for the security-critical
-values, so `cargo test` fails 141 of 194 tests on a bare
-`SERVER_ADDRESS must be set` panic when no `.env` is present (it is
-gitignored). Run `cp .env.example .env` first; the file mirrors the `env:`
+values, so most of `cargo test` fails on a bare `SERVER_ADDRESS must be set`
+panic when no `.env` is present (it is gitignored). Run `cp .env.example .env` first; the file mirrors the `env:`
 block of the `test` job in `.github/workflows/ci.yml`.
 
 1. `src/main.rs` — process lifecycle and shutdown; `src/app.rs` — `AppState` ownership and construction; `src/config.rs` — validated configuration, the capacity/memory budget model, and canary state.
@@ -403,6 +402,7 @@ code, keep the invariant — and run the guarding test.
 | Errors are classified by HTTP status only: `429` = targeted lockout, `503` = global pressure, both with `Retry-After` | `http::{contract,error}`, `router` | Clients must not match on error text | `test_503_responses_have_no_machine_code`, `test_global_buckets_use_503_without_targeted_metadata`, `test_targeted_429_has_targeted_metadata` |
 | POST requests matching `/store`, `/fetch`, and `/trash` have a uniform minimum server-side response time, including extractor rejections; `/info`, `/attempts`, 404s, 405s, other routes, and already-slow processing are excluded | `router` | Reduce fast success/failure timing differences without holding database resources or pretending to equalize network time | `production_router_applies_the_500_millisecond_floor`, `sensitive_post_success_and_failures_have_the_configured_floor`, `default_body_limit_rejection_is_also_delayed` |
 | The snapshot is a projection of ledger counters, never a copy of ledger state: replacing every retained CandidateTag leaves the published bytes and the ETag identical | `AttemptsLedgerState::snapshot_entries`, `AttemptsLedgerEntry` | A CandidateTag must be unable to reach the payload, and the snapshot's peak cost must not scale with the candidate budget (measured: the snapshot's marginal cost fell from 37,530 to 199 bytes per entry at `RATE_LIMIT_MAX_ATTEMPTS=255`) | `test_snapshot_is_independent_of_candidate_tags`, `test_snapshot_never_contains_secret_material`, `test_attempts_snapshot_at_full_map_scale` |
+| Configuration bounds follow from other invariants: `RATE_LIMIT_COOLDOWN` is at most the 24-hour wipe interval, `SECRET_MAX_LENGTH` lies between the Profile 1 secret length (128) and the largest Base64 value the 1024-byte body limit can carry (832), and `ATTEMPTS_SNAPSHOT_TTL_SECONDS` is shorter than the cooldown | `config::{validate_config,validate_snapshot_ttl}`, `MAX_RATE_LIMIT_COOLDOWN_MINUTES`, `MAX_SECRET_LENGTH` | A longer cooldown announces a budget the wipe discards; a secret length outside the range refuses every conforming backup or advertises a length `/store` answers `413` to; a TTL at or above the cooldown lets an attempt expire between two rebuilds and never be published | `test_validate_config_rejects_a_cooldown_longer_than_the_wipe_interval`, `test_max_cooldown_is_the_global_wipe_interval`, `test_validate_config_bounds_secret_max_length_to_the_profile_and_the_body_limit`, `test_store_envelope_constant_matches_the_serialized_body`, `test_validate_snapshot_ttl_must_be_shorter_than_the_cooldown` |
 | The `secret` schema is validated as an unconditional startup postcondition, against the live table and not Diesel's ledger | `storage::sqlite::validate_secret_schema` | A ledger that already records `0001` makes Diesel skip the migration, so a missing or incompatible table (partial restore, manual edit) used to pass startup and fail every request with `500` | `recorded_migration_without_secret_table_is_rejected`, `recorded_migration_with_incompatible_secret_table_is_rejected`, `recorded_migration_with_exact_secret_table_is_accepted`, `initialize_fails_closed_when_the_secret_table_is_missing` |
 | The request timeout is an application response: an expired request receives `503` with `Retry-After` and the JSON error envelope, recorded by diagnostics as `overload` | `router::request_timeout_middleware` | Clients classify by status only and are told to retry `503`; the framework's bare `408` with an empty body is outside the documented status set and would not trigger the backoff the contract expects | `test_request_timeout_is_a_503_with_retry_after_and_error_body` |
 | A snapshot built from a pre-wipe copy of the ledger is never published after the wipe: the wipe advances a collection epoch under the cache lock, and a build publishes only if the epoch it captured before copying is unchanged | `attempts::snapshot::{wipe_epoch,build_and_publish}` | The 24-hour wipe is a retention boundary; a build that copied the ledger before the wipe and finished after it used to refill the cache with purged entries, attached to the new `collection_started_at` | `test_wipe_during_in_flight_build_after_ledger_copy_publishes_nothing_pre_wipe`, `test_wipe_during_in_flight_build_after_collection_read_publishes_nothing_pre_wipe`, `test_global_wipe_clears_candidates_resets_timestamp_and_snapshot` |
@@ -428,6 +428,10 @@ code, keep the invariant — and run the guarding test.
   reason unrelated to what it guards (this exact trap broke the F1
   characterization test). Install a dedicated bucket instead — pattern:
   `test_audit_f9_store_writes_are_token_bucketed`.
+- **The test environment's cooldown is one minute.** `validate_snapshot_ttl`
+  requires the snapshot TTL to be shorter than the cooldown, so the CI env
+  and `.env.example` set `ATTEMPTS_SNAPSHOT_TTL_SECONDS=30`; the code default
+  of 60 would be refused at `config::init()` and fail every test.
 - **Keep the suite parallel-safe.** Per-test database isolation is handled
   by the test harness; CI runs `cargo test --locked`. Do not reintroduce
   `--test-threads=1`.

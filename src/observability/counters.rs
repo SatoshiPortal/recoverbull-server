@@ -17,6 +17,10 @@ pub struct SecurityCounters {
     trash_hit: AtomicU64,
     trash_miss: AtomicU64,
     attempts_rate_limited: AtomicU64,
+    /// Snapshot builds that failed to produce a representation. Emitted in
+    /// the unconditional five-minute window, so a broken telemetry subsystem
+    /// is visible even when per-request diagnostics are starved or off.
+    attempts_snapshot_failed: AtomicU64,
     database_busy: AtomicU64,
     database_error: AtomicU64,
     timing_floor_overrun: AtomicU64,
@@ -63,6 +67,7 @@ impl SecurityCounters {
         trash_hit,
         trash_miss,
         attempts_rate_limited,
+        attempts_snapshot_failed,
         database_busy,
         database_error,
         timing_floor_overrun,
@@ -98,6 +103,7 @@ impl SecurityCounters {
             trash_hit: self.trash_hit.swap(0, Ordering::Relaxed),
             trash_miss: self.trash_miss.swap(0, Ordering::Relaxed),
             attempts_rate_limited: self.attempts_rate_limited.swap(0, Ordering::Relaxed),
+            attempts_snapshot_failed: self.attempts_snapshot_failed.swap(0, Ordering::Relaxed),
             database_busy: self.database_busy.swap(0, Ordering::Relaxed),
             database_error: self.database_error.swap(0, Ordering::Relaxed),
             timing_floor_overrun: self.timing_floor_overrun.swap(0, Ordering::Relaxed),
@@ -122,6 +128,7 @@ pub struct CounterSnapshot {
     pub trash_hit: u64,
     pub trash_miss: u64,
     pub attempts_rate_limited: u64,
+    pub attempts_snapshot_failed: u64,
     pub database_busy: u64,
     pub database_error: u64,
     pub timing_floor_overrun: u64,
@@ -157,6 +164,7 @@ pub(crate) fn report_once(state: &super::ObservabilityState) {
         trash_hit = snapshot.trash_hit,
         trash_miss = snapshot.trash_miss,
         attempts_rate_limited = snapshot.attempts_rate_limited,
+        attempts_snapshot_failed = snapshot.attempts_snapshot_failed,
         database_busy = snapshot.database_busy,
         database_error = snapshot.database_error,
         timing_floor_overrun = snapshot.timing_floor_overrun,

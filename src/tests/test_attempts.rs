@@ -605,6 +605,12 @@ async fn test_attempts_recovers_after_a_snapshot_build_dies() {
         "a build that dies before sending must surface as 500"
     );
 
+    // The failure is counted in the unconditional five-minute window: a
+    // client reads `/attempts` to confirm that nothing is wrong, so a broken
+    // build must not be as quiet as a quiet channel.
+    let counters = state.observability.counters.flush();
+    assert_eq!(counters.attempts_snapshot_failed, 1);
+
     state
         .attempts
         .snapshot
@@ -626,6 +632,15 @@ async fn test_attempts_recovers_after_a_snapshot_build_dies() {
             .load(Ordering::SeqCst),
         2,
         "the recovery must be a genuinely new build, not a cached result"
+    );
+    assert_eq!(
+        state
+            .observability
+            .counters
+            .flush()
+            .attempts_snapshot_failed,
+        0,
+        "a successful rebuild is not a failure"
     );
 }
 

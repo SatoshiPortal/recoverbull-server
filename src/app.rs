@@ -189,18 +189,29 @@ impl AppState {
     }
 
     /// Builds or clones the public telemetry representation behind its domain
-    /// boundary, without exposing the admission ledger to the handler.
+    /// boundary, without exposing the admission ledger to the handler. A
+    /// failed build is counted here: `/attempts` carries a negative signal, so
+    /// its failure must reach the unconditional counter window rather than
+    /// only the quota-bounded per-request diagnostics.
     pub(crate) async fn attempts_snapshot(
         &self,
     ) -> Result<crate::attempts::snapshot::AttemptsSnapshotCache, ()> {
-        self.components
+        let result = self
+            .components
             .attempts
             .snapshot
             .snapshot_for_request(
                 &self.components.attempts.ledger,
                 self.components.attempts.policy.cooldown(),
             )
-            .await
+            .await;
+        if result.is_err() {
+            self.components
+                .observability
+                .counters
+                .attempts_snapshot_failed();
+        }
+        result
     }
 
     /// Returns the cache lifetime remaining for an emitted snapshot.

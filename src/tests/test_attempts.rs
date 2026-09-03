@@ -628,3 +628,99 @@ async fn test_attempts_recovers_after_a_snapshot_build_dies() {
         "the recovery must be a genuinely new build, not a cached result"
     );
 }
+
+/// Drives the ATT-002 interleaving: a build copies the ledger, the real
+/// daily wipe runs while that copy is in flight, and the build then resumes.
+/// Neither the response of the in-flight request nor the cache it fills may
+/// contain a pre-wipe entry. `pause_point` selects where the wipe lands
+/// relative to the collection-marker read.
+async fn wipe_during_in_flight_build_publishes_nothing_pre_wipe(pause_point: u8) {
+    let (server, state) = crate::tests::test_server::new_test_server().await;
+    let id_hash = crate::recovery::identifiers::identifier_hash(SHA256_111111).unwrap();
+    {
+        let mut map = state.attempts.ledger.lock_for_test().await;
+        let mut info = RateLimitInfo::new(chrono::Utc::now());
+        info.candidates.insert(
+            sha256_hex(b"pre-wipe candidate"),
+            crate::attempts::ledger::CandidateState::Committed,
+        );
+        info.failed_candidates = 1;
+        info.total_requests = 1;
+        map.insert(id_hash.clone(), info);
+    }
+
+    let probe = state.attempts.snapshot.probe();
+    probe.pause_point.store(pause_point, Ordering::SeqCst);
+    let request_state = state.clone();
+    let request = tokio::spawn(async move {
+        crate::handlers::attempts::get_attempts(
+            axum::extract::State(request_state),
+            axum::http::HeaderMap::new(),
+        )
+        .await
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        probe.paused_notify.notified(),
+    )
+    .await
+    .expect("the build did not reach its pause point within 5 seconds");
+
+    // The real wipe, while the build holds a pre-wipe copy of the ledger.
+    crate::attempts::maintenance::wipe_identifier_rate_limit(
+        &state.attempts.ledger,
+        &state.attempts.snapshot,
+    )
+    .await;
+    assert!(state.attempts.ledger.lock_for_test().await.is_empty());
+    assert!(!state.attempts.snapshot.is_cached_for_test().await);
+
+    probe.pause_point.store(0, Ordering::SeqCst);
+    probe.resume.notify_one();
+    let response = tokio::time::timeout(std::time::Duration::from_secs(5), request)
+        .await
+        .expect("the in-flight request did not complete within 5 seconds")
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let (_, snapshot) = decode_gzip(&body);
+    assert!(
+        snapshot.entries.is_empty(),
+        "a build that raced the wipe must not publish pre-wipe entries: {} entries",
+        snapshot.entries.len()
+    );
+
+    // And the cache filled by that build must not resurrect them either.
+    let cached = server.get("/attempts").expect_success().await;
+    let (_, cached) = decode_gzip(cached.as_bytes());
+    assert!(
+        cached.entries.is_empty(),
+        "the cache must not hold a pre-wipe snapshot after the wipe: {} entries",
+        cached.entries.len()
+    );
+}
+
+/// The 24-hour wipe is a retention boundary: no pre-wipe telemetry may be
+/// published after it. A build that copied the ledger before the wipe and
+/// finished after it used to republish the purged entries into the cache,
+/// even attaching them to the new `collection_started_at`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_wipe_during_in_flight_build_after_ledger_copy_publishes_nothing_pre_wipe() {
+    wipe_during_in_flight_build_publishes_nothing_pre_wipe(
+        crate::attempts::snapshot::PAUSE_AFTER_LEDGER_COPY,
+    )
+    .await;
+}
+
+/// Same boundary, with the wipe landing after the build has already read the
+/// collection marker: the stale entries and the stale marker are both
+/// pre-wipe, and neither may be published.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_wipe_during_in_flight_build_after_collection_read_publishes_nothing_pre_wipe() {
+    wipe_during_in_flight_build_publishes_nothing_pre_wipe(
+        crate::attempts::snapshot::PAUSE_AFTER_COLLECTION_READ,
+    )
+    .await;
+}

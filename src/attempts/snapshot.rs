@@ -4,7 +4,14 @@ use crate::{attempts::ledger::AttemptsLedgerState, digest::sha256_hex};
 use chrono::DurationRound;
 use flate2::{write::GzEncoder, Compression};
 use serde::{Deserialize, Serialize};
-use std::{io::Write, sync::Arc, time::Instant};
+use std::{
+    io::Write,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::Instant,
+};
 use tokio::sync::{watch, Mutex};
 
 /// Immutable gzip snapshot shared by all requests until the TTL expires.
@@ -61,7 +68,49 @@ pub(crate) struct AttemptsBuildProbe {
     /// Forces the build task to unwind before it can publish a result, so a
     /// test can prove the single-flight slot is still released.
     pub(crate) panic_before_send: std::sync::atomic::AtomicBool,
+    /// Where the build pauses so a test can interleave a real wipe with a
+    /// build that already holds a pre-wipe copy of the ledger. Zero pauses
+    /// nowhere; see the `PAUSE_*` constants for the two positions.
+    pub(crate) pause_point: std::sync::atomic::AtomicU8,
+    pub(crate) paused_notify: tokio::sync::Notify,
+    pub(crate) resume: tokio::sync::Notify,
 }
+
+#[cfg(test)]
+/// Pause after the ledger has been projected, before the collection marker
+/// is read: a wipe here leaves the build holding pre-wipe entries and about
+/// to read the post-wipe marker.
+pub(crate) const PAUSE_AFTER_LEDGER_COPY: u8 = 1;
+
+#[cfg(test)]
+/// Pause after both the entries and the collection marker were read, right
+/// before the blocking serialization.
+pub(crate) const PAUSE_AFTER_COLLECTION_READ: u8 = 2;
+
+#[cfg(test)]
+impl AttemptsBuildProbe {
+    async fn pause_at(&self, point: u8) {
+        if self.pause_point.load(Ordering::SeqCst) == point {
+            self.paused_notify.notify_one();
+            self.resume.notified().await;
+        }
+    }
+}
+
+/// Outcome of one build attempt, decided under the cache lock.
+enum BuildOutcome {
+    /// The snapshot was built from the current collection and is now cached.
+    Published(AttemptsSnapshotCache),
+    /// A wipe ran between the ledger copy and publication: the copy holds
+    /// pre-wipe entries and was discarded without touching the cache.
+    Stale,
+    /// Serialization or compression failed.
+    Failed,
+}
+
+/// How many times a build task retries after a wipe made its copy stale.
+/// Wipes are 24 hours apart, so one retry is only ever exercised by tests.
+const STALE_BUILD_RETRIES: usize = 1;
 
 #[derive(Clone)]
 /// Shared cache, single-flight watcher, collection clock, and TTL.
@@ -69,6 +118,14 @@ pub(crate) struct AttemptsSnapshotState {
     cache: Arc<Mutex<Option<AttemptsSnapshotCache>>>,
     build: AttemptsBuildSlot,
     collection_started_at: Arc<Mutex<chrono::DateTime<chrono::Utc>>>,
+    /// Generation of the in-memory collection, advanced by every wipe under
+    /// the cache lock. A build captures it before copying the ledger and may
+    /// publish only if it is unchanged when the cache lock is next taken, so
+    /// a copy made before a wipe can never be served after it. This is the
+    /// retention boundary the wipe promises; without it, the wipe merely
+    /// invalidated the cache and a build already in flight refilled it with
+    /// purged entries.
+    wipe_epoch: Arc<AtomicU64>,
     ttl: std::time::Duration,
     #[cfg(test)]
     probe: Arc<AttemptsBuildProbe>,
@@ -81,6 +138,7 @@ impl AttemptsSnapshotState {
             cache: Arc::new(Mutex::new(None)),
             build: Arc::new(Mutex::new(None)),
             collection_started_at: Arc::new(Mutex::new(chrono::Utc::now())),
+            wipe_epoch: Arc::new(AtomicU64::new(0)),
             ttl,
             #[cfg(test)]
             probe: Arc::new(AttemptsBuildProbe::default()),
@@ -127,9 +185,18 @@ impl AttemptsSnapshotState {
                     let _slot = BuildSlotGuard {
                         build: snapshot_state.build.clone(),
                     };
-                    let result = snapshot_state.build(&ledger, cooldown).await;
-                    if let Ok(snapshot) = &result {
-                        *snapshot_state.cache.lock().await = Some(snapshot.clone());
+                    let mut result = Err(());
+                    for _ in 0..=STALE_BUILD_RETRIES {
+                        match snapshot_state.build_and_publish(&ledger, cooldown).await {
+                            BuildOutcome::Published(snapshot) => {
+                                result = Ok(snapshot);
+                                break;
+                            }
+                            // Rebuild from the post-wipe ledger rather than
+                            // fail every waiter for a benign race.
+                            BuildOutcome::Stale => continue,
+                            BuildOutcome::Failed => break,
+                        }
                     }
                     result
                 };
@@ -146,6 +213,27 @@ impl AttemptsSnapshotState {
         result
     }
 
+    /// Builds from the current collection and publishes only if no wipe ran
+    /// in between. The epoch is compared under the cache lock, which the
+    /// wipe holds while advancing it, so the check and the publication are
+    /// one atomic decision.
+    async fn build_and_publish(
+        &self,
+        ledger: &AttemptsLedgerState,
+        cooldown: chrono::TimeDelta,
+    ) -> BuildOutcome {
+        let epoch = self.wipe_epoch.load(Ordering::SeqCst);
+        let Ok(snapshot) = self.build(ledger, cooldown).await else {
+            return BuildOutcome::Failed;
+        };
+        let mut cache = self.cache.lock().await;
+        if self.wipe_epoch.load(Ordering::SeqCst) != epoch {
+            return BuildOutcome::Stale;
+        }
+        *cache = Some(snapshot.clone());
+        BuildOutcome::Published(snapshot)
+    }
+
     async fn build(
         &self,
         ledger: &AttemptsLedgerState,
@@ -153,7 +241,6 @@ impl AttemptsSnapshotState {
     ) -> Result<AttemptsSnapshotCache, ()> {
         #[cfg(test)]
         {
-            use std::sync::atomic::Ordering;
             self.probe.started.fetch_add(1, Ordering::SeqCst);
             self.probe.started_notify.notify_one();
             if self.probe.hold.load(Ordering::SeqCst) && !self.probe.released.load(Ordering::SeqCst)
@@ -165,9 +252,10 @@ impl AttemptsSnapshotState {
             }
         }
         ledger.retain_active(cooldown).await;
-        let mut entries: Vec<AttemptEntry> = ledger
-            .snapshot_entries()
-            .await
+        let projected = ledger.snapshot_entries().await;
+        #[cfg(test)]
+        self.probe.pause_at(PAUSE_AFTER_LEDGER_COPY).await;
+        let mut entries: Vec<AttemptEntry> = projected
             .into_iter()
             .map(|entry| AttemptEntry {
                 id_hash: entry.id_hash,
@@ -179,9 +267,12 @@ impl AttemptsSnapshotState {
             })
             .collect();
         entries.sort_by(|a, b| a.id_hash.cmp(&b.id_hash));
+        let collection_started_at = truncate_to_hour(self.collection_started_at().await);
+        #[cfg(test)]
+        self.probe.pause_at(PAUSE_AFTER_COLLECTION_READ).await;
         let payload = AttemptsSnapshot {
             version: 1,
-            collection_started_at: truncate_to_hour(self.collection_started_at().await),
+            collection_started_at,
             entries,
         };
         tokio::task::spawn_blocking(move || {
@@ -209,6 +300,9 @@ impl AttemptsSnapshotState {
         let count = ledger
             .clear_and_reset_collection(&self.collection_started_at, now)
             .await;
+        // Advanced under the cache lock: any build that copied the ledger
+        // before this point observes the change when it tries to publish.
+        self.wipe_epoch.fetch_add(1, Ordering::SeqCst);
         *cache = None;
         count
     }

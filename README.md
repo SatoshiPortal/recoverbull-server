@@ -193,6 +193,14 @@ If a client opts into proactive detection, it should implement these semantics:
 - **Treat a `429` or unexpected snapshot activity as an alarm**: global service pressure uses `503` instead. If the wallet is still accessible, rotate/transfer immediately; otherwise recovery availability depends on a **previously exported** Backup Key or a second independent server. See [Error responses](#error-responses) for the full table; do not match on the `error` text.
 - **`attempt_status` on a successful fetch is the freshest signal**: it needs no extra request and stays available even when `/attempts` is overloaded. Failures older than the cooldown expire (entries are swept and forgotten), but a success never resets the counters early.
 - **Telemetry is advisory**: the server cannot distinguish an attacker from the user or another of the user's devices, and a compromised server can fabricate or suppress counters. Clients must warn, never act automatically.
+- **A failing `/attempts` means "I do not know", not "no alarm".** The snapshot carries a negative signal, so track the last *successful* poll and treat a stale one as unverified rather than as quiet. `/info` is never rate-limited and needs no snapshot, so the pair tells the two failures apart:
+
+| `/info` | `/attempts` | Meaning |
+|---|---|---|
+| OK | `200` / `304` | Verified: compare your `id_hash`, the counters, and the fill ratio. |
+| OK | `503` | Telemetry bucket or service pressure: back off per `Retry-After`; the state stays unverified. |
+| OK | `500` | The telemetry subsystem itself is failing; recovery routes are unaffected. Operators see it as `attempts_snapshot_failed` in the five-minute counter window. |
+| fails | any | The server or the network is unreachable. |
 
 `GET /info` exposes `rate_limit_max_attempts`, the total per-identifier lookup
 budget. The response also retains `rate_limit_max_failed_attempts` as a

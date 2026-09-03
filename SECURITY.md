@@ -323,7 +323,7 @@ Operators are responsible for retention of those copies.
 
 ## Invariants (each guarded by tests)
 
-The table below is the minimal primary-guard index for the security invariants; it is not an exhaustive index of every test. Supplemental tests are classified here by module so an auditor can locate evidence without listing all 194 tests individually.
+The table below is the minimal primary-guard index for the security invariants; it is not an exhaustive index of every test. Supplemental tests are classified here by module so an auditor can locate evidence without listing all 211 tests individually.
 
 ### Additional evidence by test module
 
@@ -418,7 +418,7 @@ code, keep the invariant — and run the guarding test.
 
 - [ ] `src/main.rs`, `src/app.rs`, `src/config.rs`, `src/router.rs`, `src/http/`, `src/handlers/`, `src/recovery/`, `src/attempts/`, `src/storage/sqlite.rs`, and `src/observability/` exist at the paths in the reading map.
 - [ ] `src/schema.rs` remains the Diesel schema path imposed by `diesel.toml`.
-- [ ] The final test listing contains every test named in the invariant table: verify with `cargo test --locked -- --list` (the local listing contains 194 tests; no listing is checked in).
+- [ ] The final test listing contains every test named in the invariant table: verify with `cargo test --locked -- --list` (the local listing contains 211 tests; no listing is checked in).
 - [ ] CI compiles rustdocs with `cargo doc --no-deps --document-private-items --locked`; this proves only that rustdoc compiles, not that an invariant is correct or tested.
 - [ ] For a documentation-only change, the local static checks are `git diff --check`, path existence checks, and exact-name checks against the final `cargo test --locked -- --list` output; do not substitute `cargo doc` for executable invariant evidence.
 
@@ -457,6 +457,21 @@ code, keep the invariant — and run the guarding test.
   adversarial review and delta review of the final state — no confirmed
   residual vulnerability; full suite 122/122 and `cargo audit` clean as of
   that date.
+- **Independent security reviews** (2026-09-03, `main@08e55c3`, two
+  agents working in parallel; the reports are kept outside the repository):
+  seven
+  findings found by both or one and fixed in the shared working tree
+  (capacity model, monotonic expiry, single-flight slot leak, snapshot
+  projection, `304` classification, nginx cache key, accepted risk #7);
+  eight further findings confirmed by dynamic reproduction against the
+  release binary and fixed in the same PR (`ATT-002` pre-wipe snapshot
+  republication, `RTR-001` timeout status, `DB-001`/`BKP-001` schema
+  postcondition, `CFG-001`/`CFG-002`/`RTR-002` configuration bounds,
+  `MAIN-001` loopback check, `RL-001`/`RL-003` `Retry-After`). Left open
+  for a maintainer decision: `ATT-003` (post-`/trash` counter oracle),
+  `RL-002` (zero refill), `MAIN-002` (shutdown bound), `SYS-001` (Bull
+  Mobile polling), `F-J` (Caddy `x/net` pin), `F-K` (`created_at`
+  precision), `DOC-001` (nginx conditional-request caveat).
 - **Distinct-candidate limiter review** (2026-08-20): the rate-limit bucket
   remains `sha256(identifier)`, while `secret_id/key_id` CandidateTags are
   retained only in bounded memory. Pending reservations, saturation-before-

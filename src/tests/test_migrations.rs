@@ -97,3 +97,83 @@ fn incompatible_legacy_table_is_rejected() {
     let error = crate::storage::sqlite::run_migrations(&mut connection).unwrap_err();
     assert!(error.to_string().contains("incompatible schema"));
 }
+
+fn ledger_with_initial_version(connection: &mut SqliteConnection) {
+    sql_query(
+        "CREATE TABLE __diesel_schema_migrations (\
+         version VARCHAR(50) PRIMARY KEY NOT NULL,\
+         run_on TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)",
+    )
+    .execute(connection)
+    .unwrap();
+    sql_query("INSERT INTO __diesel_schema_migrations (version) VALUES ('0001')")
+        .execute(connection)
+        .unwrap();
+}
+
+/// A Diesel ledger that already records migration `0001` makes Diesel skip
+/// it. That record must not be trusted over the schema it claims to
+/// describe: a database with the ledger but no `secret` table (a partial
+/// restore, a manual edit) used to initialize successfully and then fail
+/// every request with `500`.
+#[test]
+fn recorded_migration_without_secret_table_is_rejected() {
+    let mut connection = connection();
+    ledger_with_initial_version(&mut connection);
+
+    let error = crate::storage::sqlite::run_migrations(&mut connection).unwrap_err();
+    assert!(
+        error.to_string().contains("secret table"),
+        "startup must fail closed on a missing secret table: {error}"
+    );
+}
+
+/// Same ledger, with a `secret` table whose columns do not match migration
+/// `0001`: the schema postcondition is checked unconditionally, not only on
+/// the pre-Diesel adoption path.
+#[test]
+fn recorded_migration_with_incompatible_secret_table_is_rejected() {
+    let mut connection = connection();
+    ledger_with_initial_version(&mut connection);
+    sql_query("CREATE TABLE secret (id TEXT PRIMARY KEY NOT NULL, wrong TEXT)")
+        .execute(&mut connection)
+        .unwrap();
+
+    let error = crate::storage::sqlite::run_migrations(&mut connection).unwrap_err();
+    assert!(
+        error.to_string().contains("incompatible schema"),
+        "startup must fail closed on an incompatible secret table: {error}"
+    );
+}
+
+/// The exact schema with a valid ledger is the normal restart path and must
+/// keep passing the postcondition.
+#[test]
+fn recorded_migration_with_exact_secret_table_is_accepted() {
+    let mut connection = connection();
+    ledger_with_initial_version(&mut connection);
+    sql_query("CREATE TABLE secret (id TEXT PRIMARY KEY NOT NULL, created_at TEXT NOT NULL, encrypted_secret TEXT NOT NULL)")
+        .execute(&mut connection)
+        .unwrap();
+
+    crate::storage::sqlite::run_migrations(&mut connection).unwrap();
+}
+
+/// End to end through `initialize()` on a real file: after the table is
+/// dropped underneath a migrated database, startup must report a migration
+/// failure instead of logging "database initialized".
+#[tokio::test]
+async fn initialize_fails_closed_when_the_secret_table_is_missing() {
+    let (_server, state) = crate::tests::test_server::new_test_server().await;
+    let mut connection =
+        crate::storage::sqlite::establish_connection(state.storage.database_url_for_test())
+            .unwrap();
+    sql_query("DROP TABLE secret")
+        .execute(&mut connection)
+        .unwrap();
+
+    assert_eq!(
+        state.storage.initialize(),
+        Err(crate::storage::sqlite::ConnectionSetupError::Migration)
+    );
+}

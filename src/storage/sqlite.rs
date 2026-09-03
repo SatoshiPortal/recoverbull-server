@@ -216,29 +216,36 @@ struct SecretColumn {
     default_value: Option<String>,
 }
 
-/// Runs embedded migrations, adopting an exact pre-Diesel `secret` table when
-/// necessary. Adoption creates only Diesel's ledger and never creates or
-/// changes `secret`; it can be removed once every database has been adopted.
-pub fn run_migrations(
+/// The `secret` columns migration `0001` creates, in `pragma_table_info`
+/// order: `(name, type, notnull, pk, dflt_value)`.
+const EXPECTED_SECRET_COLUMNS: [(&str, &str, i32, i32, Option<&str>); 3] = [
+    ("id", "TEXT", 1, 1, None),
+    ("created_at", "TEXT", 1, 0, None),
+    ("encrypted_secret", "TEXT", 1, 0, None),
+];
+
+/// Checks that the live `secret` table has exactly the columns of migration
+/// `0001`. This is the storage postcondition every query in this module
+/// relies on, and it is checked against the table itself rather than against
+/// Diesel's ledger: the ledger records that a migration ran, not that the
+/// schema it produced is still there.
+fn validate_secret_schema(
     connection: &mut SqliteConnection,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let secret_exists = table_exists(connection, "secret")?;
-    let ledger_exists = table_exists(connection, "__diesel_schema_migrations")?;
-
-    if secret_exists && !ledger_exists {
-        let columns = sql_query(
-            "SELECT name, type AS column_type, \"notnull\" AS not_null, \
-             pk AS primary_key, dflt_value AS default_value \
-             FROM pragma_table_info('secret') ORDER BY cid",
-        )
-        .load::<SecretColumn>(connection)?;
-        let expected = [
-            ("id", "TEXT", 1, 1, None),
-            ("created_at", "TEXT", 1, 0, None),
-            ("encrypted_secret", "TEXT", 1, 0, None),
-        ];
-        let exact = columns.len() == expected.len()
-            && columns.iter().zip(expected).all(|(column, expected)| {
+    if !table_exists(connection, "secret")? {
+        return Err("secret table is missing".into());
+    }
+    let columns = sql_query(
+        "SELECT name, type AS column_type, \"notnull\" AS not_null, \
+         pk AS primary_key, dflt_value AS default_value \
+         FROM pragma_table_info('secret') ORDER BY cid",
+    )
+    .load::<SecretColumn>(connection)?;
+    let exact = columns.len() == EXPECTED_SECRET_COLUMNS.len()
+        && columns
+            .iter()
+            .zip(EXPECTED_SECRET_COLUMNS)
+            .all(|(column, expected)| {
                 (
                     column.name.as_str(),
                     column.column_type.as_str(),
@@ -247,9 +254,29 @@ pub fn run_migrations(
                     column.default_value.as_deref(),
                 ) == expected
             });
-        if !exact {
-            return Err("legacy secret table has an incompatible schema".into());
-        }
+    if !exact {
+        return Err("secret table has an incompatible schema".into());
+    }
+    Ok(())
+}
+
+/// Runs embedded migrations, adopting an exact pre-Diesel `secret` table when
+/// necessary, then verifies the resulting schema unconditionally.
+///
+/// Adoption creates only Diesel's ledger and never creates or changes
+/// `secret`; it can be removed once every database has been adopted. The
+/// final validation is what makes a pre-existing ledger safe to trust: a
+/// database whose ledger already records `0001` makes Diesel skip the
+/// migration, so without it a missing or incompatible `secret` table (a
+/// partial restore, a manual edit) would pass startup and fail every request.
+pub fn run_migrations(
+    connection: &mut SqliteConnection,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let secret_exists = table_exists(connection, "secret")?;
+    let ledger_exists = table_exists(connection, "__diesel_schema_migrations")?;
+
+    if secret_exists && !ledger_exists {
+        validate_secret_schema(connection).map_err(|error| format!("legacy {error}"))?;
 
         connection.transaction(|connection| {
             sql_query(
@@ -267,7 +294,7 @@ pub fn run_migrations(
     }
 
     connection.run_pending_migrations(MIGRATIONS)?;
-    Ok(())
+    validate_secret_schema(connection)
 }
 
 fn table_exists(

@@ -102,6 +102,30 @@ def main() -> None:
             stream.write(b"corruption")
         run_cli("verify", str(corrupted), expected=1)
 
+        # verify must compare the secret table with migration 0001, not only
+        # check that a table by that name exists: an intact but unusable
+        # backup must never be declared ok nor installed by restore.
+        for name, ddl in (
+            ("missing-columns", "CREATE TABLE secret (id TEXT PRIMARY KEY NOT NULL, wrong TEXT)"),
+            ("renamed-column", "CREATE TABLE secret (id TEXT PRIMARY KEY NOT NULL, created TEXT NOT NULL, encrypted_secret TEXT NOT NULL)"),
+            ("nullable-column", "CREATE TABLE secret (id TEXT PRIMARY KEY NOT NULL, created_at TEXT, encrypted_secret TEXT NOT NULL)"),
+            ("extra-column", "CREATE TABLE secret (id TEXT PRIMARY KEY NOT NULL, created_at TEXT NOT NULL, encrypted_secret TEXT NOT NULL, extra TEXT)"),
+            ("no-primary-key", "CREATE TABLE secret (id TEXT NOT NULL, created_at TEXT NOT NULL, encrypted_secret TEXT NOT NULL)"),
+        ):
+            incompatible = root / f"{name}.sqlite3"
+            with sqlite3.connect(incompatible) as connection:
+                connection.executescript(
+                    ddl + ";"
+                    "CREATE TABLE __diesel_schema_migrations (version TEXT PRIMARY KEY);"
+                    "INSERT INTO __diesel_schema_migrations VALUES ('0001');"
+                )
+            with sqlite3.connect(incompatible) as connection:
+                assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+            result = run_cli("verify", str(incompatible), expected=1)
+            assert "schema" in result.stderr, (name, result.stderr)
+            run_cli("restore", str(incompatible), str(root / f"{name}-restored.sqlite3"), expected=1)
+            assert not (root / f"{name}-restored.sqlite3").exists()
+
         Path(f"{restored}-wal").touch()
         run_cli("restore", str(backup), str(restored), expected=1)
         Path(f"{restored}-wal").unlink()

@@ -30,4 +30,4 @@ Before a restore, perform a controlled drill on a new path and run `verify`; do 
 4. Set ownership and permissions: `sudo chown recoverbull:recoverbull /var/lib/recoverbull/database.sqlite3 && sudo chmod 0600 /var/lib/recoverbull/database.sqlite3`.
 5. Start the application and selected proxy, then check `/info` and the canary and perform a synthetic store/fetch/trash check. If any check fails, stop them and atomically roll back to the preserved incident copy or a previously verified backup.
 
-Record each restore test, rotation, purge, owner, and result. A backup that has not passed `verify` and a restore drill is not a recovery plan.
+Record each restore test, rotation, purge, owner, and result. A backup that has not passed `verify` and a restore drill is not a recovery plan. `verify` checks SQLite integrity, the presence of the `secret` and Diesel ledger tables, and the `secret` columns against migration `0001`; `restore` refuses and removes a copy that fails it. The server applies the same schema postcondition at startup.

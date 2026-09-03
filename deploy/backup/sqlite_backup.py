@@ -14,6 +14,14 @@ from urllib.parse import quote
 
 REQUIRED_TABLES = ("secret", "__diesel_schema_migrations")
 
+# The `secret` columns created by migrations/0001_schema/up.sql, as
+# PRAGMA table_info reports them: (name, type, notnull, dflt_value, pk).
+EXPECTED_SECRET_COLUMNS = (
+    ("id", "TEXT", 1, None, 1),
+    ("created_at", "TEXT", 1, None, 0),
+    ("encrypted_secret", "TEXT", 1, None, 0),
+)
+
 
 def _readonly(path: Path) -> sqlite3.Connection:
     encoded_path = quote(str(path.resolve()), safe="/")
@@ -56,6 +64,15 @@ def _integrity_and_schema(connection: sqlite3.Connection) -> None:
     missing = [name for name in REQUIRED_TABLES if name not in names]
     if missing:
         raise RuntimeError("backup is missing required schema tables")
+    # A table named `secret` is not enough: an intact SQLite file with the
+    # wrong columns is unusable by the server, and the server's own startup
+    # check would refuse it. Compare with the migration, column by column.
+    columns = tuple(
+        (row[1], row[2], row[3], row[4], row[5])
+        for row in connection.execute("PRAGMA table_info('secret')")
+    )
+    if columns != EXPECTED_SECRET_COLUMNS:
+        raise RuntimeError("backup secret table schema does not match migration 0001")
 
 
 def _sync_directory(directory: Path) -> None:

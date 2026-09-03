@@ -9,7 +9,7 @@ use crate::{
     },
     config::RecoveryConfig,
     observability::SecurityCounters,
-    rate_limit::TokenBucket,
+    rate_limit::{BucketDecision, TokenBucket},
     storage::sqlite::{NewStoredSecret, SqliteStorage, StorageError, StoredSecret},
 };
 use base64::Engine;
@@ -48,8 +48,9 @@ pub(crate) enum StoreResult {
     Stored,
     /// Input failed validation, with a client-safe explanation.
     Invalid(String),
-    /// The global store bucket had no token.
-    GlobalOverload,
+    /// The global store bucket had no token; the backoff is the bucket's
+    /// own estimate of its next token.
+    GlobalOverload { retry_after_secs: u64 },
     /// A database lease could not be acquired before its deadline.
     DatabaseBusy,
     /// The detached database operation failed.
@@ -60,8 +61,11 @@ pub(crate) enum StoreResult {
 pub(crate) enum LookupResult {
     /// Input failed canonical hash validation.
     Invalid,
-    /// The global lookup bucket had no token.
-    GlobalOverload,
+    /// The global lookup bucket had no token; the backoff is the bucket's
+    /// own estimate of its next token.
+    GlobalOverload {
+        retry_after_secs: u64,
+    },
     /// The identifier map reached its configured capacity.
     Capacity,
     /// An identical candidate is currently being processed.
@@ -149,9 +153,11 @@ impl RecoveryService {
             self.counters.store_rejected();
             return StoreResult::Invalid("encrypted_secret should be base64 encoded".to_owned());
         }
-        if !self.store_bucket.lock().await.try_consume() {
+        if let BucketDecision::Rejected { retry_after_secs } =
+            self.store_bucket.lock().await.try_consume()
+        {
             self.counters.store_rejected();
-            return StoreResult::GlobalOverload;
+            return StoreResult::GlobalOverload { retry_after_secs };
         }
         let secret = NewStoredSecret {
             id: generate_secret_id(&identifier, &authentication_key),
@@ -258,9 +264,11 @@ impl RecoveryService {
         if !is_256bits_hex_hash(&identifier) || !is_256bits_hex_hash(&authentication_key) {
             return LookupResult::Invalid;
         }
-        if !self.lookup_bucket.lock().await.try_consume() {
+        if let BucketDecision::Rejected { retry_after_secs } =
+            self.lookup_bucket.lock().await.try_consume()
+        {
             self.counters.lookup_rate_limited();
-            return LookupResult::GlobalOverload;
+            return LookupResult::GlobalOverload { retry_after_secs };
         }
         let id_hash = identifier_hash(&identifier).expect("validated hex identifier");
         let candidate = generate_secret_id(&identifier, &authentication_key);

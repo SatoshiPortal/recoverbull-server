@@ -12,10 +12,6 @@ use axum::{
     Json,
 };
 
-/// Small fixed advisory backoff for the global attempts-telemetry bucket:
-/// there is no cooldown deadline to derive here, only "try again shortly".
-const GLOBAL_OVERLOAD_RETRY_AFTER_SECS: u64 = 1;
-
 /// Public lookup telemetry.
 ///
 /// Publishes *every* identifier with an active fetch/trash entry, not only
@@ -39,10 +35,12 @@ const GLOBAL_OVERLOAD_RETRY_AFTER_SECS: u64 = 1;
 /// is no uncompressed variant, which keeps one representation, one ETag and
 /// one cache entry.
 pub async fn get_attempts(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if !state.attempts_request_admitted().await {
+    if let crate::rate_limit::BucketDecision::Rejected { retry_after_secs } =
+        state.attempts_request_admission().await
+    {
         return retry_after_response(
             StatusCode::SERVICE_UNAVAILABLE,
-            GLOBAL_OVERLOAD_RETRY_AFTER_SECS,
+            retry_after_secs,
             "Too many attempts telemetry requests, retry later",
         );
     }

@@ -1,7 +1,7 @@
 //! `/attempts` admission throttling and retention tasks.
 
 use super::{ledger::AttemptsLedgerState, snapshot::AttemptsSnapshotState};
-use crate::rate_limit::TokenBucket;
+use crate::rate_limit::{BucketDecision, TokenBucket};
 use chrono::TimeDelta;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -21,8 +21,9 @@ impl AttemptsMaintenanceState {
         }
     }
 
-    /// Attempts to consume one telemetry request token.
-    pub(crate) async fn try_consume_request(&self) -> bool {
+    /// Attempts to consume one telemetry request token, returning the
+    /// bucket's own backoff estimate on refusal.
+    pub(crate) async fn try_consume_request(&self) -> BucketDecision {
         self.request_bucket.lock().await.try_consume()
     }
 

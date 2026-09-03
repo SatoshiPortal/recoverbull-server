@@ -656,3 +656,152 @@ async fn test_a_forward_wall_clock_jump_does_not_sweep_active_entries() {
         "an entry that is only wall-clock-old must survive the sweep"
     );
 }
+
+/// `Retry-After` on a global-bucket `503` is the server's own estimate of
+/// when the next token exists, derived from the configured refill rate under
+/// the same lock as the refusal. A fixed `1` was only right for the default
+/// rates: with a refill of one token per ten seconds it told clients to
+/// retry ten times too early, turning the backoff into extra load.
+#[tokio::test]
+async fn test_global_bucket_retry_after_follows_the_configured_refill() {
+    let (server, state) = crate::tests::test_server::new_test_server().await;
+    state
+        .recovery
+        .set_lookup_bucket_for_test(crate::rate_limit::TokenBucket::new(1.0, 0.1))
+        .await;
+
+    let first = server
+        .post("/fetch")
+        .json(&FetchSecret {
+            identifier: SHA256_111111.to_string(),
+            authentication_key: NOT_PASSWORD_HASH.to_string(),
+        })
+        .expect_failure()
+        .await;
+    assert_eq!(
+        first.status_code(),
+        StatusCode::UNAUTHORIZED,
+        "the burst token"
+    );
+
+    let refused = server
+        .post("/fetch")
+        .json(&FetchSecret {
+            identifier: SHA256_111111.to_string(),
+            authentication_key: NOT_PASSWORD_HASH.to_string(),
+        })
+        .expect_failure()
+        .await;
+    assert_eq!(refused.status_code(), StatusCode::SERVICE_UNAVAILABLE);
+    let retry_after: u64 = refused
+        .header("retry-after")
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(
+        retry_after, 10,
+        "an empty bucket refilling at 0.1 token/s needs ten seconds for one token"
+    );
+}
+
+/// The bucket's refill path on an injected clock: burst, refusal with the
+/// computed backoff, fractional credit retained across a refusal, exact
+/// refill, and the capacity cap after a long idle period. No sleeping.
+#[test]
+fn test_token_bucket_refill_is_deterministic_on_an_injected_clock() {
+    use crate::rate_limit::{BucketDecision, TokenBucket};
+    let start = std::time::Instant::now();
+    let at = |seconds: u64| start + Duration::from_secs(seconds);
+    let mut bucket = TokenBucket::new_at(2.0, 0.1, start);
+
+    assert_eq!(bucket.try_consume_at(start), BucketDecision::Consumed);
+    assert_eq!(bucket.try_consume_at(start), BucketDecision::Consumed);
+    assert_eq!(
+        bucket.try_consume_at(start),
+        BucketDecision::Rejected {
+            retry_after_secs: 10
+        },
+        "an empty bucket at 0.1 token/s needs ten seconds"
+    );
+    assert_eq!(
+        bucket.try_consume_at(at(5)),
+        BucketDecision::Rejected {
+            retry_after_secs: 5
+        },
+        "half a token of credit is retained, so half the wait remains"
+    );
+    assert_eq!(
+        bucket.try_consume_at(at(10)),
+        BucketDecision::Consumed,
+        "exactly one token after the announced wait"
+    );
+    assert_eq!(
+        bucket.try_consume_at(at(10)),
+        BucketDecision::Rejected {
+            retry_after_secs: 10
+        }
+    );
+    // a long idle period refills to the capacity, not beyond it
+    assert_eq!(bucket.try_consume_at(at(1_000)), BucketDecision::Consumed);
+    assert_eq!(bucket.try_consume_at(at(1_000)), BucketDecision::Consumed);
+    assert_eq!(
+        bucket.try_consume_at(at(1_000)),
+        BucketDecision::Rejected {
+            retry_after_secs: 10
+        }
+    );
+}
+
+/// The advertised backoff is rounded up and never below one second, and a
+/// bucket without refill has no deadline to derive: it keeps the advisory
+/// one-second value (the zero-refill mode itself is a separate decision).
+#[test]
+fn test_token_bucket_backoff_rounds_up_and_floors_at_one_second() {
+    use crate::rate_limit::{BucketDecision, TokenBucket};
+    let start = std::time::Instant::now();
+
+    // 2 tokens/s: half a second rounds up to the one-second floor
+    let mut fast = TokenBucket::new_at(1.0, 2.0, start);
+    assert_eq!(fast.try_consume_at(start), BucketDecision::Consumed);
+    assert_eq!(
+        fast.try_consume_at(start),
+        BucketDecision::Rejected {
+            retry_after_secs: 1
+        }
+    );
+
+    // 0.3 token/s: 3.33 seconds rounds up to 4
+    let mut slow = TokenBucket::new_at(1.0, 0.3, start);
+    assert_eq!(slow.try_consume_at(start), BucketDecision::Consumed);
+    assert_eq!(
+        slow.try_consume_at(start),
+        BucketDecision::Rejected {
+            retry_after_secs: 4
+        }
+    );
+
+    // fractional capacity: 1.5 tokens leaves half a token after one consume
+    let mut fractional = TokenBucket::new_at(1.5, 1.0, start);
+    assert_eq!(fractional.try_consume_at(start), BucketDecision::Consumed);
+    assert_eq!(
+        fractional.try_consume_at(start),
+        BucketDecision::Rejected {
+            retry_after_secs: 1
+        }
+    );
+    assert_eq!(
+        fractional.try_consume_at(start + Duration::from_millis(500)),
+        BucketDecision::Consumed
+    );
+
+    // no refill: never refills, and the backoff stays advisory
+    let mut quota = TokenBucket::new_at(1.0, 0.0, start);
+    assert_eq!(quota.try_consume_at(start), BucketDecision::Consumed);
+    assert_eq!(
+        quota.try_consume_at(start + Duration::from_secs(1_000_000)),
+        BucketDecision::Rejected {
+            retry_after_secs: 1
+        }
+    );
+}

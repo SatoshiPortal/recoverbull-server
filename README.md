@@ -132,8 +132,14 @@ retry or security decision.
 | `503` | Server pressure or unavailability, including global lookup/store/telemetry limits, a full rate-limit map, a busy database, or a request the server could not finish within its 30-second timeout. | Back off and retry using `Retry-After`. |
 | `500` | Internal server error. | Treat as a server failure. |
 
-Every `429` and `503` response carries `Retry-After`, in seconds. Framework-generated
-rejections such as `404`, `405`, `413`, and `415` may not be JSON.
+Every `429` and `503` response carries `Retry-After`, in seconds. On a `503`
+from one of the global token buckets (store, lookup, telemetry) the value is
+the server's estimate of when the next token exists, computed from the
+configured refill rate at the moment of refusal and rounded up to at least one
+second; on the other `503`s (busy database, full identifier map, pending
+duplicate, request timeout) there is no deadline to derive and the value is a
+one-second advisory. Framework-generated rejections such as `404`, `405`,
+`413`, and `415` may not be JSON.
 
 ### Attempts
 

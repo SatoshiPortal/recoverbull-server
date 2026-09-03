@@ -170,21 +170,22 @@ impl AppState {
     }
 
     /// Applies the global telemetry request bucket and records rejection using
-    /// aggregate counters, without exposing either owner to the handler.
-    pub(crate) async fn attempts_request_admitted(&self) -> bool {
-        let admitted = self
+    /// aggregate counters, without exposing either owner to the handler. A
+    /// rejection carries the bucket's own backoff estimate.
+    pub(crate) async fn attempts_request_admission(&self) -> crate::rate_limit::BucketDecision {
+        let decision = self
             .components
             .attempts
             .maintenance
             .try_consume_request()
             .await;
-        if !admitted {
+        if matches!(decision, crate::rate_limit::BucketDecision::Rejected { .. }) {
             self.components
                 .observability
                 .counters
                 .attempts_rate_limited();
         }
-        admitted
+        decision
     }
 
     /// Builds or clones the public telemetry representation behind its domain

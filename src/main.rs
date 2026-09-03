@@ -66,16 +66,6 @@ async fn main() {
 
     let app_state = crate::app::build(crate::config::init());
 
-    if !app_state.server_address().starts_with("127.0.0.1")
-        && !app_state.server_address().starts_with("localhost")
-        && !app_state.server_address().starts_with("[::1]")
-    {
-        eprintln!(
-            "WARNING: SERVER_ADDRESS ({}) is not loopback. This server is designed to run behind a Tor onion service or a TLS-terminating proxy; never expose it directly on a public interface.",
-            app_state.server_address()
-        );
-    }
-
     if let Err(error) = app_state.initialize_storage() {
         eprintln!("Failed to initialize database: {error:?}");
         std::process::exit(1);
@@ -91,6 +81,7 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(app_state.server_address())
         .await
         .unwrap();
+    warn_unless_loopback(listener.local_addr());
     let (shutdown_trigger, shutdown_request) = tokio::sync::oneshot::channel();
     let server = axum::serve(listener, app)
         .with_graceful_shutdown(async move {
@@ -120,6 +111,31 @@ async fn main() {
     }
 }
 
+/// Whether a bound socket address is loopback.
+///
+/// Decided on the address the kernel actually bound, never on the configured
+/// string: a textual prefix check accepted `localhost.attacker.example` or
+/// `127.0.0.1.example`, which resolve wherever their owner wants, and flagged
+/// `127.0.0.2`, which is loopback.
+pub(crate) fn is_loopback_bind(address: std::net::SocketAddr) -> bool {
+    address.ip().is_loopback()
+}
+
+/// Prints the deployment warning when the listener is not on loopback. This
+/// is a warning, not an enforcement: the runbook requires the proxy and Tor
+/// in front of this process, and the binary cannot verify that itself.
+fn warn_unless_loopback(bound: std::io::Result<std::net::SocketAddr>) {
+    match bound {
+        Ok(address) if is_loopback_bind(address) => {}
+        Ok(address) => eprintln!(
+            "WARNING: the listener is bound to {address}, which is not loopback. This server is designed to run behind a Tor onion service or a TLS-terminating proxy; never expose it directly on a public interface."
+        ),
+        Err(error) => eprintln!(
+            "WARNING: could not read the bound listener address ({error}); verify that SERVER_ADDRESS is loopback."
+        ),
+    }
+}
+
 /// Waits for SIGINT or SIGTERM. Graceful shutdown lets in-flight requests
 /// finish instead of being killed mid-handler: `/trash` commits its database
 /// transaction before sending the response, so an abrupt process kill
@@ -142,6 +158,48 @@ async fn shutdown_signal() -> &'static str {
     tokio::select! {
         _ = ctrl_c => "SIGINT",
         _ = terminate => "SIGTERM",
+    }
+}
+
+#[cfg(test)]
+mod bind_tests {
+    use super::is_loopback_bind;
+
+    /// The decision is on the address, so every loopback address passes and
+    /// no textual lookalike can: there is no string to match a prefix on.
+    #[test]
+    fn loopback_is_decided_on_the_bound_address() {
+        for loopback in [
+            "127.0.0.1:3000",
+            "127.0.0.2:3000",
+            "127.255.255.254:1",
+            "[::1]:3000",
+        ] {
+            assert!(
+                is_loopback_bind(loopback.parse().unwrap()),
+                "{loopback} is loopback"
+            );
+        }
+        for public in [
+            "0.0.0.0:3000",
+            "192.168.1.10:3000",
+            "10.0.0.1:80",
+            "[::]:3000",
+            "[2001:db8::1]:3000",
+        ] {
+            assert!(
+                !is_loopback_bind(public.parse().unwrap()),
+                "{public} is not loopback"
+            );
+        }
+    }
+
+    /// The check runs on the socket the process bound, so a configured name
+    /// is only ever judged by what it resolved to.
+    #[tokio::test]
+    async fn bound_localhost_is_judged_by_its_resolved_address() {
+        let listener = tokio::net::TcpListener::bind("localhost:0").await.unwrap();
+        assert!(is_loopback_bind(listener.local_addr().unwrap()));
     }
 }
 

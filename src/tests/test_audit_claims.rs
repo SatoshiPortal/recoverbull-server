@@ -290,13 +290,7 @@ async fn test_audit_f12_hex_case_is_canonicalized() {
 #[test]
 fn test_attempts_proxy_cache_keys_ignore_host_and_query_variants() {
     let nginx = include_str!("../../deploy/nginx/recoverbull.conf");
-    let attempts_location = nginx
-        .split_once("location = /attempts {")
-        .expect("nginx must define the exact /attempts location")
-        .1
-        .split_once("\n    }")
-        .expect("nginx /attempts location must be closed")
-        .0;
+    let attempts_location = nginx_block(nginx, "location = /attempts {");
     let cache_keys: Vec<_> = attempts_location
         .lines()
         .map(str::trim)
@@ -332,4 +326,28 @@ fn test_attempts_proxy_cache_keys_ignore_host_and_query_variants() {
             && caddy_smoke.contains("Backend.calls.get(\"/attempts\", 0) - attempts_before == 1"),
         "Caddy smoke must prove Host/query variants make one backend call"
     );
+}
+
+/// Returns the body of the first nginx block opened by `header`, by brace
+/// depth rather than by indentation, so reformatting the template cannot
+/// silently truncate what the guard above inspects.
+fn nginx_block<'a>(config: &'a str, header: &str) -> &'a str {
+    let body = config
+        .split_once(header)
+        .unwrap_or_else(|| panic!("nginx must define `{header}`"))
+        .1;
+    let mut depth = 1usize;
+    for (offset, byte) in body.bytes().enumerate() {
+        match byte {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &body[..offset];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("nginx block `{header}` is not closed");
 }

@@ -103,11 +103,18 @@ class Backend(BaseHTTPRequestHandler):
         pass
 
 
-# The nginx example now expects a PROXY-protocol header (Tor supplies it via
-# HiddenServiceExportCircuitID). The source address becomes the per-circuit
-# key for limit_req/limit_conn; distinct sources therefore get independent
-# budgets, which the isolation test below exercises.
-DEFAULT_SOURCE = "10.200.0.1"
+# The nginx example expects a PROXY-protocol header, which Tor supplies via
+# HiddenServiceExportCircuitID. Tor emits the v1 TCP6 form with a synthetic
+# fc00::/8 source carrying the rendezvous-circuit id, so the smoke uses exactly
+# that wire format rather than a TCP4 stand-in. The source becomes the
+# per-circuit key for limit_req/limit_conn; distinct circuits therefore get
+# independent budgets, which the isolation test below exercises.
+DEFAULT_SOURCE = "fc00:dead:beef:4dad::1"
+
+
+def circuit_source(circuit_id):
+    """The source address Tor derives from a rendezvous-circuit id."""
+    return f"fc00:dead:beef:4dad::{circuit_id:x}"
 
 
 class _ProxyConnection(http.client.HTTPConnection):
@@ -118,7 +125,7 @@ class _ProxyConnection(http.client.HTTPConnection):
     def connect(self):
         super().connect()
         self.sock.sendall(
-            f"PROXY TCP4 {self._source} 127.0.0.1 40000 3000\r\n".encode()
+            f"PROXY TCP6 {self._source} ::1 40000 3000\r\n".encode()
         )
 
 
@@ -144,7 +151,7 @@ def assert_request_body_is_streamed():
     Backend.slow_body_started.clear()
     with socket.create_connection(("127.0.0.1", 3000), timeout=5) as connection:
         connection.sendall(
-            b"PROXY TCP4 10.200.0.1 127.0.0.1 40000 3000\r\n"
+            b"PROXY TCP6 fc00:dead:beef:4dad::1 ::1 40000 3000\r\n"
             b"POST /slow-body HTTP/1.1\r\n"
             b"Host: localhost\r\n"
             b"Content-Type: application/json\r\n"
@@ -363,7 +370,7 @@ def assert_per_circuit_isolation():
         status = request(
             f"/attempts?circuit={index}",
             {"Host": f"c{index}.example"},
-            source=f"10.50.{(index >> 8) & 255}.{(index & 255) or 1}",
+            source=circuit_source(0x1000 + index),
         )[0]
         with result_lock:
             results.append(status)
@@ -379,7 +386,7 @@ def assert_per_circuit_isolation():
         f"distinct per-circuit sources must not share a bucket: {sorted(set(results))}",
     )
 
-    flood = [request(f"/attempts?flood={k}", source="10.99.99.99")[0] for k in range(60)]
+    flood = [request(f"/attempts?flood={k}", source=circuit_source(0x9999))[0] for k in range(60)]
     assert_true(
         503 in flood,
         "a single circuit flooding must still trip its own limit_req bucket",

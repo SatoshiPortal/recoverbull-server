@@ -338,7 +338,7 @@ fn test_example_nginx_preserves_attempts_proxy_contract() {
             && nginx_smoke.contains("status == 304")
             && nginx_smoke.contains("Backend.slow_body_started.wait(timeout=5)")
             && nginx_smoke.contains("assert_per_circuit_isolation")
-            && nginx_smoke.contains("PROXY TCP4"),
+            && nginx_smoke.contains("PROXY TCP6"),
         "nginx smoke must prove body streaming, cache single-flight, edge JSON, conditional reuse, \
          and per-circuit rate-limit isolation"
     );

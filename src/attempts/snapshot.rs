@@ -12,7 +12,7 @@ use std::{
     },
     time::Instant,
 };
-use tokio::sync::{watch, Mutex};
+use tokio::sync::{Mutex, OwnedMutexGuard};
 
 /// Immutable gzip snapshot shared by all requests until the TTL expires.
 #[derive(Clone)]
@@ -21,38 +21,6 @@ pub(crate) struct AttemptsSnapshotCache {
     pub(crate) gzip_body: Arc<[u8]>,
     pub(crate) etag: String,
     pub(crate) created_at: Instant,
-}
-
-type AttemptsBuildReceiver = watch::Receiver<Option<Result<AttemptsSnapshotCache, ()>>>;
-
-type AttemptsBuildSlot = Arc<Mutex<Option<AttemptsBuildReceiver>>>;
-
-/// Releases the single-flight slot when a build task ends, on every path
-/// including an unwind.
-///
-/// The slot must not outlive its build task. A slot still holding the
-/// receiver of a task that died without sending makes every later
-/// `/attempts` request clone that receiver, observe a dropped sender, and
-/// return `500` — permanently, because a new build is only started when the
-/// slot is empty. Clearing on `Drop` bounds that failure to the requests
-/// already waiting on the dead build.
-struct BuildSlotGuard {
-    build: AttemptsBuildSlot,
-}
-
-impl Drop for BuildSlotGuard {
-    /// Drop cannot await, so it releases the slot immediately when the lock is
-    /// free and defers to a task when another operation owns it.
-    fn drop(&mut self) {
-        if let Ok(mut slot) = self.build.try_lock() {
-            *slot = None;
-        } else {
-            let build = self.build.clone();
-            tokio::spawn(async move {
-                *build.lock().await = None;
-            });
-        }
-    }
 }
 
 #[cfg(test)]
@@ -66,7 +34,7 @@ pub(crate) struct AttemptsBuildProbe {
     pub(crate) started_notify: tokio::sync::Notify,
     pub(crate) release: tokio::sync::Notify,
     /// Forces the build task to unwind before it can publish a result, so a
-    /// test can prove the single-flight slot is still released.
+    /// test can prove the build mutex is still released.
     pub(crate) panic_before_send: std::sync::atomic::AtomicBool,
     /// Where the build pauses so a test can interleave a real wipe with a
     /// build that already holds a pre-wipe copy of the ledger. Zero pauses
@@ -116,7 +84,10 @@ const STALE_BUILD_RETRIES: usize = 1;
 /// Shared cache, single-flight watcher, collection clock, and TTL.
 pub(crate) struct AttemptsSnapshotState {
     cache: Arc<Mutex<Option<AttemptsSnapshotCache>>>,
-    build: AttemptsBuildSlot,
+    /// Serializes builders, and nothing else. Held by the build task itself,
+    /// not by the request that started it, so a client that disconnects
+    /// mid-build neither aborts the build nor lets a second one start.
+    build: Arc<Mutex<()>>,
     collection_started_at: Arc<Mutex<chrono::DateTime<chrono::Utc>>>,
     /// Generation of the in-memory collection, advanced by every wipe under
     /// the cache lock. A build captures it before copying the ledger and may
@@ -136,7 +107,7 @@ impl AttemptsSnapshotState {
     pub(crate) fn new(ttl: std::time::Duration) -> Self {
         Self {
             cache: Arc::new(Mutex::new(None)),
-            build: Arc::new(Mutex::new(None)),
+            build: Arc::new(Mutex::new(())),
             collection_started_at: Arc::new(Mutex::new(chrono::Utc::now())),
             wipe_epoch: Arc::new(AtomicU64::new(0)),
             ttl,
@@ -151,66 +122,67 @@ impl AttemptsSnapshotState {
     }
 
     /// Returns a fresh-or-cached immutable gzip snapshot for one request.
+    ///
+    /// Two properties, one mutex. **At most one build runs at a time**, so
+    /// the burst of requests that arrives when the cache expires cannot turn
+    /// into that many serializations of a multi-megabyte payload. And **a
+    /// request that stops waiting neither aborts the build nor starts a
+    /// second one**, because the build task owns the mutex guard: the guard
+    /// is released when the build ends, not when the caller loses interest.
+    ///
+    /// Waiters do not need to be told about the build: the first thing each
+    /// one does after acquiring the mutex is look at the cache the previous
+    /// builder just filled. That replaces a `watch` channel, a shared slot
+    /// holding its receiver, and a `Drop` guard clearing that slot — three
+    /// layers whose only unique failure mode was the slot outliving a dead
+    /// build task, which made every later request a permanent `500`. A mutex
+    /// guard releases on unwind by definition, so that failure cannot occur.
     pub(crate) async fn snapshot_for_request(
         &self,
         ledger: &AttemptsLedgerState,
         cooldown: chrono::TimeDelta,
     ) -> Result<AttemptsSnapshotCache, ()> {
-        // Fast path clones O(1) `Arc<[u8]>`; the expensive map copy and gzip work
-        // happen outside the cache and build mutexes.
-        {
-            let cached = self.cache.lock().await;
-            if let Some(snapshot) = cached.as_ref() {
-                if snapshot.created_at.elapsed() < self.ttl {
-                    return Ok(snapshot.clone());
+        // Fast path clones an `Arc<[u8]>`; the map projection and the gzip
+        // work happen outside both mutexes.
+        if let Some(fresh) = self.fresh_cached().await {
+            return Ok(fresh);
+        }
+        let permit = self.build.clone().lock_owned().await;
+        // The previous builder, if any, has published by now.
+        if let Some(fresh) = self.fresh_cached().await {
+            return Ok(fresh);
+        }
+        let snapshot_state = self.clone();
+        let ledger = ledger.clone();
+        tokio::spawn(async move {
+            // The permit moves into the task: it outlives this request.
+            let _permit: OwnedMutexGuard<()> = permit;
+            let mut result = Err(());
+            for _ in 0..=STALE_BUILD_RETRIES {
+                match snapshot_state.build_and_publish(&ledger, cooldown).await {
+                    BuildOutcome::Published(snapshot) => {
+                        result = Ok(snapshot);
+                        break;
+                    }
+                    // Rebuild from the post-wipe ledger rather than fail
+                    // every waiter for a benign race.
+                    BuildOutcome::Stale => continue,
+                    BuildOutcome::Failed => break,
                 }
             }
-        }
-        // `watch` makes all concurrent callers observe one build (single
-        // flight), while the TTL bounds how long its immutable result lives.
-        let mut build_slot = self.build.lock().await;
-        let mut receiver = if let Some(receiver) = build_slot.as_ref() {
-            receiver.clone()
-        } else {
-            let (sender, receiver) = watch::channel(None);
-            *build_slot = Some(receiver.clone());
-            let snapshot_state = self.clone();
-            let ledger = ledger.clone();
-            tokio::spawn(async move {
-                // The guard lives in an inner scope so it drops *before*
-                // `sender`, on the success path and while unwinding alike. A
-                // waiter therefore never observes a failed build while the
-                // slot it would have to replace is still occupied.
-                let result = {
-                    let _slot = BuildSlotGuard {
-                        build: snapshot_state.build.clone(),
-                    };
-                    let mut result = Err(());
-                    for _ in 0..=STALE_BUILD_RETRIES {
-                        match snapshot_state.build_and_publish(&ledger, cooldown).await {
-                            BuildOutcome::Published(snapshot) => {
-                                result = Ok(snapshot);
-                                break;
-                            }
-                            // Rebuild from the post-wipe ledger rather than
-                            // fail every waiter for a benign race.
-                            BuildOutcome::Stale => continue,
-                            BuildOutcome::Failed => break,
-                        }
-                    }
-                    result
-                };
-                let _ = sender.send(Some(result));
-            });
-            receiver
-        };
-        drop(build_slot);
-        receiver.changed().await.map_err(|_| ())?;
-        let result = match receiver.borrow().clone() {
-            Some(result) => result,
-            None => Err(()),
-        };
-        result
+            result
+        })
+        .await
+        .map_err(|_| ())?
+    }
+
+    /// Returns the cached snapshot while it is inside its TTL.
+    async fn fresh_cached(&self) -> Option<AttemptsSnapshotCache> {
+        let cached = self.cache.lock().await;
+        cached
+            .as_ref()
+            .filter(|snapshot| snapshot.created_at.elapsed() < self.ttl)
+            .cloned()
     }
 
     /// Builds from the current collection and publishes only if no wipe ran

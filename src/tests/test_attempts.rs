@@ -253,16 +253,13 @@ async fn test_attempts_snapshot_rebuild_is_deterministic() {
     assert_ne!(first.header("etag"), third.header("etag"));
 }
 
-/// A cancelled initiator must not cancel the single snapshot rebuild. The
-/// explicit worker gate makes the cancellation happen after build start and
-/// makes a second build observable on the unfixed implementation.
+/// A cancelled initiator must neither cancel the build it started nor cause
+/// a second one: the build task owns the mutex, so the next request waits
+/// for it and then finds its result in the cache. The worker gate makes the
+/// cancellation land after the build has started.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_cancelled_attempts_request_keeps_single_rebuild_in_flight() {
-    let (_server, mut state) = crate::tests::test_server::new_test_server().await;
-    state
-        .attempts
-        .snapshot
-        .set_ttl_for_test(std::time::Duration::ZERO);
+    let (_server, state) = crate::tests::test_server::new_test_server().await;
     state
         .attempts
         .snapshot
@@ -302,7 +299,7 @@ async fn test_cancelled_attempts_request_keeps_single_rebuild_in_flight() {
     state.attempts.snapshot.probe().release.notify_one();
     let response = tokio::time::timeout(std::time::Duration::from_secs(5), second)
         .await
-        .expect("joined snapshot request did not complete within 5 seconds")
+        .expect("waiting snapshot request did not complete within 5 seconds")
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let builds_started = state
@@ -313,7 +310,7 @@ async fn test_cancelled_attempts_request_keeps_single_rebuild_in_flight() {
         .load(Ordering::SeqCst);
     assert_eq!(
         builds_started, 1,
-        "the second request must join the rebuild started by the cancelled request"
+        "the second request must reuse the rebuild started by the cancelled request"
     );
 }
 
@@ -587,10 +584,11 @@ async fn test_snapshot_is_independent_of_candidate_tags() {
     assert_eq!(snapshot.entries[0].total_requests, 7);
 }
 
-/// A snapshot build that dies without publishing a result must release the
-/// single-flight slot. A retained slot would leave every later `/attempts`
-/// request cloning a receiver whose sender is gone — a permanent `500`,
-/// because a new build only starts when the slot is empty.
+/// A snapshot build that dies without publishing must release the build
+/// mutex, so a later request rebuilds. The mutex guard makes this structural
+/// (it releases on unwind); the earlier design kept the dead task's channel
+/// receiver in a shared slot, which made every later request a permanent
+/// `500`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_attempts_recovers_after_a_snapshot_build_dies() {
     let (server, state) = crate::tests::test_server::new_test_server().await;
@@ -624,7 +622,7 @@ async fn test_attempts_recovers_after_a_snapshot_build_dies() {
     assert_eq!(
         recovered.status_code(),
         StatusCode::OK,
-        "the single-flight slot must have been released, so a later request rebuilds"
+        "the build mutex must have been released, so a later request rebuilds"
     );
     assert_eq!(
         state

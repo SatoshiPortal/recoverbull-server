@@ -33,10 +33,15 @@ pub(crate) struct InfoState {
     canary_from_env: bool,
     canary_path: Arc<std::sync::RwLock<PathBuf>>,
     /// Last resolved canary and when it was read, or `None` before the first
-    /// read. Guarded by a `std::sync::Mutex` because the critical section is
-    /// a clone and never spans an await.
-    cached_canary: Arc<std::sync::Mutex<Option<(String, std::time::Instant)>>>,
+    /// read. The async mutex owns the whole check/read/publish transaction:
+    /// one expired interval causes one file read while concurrent `/info`
+    /// requests wait without blocking Tokio worker threads.
+    cached_canary: Arc<tokio::sync::Mutex<Option<(String, std::time::Instant)>>>,
     canary_reread_interval: std::time::Duration,
+    #[cfg(test)]
+    canary_file_reads: Arc<std::sync::atomic::AtomicU64>,
+    #[cfg(test)]
+    canary_read_delay: Arc<std::sync::RwLock<std::time::Duration>>,
     secret_max_length: usize,
     policy: AttemptsPolicy,
     counters: Arc<SecurityCounters>,
@@ -246,8 +251,12 @@ impl InfoState {
             canary: config.canary.clone(),
             canary_from_env: config.canary_from_env,
             canary_path: Arc::new(std::sync::RwLock::new(config.canary_path.clone())),
-            cached_canary: Arc::new(std::sync::Mutex::new(None)),
+            cached_canary: Arc::new(tokio::sync::Mutex::new(None)),
             canary_reread_interval: CANARY_REREAD_INTERVAL,
+            #[cfg(test)]
+            canary_file_reads: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            #[cfg(test)]
+            canary_read_delay: Arc::new(std::sync::RwLock::new(std::time::Duration::ZERO)),
             secret_max_length,
             policy,
             counters,
@@ -262,15 +271,30 @@ impl InfoState {
     /// fallback), and an unreadable file serves the startup value and counts
     /// `canary_unavailable`. What changed is only how often the file is
     /// consulted.
-    pub(crate) fn current_canary(&self) -> String {
+    pub(crate) async fn current_canary(&self) -> (String, u64) {
         if self.canary_from_env {
-            return self.canary.clone();
+            return (self.canary.clone(), 0);
         }
-        if let Some(fresh) = self.fresh_canary() {
-            return fresh;
+
+        let mut cached = self.cached_canary.lock().await;
+        if let Some((value, read_at)) = cached.as_ref() {
+            let elapsed = read_at.elapsed();
+            if elapsed < self.canary_reread_interval {
+                return (
+                    value.clone(),
+                    self.canary_reread_interval
+                        .saturating_sub(elapsed)
+                        .as_secs(),
+                );
+            }
         }
+
+        // Keep the single-flight guard through the small synchronous read.
+        // Other requests await the Tokio mutex rather than occupying worker
+        // threads, and no blocking-pool task or semaphore is needed for one
+        // read per ten-minute interval.
         let path = self.canary_path.read().expect("canary path lock").clone();
-        let value = match crate::config::canary_file_state(&path) {
+        let value = match self.read_canary_file(&path) {
             crate::config::CanaryFileState::Value(value) => value,
             crate::config::CanaryFileState::Removed => String::new(),
             crate::config::CanaryFileState::Unavailable => {
@@ -278,39 +302,18 @@ impl InfoState {
                 self.canary.clone()
             }
         };
-        *self.cached_canary.lock().expect("canary cache lock") =
-            Some((value.clone(), std::time::Instant::now()));
-        value
+        *cached = Some((value.clone(), std::time::Instant::now()));
+        (value, self.canary_reread_interval.as_secs())
     }
 
-    /// Returns the cached canary while it is inside the re-read interval, and
-    /// the freshness a response may advertise.
-    fn fresh_canary(&self) -> Option<String> {
-        let cached = self.cached_canary.lock().expect("canary cache lock");
-        cached
-            .as_ref()
-            .filter(|(_, read_at)| read_at.elapsed() < self.canary_reread_interval)
-            .map(|(value, _)| value.clone())
-    }
-
-    /// Seconds a client may reuse an `/info` response: what remains of the
-    /// canary's freshness, so caching cannot make the signal older than one
-    /// re-read interval. Zero when the process canary is authoritative,
-    /// because then only a restart can change it.
-    pub(crate) fn canary_max_age(&self) -> u64 {
-        if self.canary_from_env {
-            return 0;
+    fn read_canary_file(&self, path: &std::path::Path) -> crate::config::CanaryFileState {
+        #[cfg(test)]
+        {
+            use std::sync::atomic::Ordering;
+            self.canary_file_reads.fetch_add(1, Ordering::Relaxed);
+            std::thread::sleep(*self.canary_read_delay.read().unwrap());
         }
-        let elapsed = self
-            .cached_canary
-            .lock()
-            .expect("canary cache lock")
-            .as_ref()
-            .map(|(_, read_at)| read_at.elapsed())
-            .unwrap_or(self.canary_reread_interval);
-        self.canary_reread_interval
-            .saturating_sub(elapsed)
-            .as_secs()
+        crate::config::canary_file_state(path)
     }
     /// Returns the configured maximum encrypted payload length.
     pub(crate) fn secret_max_length(&self) -> usize {
@@ -341,5 +344,17 @@ impl InfoState {
     /// production interval. Excluded from release builds.
     pub(crate) fn set_canary_reread_interval_for_test(&mut self, interval: std::time::Duration) {
         self.canary_reread_interval = interval;
+    }
+    #[cfg(test)]
+    /// Makes a cold file read long enough for a concurrent test to force the
+    /// former check/read/publish race. Excluded from release builds.
+    pub(crate) fn set_canary_read_delay_for_test(&self, delay: std::time::Duration) {
+        *self.canary_read_delay.write().unwrap() = delay;
+    }
+    #[cfg(test)]
+    /// Number of actual dotenv reads made by this shared state.
+    pub(crate) fn canary_file_reads_for_test(&self) -> u64 {
+        use std::sync::atomic::Ordering;
+        self.canary_file_reads.load(Ordering::Relaxed)
     }
 }

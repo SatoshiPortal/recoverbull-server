@@ -172,7 +172,7 @@ one-second advisory. Framework-generated rejections such as `404`, `405`,
 
 Identifiers are kept and published hashed, never raw. The entire identifier map, including the retained `secret_id` values, is wiped every 24 hours from map startup and the attempt budget resets at that boundary. Individual entries disappear earlier, as soon as their cooldown has elapsed: expiry is applied to an entry when it is next used, to the whole map whenever it is full, and to the whole map before every snapshot build, so an expired entry is never published and never causes a refusal. Nothing is persisted.
 
-The body is **always gzip-compressed JSON** (`Content-Encoding: gzip`); clients must be gzip-capable. This initial telemetry contract, version `1`, reports distinct-`secret_id` counters plus `total_requests` and never exposes a `secret_id`. The snapshot is rebuilt at most once per minute and served as immutable shared bytes with a strong `ETag`: send `If-None-Match` to receive a bodyless `304` when nothing changed. `Cache-Control: public, max-age=<remaining seconds>` reflects the real freshness. A dedicated global token bucket (`ATTEMPTS_RATE_LIMIT_*`) bounds cache-bypass traffic; production deployments must additionally cache and rate-limit this route at the reverse proxy (see Deployment). Caddy is the reference proxy, under `deploy/caddy/`; the nginx template is an unsupported alternative.
+The body is **always gzip-compressed JSON** (`Content-Encoding: gzip`); clients must be gzip-capable. This initial telemetry contract, version `1`, reports distinct-`secret_id` counters plus `total_requests` and never exposes a `secret_id`. The snapshot is rebuilt at most once per minute and served as immutable shared bytes with a strong `ETag`: send `If-None-Match` to receive a bodyless `304` when nothing changed. `Cache-Control: public, max-age=<remaining seconds>` reflects the real freshness. A dedicated global token bucket (`ATTEMPTS_RATE_LIMIT_*`) bounds cache-bypass traffic; production deployments must additionally cache and rate-limit this route at the reverse proxy (see Deployment). `deploy/nginx/` is the CI-tested, operator-adapted example.
 
 **Proactive detection is the client's responsibility.** The server publishes
 the snapshot and cannot notify anyone; only a wallet that polls it can turn an
@@ -263,11 +263,15 @@ The protocol's privacy goals and accepted recovery-lockout trade-off are defined
 
 ## Deployment
 
-### Tor onion service (the supported deployment)
+### Tor onion service deployment contract
+
+The files under `deploy/` are examples, not production guarantees. Operators
+must adapt, patch, validate, and test the installed system as described in
+[`deploy/README.md`](deploy/README.md).
 
 The server is designed to be reached exclusively through a **Tor onion service**: it protects the transport confidentiality of the `authentication_key` and the IP anonymity of clients. **Never expose it directly on a public interface** — the server refuses to stay silent about it and prints a startup warning when `SERVER_ADDRESS` is not loopback. Production deployments must put a reverse proxy between Tor and Axum because Axum's route timeout starts after HTTP headers have been read.
 
-The supported deployment is **strictly single-instance**: rate limits, token
+The security model is **strictly single-instance**: rate limits, token
 buckets, the cache, and the collection marker are in memory. The binary does
 not enforce Tor or single-instance operation; a non-loopback bind only emits a
 startup warning. Load balancing or rolling overlap would multiply budgets and
@@ -276,32 +280,27 @@ one; no daily restart is needed. The internal collection wipe occurs every 24
 hours. An exceptional restart starts a new budget and collection and must not
 overlap the old instance.
 
-Use the maintained templates rather than copying this overview:
-`deploy/systemd/recoverbull.service`, `deploy/caddy/` (the reference proxy:
-`Caddyfile`, the pinned build under `build/`, and `smoke.py`),
-and `deploy/tor/recoverbull.torrc.example`.
-Build and validate Caddy per `deploy/caddy/README.md` before admitting onion
-traffic; its build, checksums, vulnerability scan and smoke are gated by CI.
-Run exactly one proxy. `deploy/nginx/recoverbull.conf` is an unsupported
-alternative kept for operators who already run nginx: it is a configuration
-template only, with no executable smoke and no CI coverage, so an operator who
-chooses it owns its verification.
+The repository provides operator-adapted examples:
+`deploy/systemd/recoverbull.service`, `deploy/nginx/` (`recoverbull.conf` and
+`smoke.py`), and `deploy/tor/recoverbull.torrc.example`. Validate nginx per
+`deploy/nginx/README.md` before admitting onion traffic. Its committed
+configuration and smoke are gated by CI, while the installed package, service
+unit, updates, and complete deployment remain the operator's responsibility.
 
 The HTTP status contract belongs to Axum, not to the proxy: `429` is
 exclusively a targeted lockout, while all shared pressure is `503` with
 `Retry-After`. Clients classify by standard status only; they must not depend
-on custom status codes or error text. Caddy has no native connection-count cap:
-its 10-second header timeout and Tor defenses are compensating controls, so
-operators must budget and monitor file descriptors and processes for the host.
+on custom status codes or error text. The nginx example has an explicit
+connection cap and 10-second header timeout; operators must still budget and
+monitor file descriptors and processes for the host.
 
 1. Keep Axum on a private loopback port: `SERVER_ADDRESS=127.0.0.1:3001`
-2. Put the reference proxy in front of it on `127.0.0.1:3000`, from
-   `deploy/caddy/Caddyfile` and the pinned build in `deploy/caddy/build/`.
-   The template is the specification; this list is what it must provide, so
-   that an operator adapting it knows what may not be dropped:
+2. Put nginx in front of it on `127.0.0.1:3000`, adapting
+   `deploy/nginx/recoverbull.conf`. The following list is the security
+   contract the installed configuration must preserve:
 
-   - **No access log.** Only `ERROR` diagnostics on stderr, routed by the
-     operator-provided service to restricted journald storage.
+   - **No access log.** Critical proxy diagnostics go to a restricted file
+     with operator-selected rotation and retention.
    - **One cached representation of `/attempts`.** The cache key must ignore
      the Host, the query, the body and the scheme, because the handler
      ignores them: otherwise a reader mints a fresh entry per request and
@@ -309,15 +308,15 @@ operators must budget and monitor file descriptors and processes for the host.
      entry and cause only one upstream call.
    - **A request rate limit on `/attempts`**, above the shared Axum bucket, so
      the cache absorbs normal reads.
-   - **Strict header and body timeouts** (10 s header read), which is where a
-     slow-loris is stopped; Axum's own 30-second bound covers the rest.
+   - **Bounded header and body reads.** nginx stops an incomplete header after
+     10 seconds and rejects an inactive body; request buffering is disabled so
+     Axum sees the body immediately and bounds its total lifetime to 30 seconds.
    - **HTTP/1-only loopback transport**, keeping the listener private and the
      protocol surface small.
 
-   Every value is in the template. Do not restate them here: duplicated proxy
-   configuration drifts. Caddy has no native connection-count or throughput
-   cap, so the operator-managed FD/process budget and Tor defenses documented
-   in its README are required parts of the reference deployment.
+   Every value is in the example. Do not restate them here: duplicated proxy
+   configuration drifts. The installed nginx package, cache/log directories,
+   FD/process budget, and Tor defenses remain operator responsibilities.
 
 3. Configure the onion service in `torrc` to reach the proxy, with Tor's built-in DoS defenses enabled (they cover connection floods; body downloads remain a proxy concern):
 
@@ -335,7 +334,7 @@ HiddenServicePoWDefensesEnabled 1
    onion hostname:
 
 ```sh
-sudo systemctl restart caddy
+sudo systemctl restart nginx
 sudo systemctl reload tor
 sudo cat /var/lib/tor/recoverbull/hostname
 ```
@@ -508,7 +507,8 @@ capacity or applies an explicit retention policy.
 
 Before activation verify one systemd instance, a loopback bind, a `0700`
 deployment directory, `.env` mode `0600`, and service `umask 0077`. Set
-`LimitCORE=0` and configure swap/crash handling. Define retention for the
+`LimitCORE=0`, drop the service capability bounding set, give it a private
+device namespace, and configure swap/crash handling. Define retention for the
 database, WAL, and Litestream copies; test restore and rollback, including the
 WAL. Run canary/wipe and store/fetch/trash smoke checks before admitting traffic.
 Debug logging is temporary only and must be disabled before canary exposure.

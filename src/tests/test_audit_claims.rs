@@ -283,34 +283,75 @@ async fn test_audit_f12_hex_case_is_canonicalized() {
 }
 
 /// The public `/attempts` representation does not depend on Host or query
-/// parameters. The reference Caddy proxy must therefore collapse every
+/// parameters. The CI-tested nginx example must therefore collapse every
 /// attacker-controlled variant into one cache entry. Its executable smoke
 /// proves the resulting one-upstream-call property; this source-level guard
-/// prevents the reference config from silently dropping the key controls.
+/// prevents the example config from silently dropping the key controls.
 #[test]
-fn test_reference_caddy_cache_key_ignores_request_variants() {
-    let caddy = include_str!("../../deploy/caddy/Caddyfile");
-    let attempts_route = caddy
-        .split_once("route @attempts {")
-        .expect("Caddy must define the /attempts route")
+fn test_example_nginx_preserves_attempts_proxy_contract() {
+    let nginx = include_str!("../../deploy/nginx/recoverbull.conf");
+    let attempts_location = nginx
+        .split_once("location = /attempts {")
+        .expect("nginx must define the exact /attempts location")
         .1;
     for control in [
-        "disable_host",
-        "disable_query",
-        "disable_body",
-        "disable_scheme",
+        "proxy_cache_key $request_method$uri;",
+        "proxy_cache_convert_head off;",
+        "proxy_cache_lock on;",
+        "proxy_cache_lock_timeout 35s;",
+        "proxy_cache_lock_age 35s;",
+        "limit_req zone=recoverbull_attempts burst=20 nodelay;",
     ] {
         assert!(
-            attempts_route.contains(control),
-            "Caddy /attempts cache key is missing {control}"
+            attempts_location.contains(control),
+            "nginx /attempts location is missing {control}"
         );
     }
+    for contract in [
+        "map $request_method $recoverbull_attempts_limit_key",
+        "GET     $binary_remote_addr;",
+        "default \"\";",
+        "proxy_request_buffering off;",
+        "error_page 503 = @recoverbull_shared_pressure;",
+        "add_header Retry-After 1 always;",
+    ] {
+        assert!(nginx.contains(contract), "nginx is missing {contract}");
+    }
 
-    let caddy_smoke = include_str!("../../deploy/caddy/smoke.py");
+    let nginx_smoke = include_str!("../../deploy/nginx/smoke.py");
     assert!(
-        caddy_smoke.contains("/attempts?first=1")
-            && caddy_smoke.contains("/attempts?second=2")
-            && caddy_smoke.contains("Backend.calls.get(\"/attempts\", 0) - attempts_before == 1"),
-        "Caddy smoke must prove Host/query variants make one backend call"
+        nginx_smoke.contains("Backend.count(\"GET\", \"/attempts\") - before == 1")
+            && nginx_smoke.contains("json.loads(body)")
+            && nginx_smoke.contains("status == 304")
+            && nginx_smoke.contains("Backend.slow_body_started.wait(timeout=5)"),
+        "nginx smoke must prove body streaming, cache single-flight, edge JSON, and conditional reuse"
     );
+}
+
+/// Local databases may leave WAL, shared-memory, or rollback-journal files
+/// after an interrupted run. Those files are database state and must not be
+/// made eligible for an accidental `git add`, even though the main database
+/// name is already ignored.
+#[test]
+fn test_repository_ignores_sqlite_sidecars() {
+    let gitignore = include_str!("../../.gitignore");
+    for pattern in ["*.sqlite3-wal", "*.sqlite3-shm", "*.sqlite3-journal"] {
+        assert!(
+            gitignore.lines().any(|line| line == pattern),
+            ".gitignore is missing {pattern}"
+        );
+    }
+}
+
+/// The application needs no Linux capability and no host device node. Keep
+/// both properties explicit in the operator-adapted systemd example.
+#[test]
+fn test_systemd_example_drops_capabilities_and_privatises_devices() {
+    let systemd = include_str!("../../deploy/systemd/recoverbull.service");
+    for control in ["CapabilityBoundingSet=", "PrivateDevices=true"] {
+        assert!(
+            systemd.lines().any(|line| line == control),
+            "systemd example is missing {control}"
+        );
+    }
 }

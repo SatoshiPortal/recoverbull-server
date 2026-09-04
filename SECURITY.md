@@ -91,17 +91,18 @@ risks that are **accepted by design** (do not re-report them), the
 **invariants** the code must keep (each guarded by tests), the traps already
 stepped into, and a checklist for future reviews.
 
-Application log guarantees do not cover nginx or Caddy, journald, or Tor logs unless the
+Application log guarantees do not cover nginx, journald, or Tor logs unless the
 README runbook is applied: those logs may contain request metadata and require
 strict levels, private permissions, and short retention. Five-minute global
 counters retain coarse activity metadata and require the same access controls.
 
-For deployment guardrails (single-instance, the reference Caddy proxy, and Tor
+For deployment guardrails (single-instance, a validated reverse proxy, and Tor
 onion), see the
 README and [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) — they are part of the
-security model, not optional hardening. The nginx file is an unsupported
-migration aid. Tor and single-instance operation are required by the model but
-are not enforced by the binary; a public bind only produces a warning.
+security model, not optional hardening. Files under `deploy/` are examples and
+their installed adaptation, updates, and end-to-end validation belong to the
+operator. Tor and single-instance operation are required by the model but are
+not enforced by the binary; a public bind only produces a warning.
 
 ## Clocks: which one decides what
 
@@ -270,11 +271,13 @@ Operators are responsible for retention of those copies.
  10. **Global buckets can deny service to everyone.** Behind an onion service
      per-IP limiting is useless, so buckets are global; an attacker can
      exhaust them (`503` for all). Bounded by the selected reverse proxy and
-     Tor defenses at the deployment layer. Caddy adapts its plugin's internal
-     global-bucket `429` to this standard `503`; it does not adapt an Axum
-     lockout `429`. Caddy's lack of a native connection-count cap is accepted
-     only with its 10-second header timeout, Tor defenses, and an
-     operator-managed FD/process budget.
+     Tor defenses at the deployment layer. The nginx example returns its
+     internal global-bucket rejection as the standard JSON `503` with
+     `Retry-After`; it does not intercept an Axum lockout `429` or upstream
+     `503`. Its connection cap and 10-second header timeout still require Tor
+     defenses and an operator-managed FD/process budget. Request bodies are
+     streamed into Axum so its 30-second total bound applies; nginx's
+     `client_body_timeout` alone would bound only inactivity between reads.
 11. **Temporary behavioral state.** The server retains up to the configured
     maximum of derived `secret_id`/`key_id` values per bucket in memory.
     A `secret_id` is never raw authentication or password material, and is
@@ -345,7 +348,7 @@ Operators are responsible for retention of those copies.
 
 ## Invariants (each guarded by tests)
 
-The table below is the minimal primary-guard index for the security invariants; it is not an exhaustive index of every test. Supplemental tests are classified here by module so an auditor can locate evidence without listing all 217 tests individually.
+The table below is the minimal primary-guard index for the security invariants; it is not an exhaustive index of every test. Supplemental tests are classified here by module so an auditor can locate evidence without listing all 220 tests individually.
 
 ### Additional evidence by test module
 
@@ -434,20 +437,23 @@ code, keep the invariant — and run the guarding test.
 | The non-loopback deployment warning is decided on the address the listener actually bound, not on the `SERVER_ADDRESS` text | `main::is_loopback_bind`, `main::warn_unless_loopback` | A textual prefix check accepted `localhost.attacker.example` and flagged the loopback `127.0.0.2`; the warning remains advisory, as the runbook states | `loopback_is_decided_on_the_bound_address`, `bound_localhost_is_judged_by_its_resolved_address` |
 | Configuration bounds follow from other invariants: `RATE_LIMIT_COOLDOWN` is at most the 24-hour wipe interval, `SECRET_MAX_LENGTH` lies between the Profile 1 secret length (128) and the largest Base64 value the 1024-byte body limit can carry (832), and `ATTEMPTS_SNAPSHOT_TTL_SECONDS` is shorter than the cooldown | `config::{validate_config,validate_snapshot_ttl}`, `MAX_RATE_LIMIT_COOLDOWN_MINUTES`, `MAX_SECRET_LENGTH` | A longer cooldown announces a budget the wipe discards; a secret length outside the range refuses every conforming backup or advertises a length `/store` answers `413` to; a TTL at or above the cooldown lets an attempt expire between two rebuilds and never be published | `test_validate_config_rejects_a_cooldown_longer_than_the_wipe_interval`, `test_max_cooldown_is_the_global_wipe_interval`, `test_validate_config_bounds_secret_max_length_to_the_profile_and_the_body_limit`, `test_store_envelope_constant_matches_the_serialized_body`, `test_validate_snapshot_ttl_must_be_shorter_than_the_cooldown` |
 | The `secret` schema is validated as an unconditional startup postcondition, against the live table and not Diesel's ledger | `storage::sqlite::validate_secret_schema` | A ledger that already records `0001` makes Diesel skip the migration, so a missing or incompatible table (partial restore, manual edit) used to pass startup and fail every request with `500` | `recorded_migration_without_secret_table_is_rejected`, `recorded_migration_with_incompatible_secret_table_is_rejected`, `recorded_migration_with_exact_secret_table_is_accepted`, `initialize_fails_closed_when_the_secret_table_is_missing` |
+| Backup and restore validate SQLite integrity plus the exact `secret` and Diesel-ledger shapes; the public Python `verify` command is absent, and a restore drill invokes the application's own initialization on the restored copy | `deploy/backup/sqlite_backup.py`, `main::database_check_command`, `storage::sqlite::initialize_database` | A Python check that only required a table named `__diesel_schema_migrations` declared an intact but unbootable backup valid; the application must be the final compatibility authority | `deploy/backup/test_sqlite_backup.py`, CI `backup` job |
 | The request timeout is an application response: an expired request receives `503` with `Retry-After` and the JSON error envelope, recorded by diagnostics as `overload` | `router::request_timeout_middleware` | Clients classify by status only and are told to retry `503`; the framework's bare `408` with an empty body is outside the documented status set and would not trigger the backoff the contract expects | `test_request_timeout_is_a_503_with_retry_after_and_error_body` |
 | A snapshot built from a pre-wipe copy of the ledger is never published after the wipe: the wipe advances a collection epoch under the cache lock, and a build publishes only if the epoch it captured before copying is unchanged | `attempts::snapshot::{wipe_epoch,build_and_publish}` | The 24-hour wipe is a retention boundary; a build that copied the ledger before the wipe and finished after it used to refill the cache with purged entries, attached to the new `collection_started_at` | `test_wipe_during_in_flight_build_after_ledger_copy_publishes_nothing_pre_wipe`, `test_wipe_during_in_flight_build_after_collection_read_publishes_nothing_pre_wipe`, `test_global_wipe_clears_secret_ids_resets_timestamp_and_snapshot` |
 | At most one snapshot build runs at a time, and a request that stops waiting neither aborts it nor starts a second one: the build task owns the mutex guard | `attempts::snapshot::snapshot_for_request` | The burst that arrives when the cache expires would otherwise serialize a multi-megabyte payload once per request; and a build that dies must not lock `/attempts` out, which a shared slot holding a dead task's channel receiver did permanently | `test_cancelled_attempts_request_keeps_single_rebuild_in_flight`, `test_attempts_recovers_after_a_snapshot_build_dies`, `test_attempts_snapshot_at_full_map_scale` |
 | Cooldown expiry decides on the monotonic clock; wall-clock values remain the published timestamps and the finalization generation token | `attempts::ledger::is_expired`, `RateLimitInfo::last_secret_id_instant` | A forward `CLOCK_REALTIME` step larger than the cooldown would otherwise expire every entry at once and reset every per-identifier budget — the server's only control against password brute-force | `test_a_forward_wall_clock_jump_does_not_reset_a_saturated_budget`, `test_a_forward_wall_clock_jump_does_not_drop_active_entries`, `test_whole_map_retention_removes_only_expired_entries`, `test_fetch_expires_sub_threshold_entry_after_cooldown` |
 | Identifier-map capacity is validated against the lower of the declared budget and the enforced cgroup limit, accounting for the `secret_id` budget, and refuses at startup rather than deferring to the OOM killer | `config::{validate_capacity,estimated_peak_memory_bytes}` | The former fixed 10,000,000-entry ceiling rested on a per-entry cost an order of magnitude too low, so it admitted exactly the silent memory-exhaustion kill it claimed to prevent (~14.4 GiB of peak against `MemoryMax=512M`) | `test_validate_capacity_rejects_the_former_ten_million_ceiling`, `test_validate_capacity_tracks_the_secret_id_budget`, `test_validate_capacity_boundary_is_exact`, `test_capacity_model_is_not_optimistic_against_the_measurement`, `test_estimated_peak_memory_does_not_wrap`, `test_effective_budget_takes_the_enforced_limit_when_lower`, `test_capacity_is_refused_against_a_lower_enforced_limit`, `test_parse_memory_limit_recognizes_unlimited_forms` |
-| A server error produces one `WARN` line; a `503` is pressure and produces none; nothing else is logged per request, and the line carries only the request ID, a static route enum and the status | `observability::diagnostic::record` | `WARN` is live under the default filter, so a client-triggerable status routed into it becomes a disk-fill vector and crowds out a genuine `500` — the previous two-class quota misfiled `304` and did exactly that | `test_only_a_genuine_server_error_is_logged`, `test_conditional_polling_is_never_logged`, `test_global_lookup_rejections_are_counted_not_logged`, `test_database_error_logs_are_diagnostic_without_sensitive_details`, `test_user_controlled_path_and_header_never_reach_the_logs` |
-| The dotenv CANARY is re-read at most once every ten minutes and `/info` advertises the remaining freshness; process-env CANARY is authoritative, a missing CANARY is empty, and an unavailable file uses the startup fallback | `config::canary_file_state`, `InfoState::{current_canary,canary_max_age}` | The signal must never be masked by a fallback, and its staleness must be bounded by one interval rather than stacked with a cache; per-request file reads made the only unbucketed public route do filesystem work per request, which is why they needed a permit and a blocking worker | `test_info_rereads_canary_from_file_with_startup_fallback`, `test_info_rereads_same_length_canary_when_file_metadata_is_restored`, `test_info_serves_a_cached_canary_and_advertises_its_freshness`, `test_info_env_canary_is_authoritative_over_file`, `test_info_advertises_no_freshness_for_an_env_canary` |
-| Caddy is the sole reference proxy: its `/attempts` cache key ignores Host, query, body, and scheme; its exact custom-module graph is readonly and checksum-verified; `golang.org/x/net` is pinned at the graph-selected v0.58.0; and CI scans the source graph with pinned govulncheck | `deploy/caddy/{Caddyfile,smoke.py,build}`, `.github/workflows/ci.yml` | Request-controlled cache-key variants bypass a shared cache, while an unaudited custom proxy graph makes deployment security drift outside the Rust gates; the nginx files are unsupported and deliberately absent from this invariant | `test_reference_caddy_cache_key_ignores_request_variants`, `deploy/caddy/smoke.py`, CI `caddy` job |
+| A server error produces one `WARN` line; a `503` is pressure and produces none; nothing else is logged per request, and the line carries only the request ID, a static route enum and the status. There is deliberately no application quota: the operator must install and verify the documented journald rate and retention policy | `observability::diagnostic::record`, `docs/DEPLOYMENT.md` | `WARN` is live under the default filter, so a client-triggerable status routed into it becomes a disk-fill vector and crowds out a genuine `500` — the previous two-class quota misfiled `304` and did exactly that. Journald may suppress the aggregate line too, so durable counters require an independently bounded sink | `test_only_a_genuine_server_error_is_logged`, `test_conditional_polling_is_never_logged`, `test_global_lookup_rejections_are_counted_not_logged`, `test_database_error_logs_are_diagnostic_without_sensitive_details`, `test_user_controlled_path_and_header_never_reach_the_logs` |
+| The dotenv CANARY is re-read at most once every ten minutes and single-flight; `/info` resolves the value and remaining freshness in one cache transaction; process-env CANARY is authoritative, a missing CANARY is empty, and an unavailable file uses the startup fallback | `config::canary_file_state`, `InfoState::current_canary` | The signal must never be masked by a fallback, its staleness must be bounded by one interval rather than stacked with a cache, and an expiry-time request burst must not turn the only unbucketed public route into concurrent filesystem work | `test_info_rereads_canary_from_file_with_startup_fallback`, `test_info_rereads_same_length_canary_when_file_metadata_is_restored`, `test_info_serves_a_cached_canary_and_advertises_its_freshness`, `test_info_env_canary_is_authoritative_over_file`, `test_info_advertises_no_freshness_for_an_env_canary`, `test_concurrent_info_refresh_reads_the_canary_once` |
+| The CI-tested nginx example streams request bodies into Axum's total timeout, gives `GET /attempts` one Host/query-independent cache key, keeps other methods outside the edge bucket, holds one cache-fill lock for the whole request bound, and maps nginx-generated pressure to JSON `503` with `Retry-After` without intercepting upstream statuses | `deploy/nginx/{recoverbull.conf,smoke.py}`, `.github/workflows/ci.yml` | nginx otherwise buffers the whole body while applying only an inactivity timeout, so drip-fed requests can occupy the global connection cap without entering Axum's 30-second bound. Request-controlled cache-key variants or the five-second cache-lock defaults can also multiply expensive upstream builds; applying the GET bucket to other methods changes Axum's contract. This proves the committed example only, not the operator's installed adaptation | `test_example_nginx_preserves_attempts_proxy_contract`, `deploy/nginx/smoke.py`, CI `nginx` job |
+| SQLite files created in the repository and all of their WAL/shared-memory/rollback sidecars are ignored | `.gitignore` | A crash can leave committed database state in a sidecar; ignoring only the main `*.sqlite3` file makes that state eligible for an accidental commit | `test_repository_ignores_sqlite_sidecars` |
+| The systemd example starts the unprivileged service with no capability in its bounding set and a private minimal device namespace | `deploy/systemd/recoverbull.service` | A compromised process has no legitimate need to acquire capabilities or access host device nodes | `test_systemd_example_drops_capabilities_and_privatises_devices` |
 
 ## Final path and verification checklist
 
 - [ ] `src/main.rs`, `src/app.rs`, `src/config.rs`, `src/router.rs`, `src/http/`, `src/handlers/`, `src/recovery/`, `src/attempts/`, `src/storage/sqlite.rs`, and `src/observability/` exist at the paths in the reading map.
 - [ ] `src/schema.rs` remains the Diesel schema path imposed by `diesel.toml`.
-- [ ] The final test listing contains every test named in the invariant table: verify with `cargo test --locked -- --list` (the local listing contains 217 tests; no listing is checked in).
+- [ ] The final test listing contains every Rust test named in the invariant table: verify with `cargo test --locked -- --list` (the local listing contains 220 tests; no listing is checked in). The backup invariant additionally names its standalone CI oracle.
 - [ ] CI compiles rustdocs with `cargo doc --no-deps --document-private-items --locked`; this proves only that rustdoc compiles, not that an invariant is correct or tested.
 - [ ] For a documentation-only change, the local static checks are `git diff --check`, path existence checks, and exact-name checks against the final `cargo test --locked -- --list` output; do not substitute `cargo doc` for executable invariant evidence.
 
@@ -496,12 +502,23 @@ code, keep the invariant — and run the guarding test.
   the in-process log quota and duration/category machinery, removed the
   periodic expiry task, simplified snapshot single-flight to one task-owned
   mutex, cached canary reads for ten minutes with explicit `/info` freshness,
-  rejected zero refills, and bounded the whole process shutdown. Caddy became
-  the reference proxy; its `x/net` downgrade was raised to the graph-selected
-  v0.58.0 and pinned govulncheck became a CI gate, while nginx was demoted to
-  an unsupported migration aid and removed from the static invariant test.
+  rejected zero refills, and bounded the whole process shutdown. The initial
+  proxy work was later aligned with the production nginx topology: the unused
+  alternative and its dependency graph were deleted, while nginx gained a
+  static invariant test and executable CI smoke.
   `SYS-001` remains a client-delivery responsibility. `F-K` (`created_at`
   precision) remains a protocol decision and was not changed.
+- **Post-review regression pass** (2026-09-04): made dotenv-canary refresh
+  single-flight and returned its value/freshness atomically; removed the
+  misleading public Python backup-verification command, validated Diesel's
+  ledger exactly, and made the restore drill run the application's own
+  initialization; documented `deploy/` as operator-adapted examples and kept
+  the one-WARN-per-`500`, no-per-request-`503` policy with explicit journald
+  responsibility. The final full-tree audit found no critical or high issue;
+  it corrected nginx's buffered slow-body gap, excluded SQLite sidecars from
+  version control, and tightened the systemd capability and device sandbox.
+  Local release validation passed 220/220 Rust tests and the standalone
+  backup/restore oracle.
 - **Distinct-`secret_id` limiter review** (2026-08-20): the rate-limit bucket
   remains `sha256(identifier)`, while the derived `secret_id`/`key_id` values are
   retained only in bounded memory. Pending reservations, saturation-before-

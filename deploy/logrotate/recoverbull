@@ -1,5 +1,4 @@
-# Unsupported nginx migration aid only. The reference Caddy proxy logs to
-# journald and does not use this file. Operators retaining nginx must adapt
+# Operator-adapted nginx example; see deploy/README.md. Operators must adapt
 # these periods and document them under docs/RETENTION.md.
 /var/log/nginx/recoverbull-error.log {
     weekly

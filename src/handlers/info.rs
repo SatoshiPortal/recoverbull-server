@@ -19,8 +19,13 @@ use crate::http::contract::Info;
 /// server is unreachable".
 pub async fn get_info(State(state): State<AppState>) -> Response {
     let info_state = state.info_state();
-    let canary = info_state.current_canary();
-    let max_age = info_state.canary_max_age();
+    let attempts_collection_started_at =
+        truncate_to_hour(state.attempts_collection_started_at().await);
+    // Resolve the value and its freshness in one single-flight transaction;
+    // computing them under separate locks could describe a different cache
+    // generation than the value in this response. Do this after the other
+    // awaited state read so its advertised lifetime is not spent waiting.
+    let (canary, max_age) = info_state.current_canary().await;
 
     let info = &Info {
         canary,
@@ -28,9 +33,7 @@ pub async fn get_info(State(state): State<AppState>) -> Response {
         rate_limit_cooldown: info_state.policy().cooldown().num_minutes() as u64,
         rate_limit_max_attempts: info_state.policy().max_attempts(),
         rate_limit_max_failed_attempts: info_state.policy().max_attempts(),
-        attempts_collection_started_at: truncate_to_hour(
-            state.attempts_collection_started_at().await,
-        ),
+        attempts_collection_started_at,
         max_attempt_identifiers: info_state.policy().max_identifiers(),
     };
 

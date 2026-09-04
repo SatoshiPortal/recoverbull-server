@@ -1,12 +1,18 @@
 # RecoverBull deployment
 
-This repository contains templates for one service instance:
+All files under `deploy/` are operator-adapted examples, not universal
+production configurations or a guarantee about the installed system. See
+[`deploy/README.md`](../deploy/README.md) for the operator contract. Repository
+tests cover the committed examples only; the operator owns component updates,
+security advisories, installed-configuration validation, and end-to-end tests.
+
+The examples describe one service instance:
 
 * binary: `/opt/recoverbull/bin/keychain`
 * user/group: `recoverbull:recoverbull`
 * working and data directory: `/var/lib/recoverbull`
 * dotenv: `/var/lib/recoverbull/.env` (read from the working directory)
-* Axum: `127.0.0.1:3001` → reference Caddy:
+* Axum: `127.0.0.1:3001` → example reverse proxy:
   `127.0.0.1:3000` → Tor onion service
 
 The model requires strict single-instance operation. The binary does not
@@ -15,7 +21,7 @@ instance before starting a replacement; never overlap them. Do not restart
 daily: the in-memory wipe is internal and runs every 24 hours. An exceptional
 restart resets the budget and collection.
 
-For the SQLite backup, verification, and restore drill, follow
+For the SQLite backup, application-owned database check, and restore drill, follow
 [deploy/backup/README.md](../deploy/backup/README.md).
 
 The application grace period is 35 seconds, and it is one budget for both
@@ -27,8 +33,9 @@ safety net rather than the only bound. Blocking work is not cancellable, so a
 thread may still be finishing when the process exits; that is why the SQLite
 operations are transactional. `Restart=no` avoids turning a crash loop into
 repeated budget resets.
-`LimitCORE=0`, `UMask=0077`, and the SQLite-compatible sandbox are intentional.
-`MemoryMax=512M` is a reference gate, not a universal guarantee. Startup reads
+`LimitCORE=0`, `UMask=0077`, an empty `CapabilityBoundingSet`,
+`PrivateDevices=true`, and the SQLite-compatible sandbox are intentional.
+`MemoryMax=512M` is an example gate, not a universal guarantee. Startup reads
 the limit the kernel will actually enforce on the process from the cgroup and
 sizes `RATE_LIMIT_MAX_IDENTIFIERS` against the lower of that and
 `RATE_LIMIT_MEMORY_BUDGET_MB`, using the measured per-entry cost and the
@@ -56,10 +63,11 @@ grep VmHWM /proc/$(systemctl show -p MainPID --value recoverbull)/status
 
 ## Log volume and retention
 
-The service writes little: one `WARN` line per server error, one aggregate
+The application policy is one `WARN` line per genuine server `500`, one aggregate
 counter line every five minutes at `info`, and a few lifecycle lines. A `503`
 is never logged per request, so an exhausted token bucket cannot fill the
-disk. There is no in-process log quota; volume control belongs here.
+disk. There is no in-process log quota; volume control is an operator-owned
+journald responsibility.
 
 `systemd-journald` rate-limits per service, 10,000 messages per 30 seconds by
 default, and records a "suppressed N messages" line when it does. Set an
@@ -72,13 +80,19 @@ LogRateLimitIntervalSec=30s
 LogRateLimitBurst=200
 ```
 
+The drop-in is an example and is not installed by this repository. The
+operator must select limits and retention for the host, verify that they are
+active, and monitor journald's suppressed-message notices. During a sustained
+failure, journald may drop both per-request WARN lines and the five-minute
+aggregate `info` line. If that aggregate must be durable, export it to an
+independently bounded sink.
+
 Never run a live service with `RUST_LOG=trace`: Axum traces extractor
 rejections at that level with a message derived from the request body. The
-reference `RUST_LOG` is `info`. Reverse-proxy and Tor logs are not covered by
-the application's log guarantees. The reference Caddy proxy sends its error
-log to journald; configure its service's journald retention explicitly.
-`deploy/logrotate/recoverbull` belongs only to the unsupported nginx migration
-aid. [docs/RETENTION.md](RETENTION.md) governs retention.
+example `RUST_LOG` is `info`. nginx and Tor logs are not covered by the
+application's log guarantees. The nginx example writes critical errors to a
+restricted file governed by the operator-adapted logrotate example.
+[docs/RETENTION.md](RETENTION.md) governs retention.
 
 ## Reproducible installation
 
@@ -102,26 +116,19 @@ path, loopback address, canary, cooldown, and `secret_id` budget; this document
 does not provide example secrets or canary values. Keep the SQLite database,
 WAL, and any Litestream state below `/var/lib/recoverbull`.
 
-Install the maintained application and Tor templates without changing their
-concrete paths:
+Install adapted copies of the application and Tor examples at the concrete
+paths expected by this example:
 
 ```sh
 sudo install -o root -g root -m 0644 deploy/systemd/recoverbull.service /etc/systemd/system/recoverbull.service
 sudo install -o root -g root -m 0644 deploy/tor/recoverbull.torrc.example /etc/tor/conf.d/recoverbull.conf
 ```
 
-Follow [deploy/caddy/README.md](../deploy/caddy/README.md) for the pinned custom
-build, vulnerability gates, atomic binary/config installation, service
-ownership, and validation. The repository does not provide a versioned Caddy
-systemd unit, so the operator must provide one whose error output goes to
-journald. Caddy is admissible only after the documented checks and HTTP smokes
-pass.
-
-`deploy/nginx/recoverbull.conf` and `deploy/logrotate/recoverbull` are
-unsupported migration aids for operators who already run nginx. They have no
-executable smoke or CI coverage. An operator retaining them owns validation,
-upgrades, and any divergence from the reference Caddy behavior. Never install
-or start both listeners.
+Follow [deploy/nginx/README.md](../deploy/nginx/README.md), adapt the include
+path, cache/log ownership, service unit, and log rotation to the installed
+distribution, then record `nginx -V`. The repository smoke-tests its committed
+example; the operator owns the installed package, security updates, and any
+configuration divergence.
 
 The Tor service account must be able to create and read
 `/var/lib/tor/recoverbull/`; do not copy its private hostname keys into this
@@ -133,34 +140,36 @@ service:
 
 ```sh
 sudo systemd-analyze verify /etc/systemd/system/recoverbull.service
-/path/to/caddy adapt --config /path/to/Caddyfile --adapter caddyfile --validate
-/path/to/caddy validate --config /path/to/Caddyfile --adapter caddyfile
-python3 deploy/caddy/smoke.py /path/to/caddy
+sudo nginx -t
+python3 deploy/nginx/smoke.py /usr/sbin/nginx
 sudo -u debian-tor tor --verify-config -f /etc/tor/conf.d/recoverbull.conf
 ```
 
 If the Tor account is named differently, use that account. `systemd-analyze`
-can validate the unit without starting it; Caddy and Tor validation may need
+can validate the unit without starting it; nginx and Tor validation may need
 their service accounts because the configured directories are private.
 The unit's `ProtectSystem=full` leaves the system tree protected while
-`ReadWritePaths=/var/lib/recoverbull` permits SQLite's database and WAL. Its
-address-family restriction permits loopback TCP and Unix sockets, not public
-exposure policy; the binary's public-bind behavior remains a warning by design.
+`ReadWritePaths=/var/lib/recoverbull` permits SQLite's database and WAL. It
+drops every capability and exposes only systemd's private minimal device set;
+operators must preserve those controls unless an installed dependency has a
+tested, documented requirement. Its address-family restriction permits
+loopback TCP and Unix sockets, not public exposure policy; the binary's
+public-bind behavior remains a warning by design.
 
 Start in dependency order and smoke-test each boundary:
 
 ```sh
 sudo systemctl daemon-reload
-sudo systemctl enable recoverbull caddy tor
+sudo systemctl enable recoverbull nginx tor
 sudo systemctl start recoverbull
-sudo systemctl start caddy
+sudo systemctl start nginx
 sudo systemctl start tor
 curl --fail http://127.0.0.1:3000/info
 curl --fail --compressed http://127.0.0.1:3000/attempts
 ```
 
-Here `caddy` is the operator-provided service described in its README; substitute
-its actual unit name if different.
+Here `nginx` is the operator-provided service; substitute its actual unit name
+if different.
 
 Run store/fetch/trash with a test fixture appropriate to the environment, then
 verify the canary and inspect `systemctl status` and restricted logs before

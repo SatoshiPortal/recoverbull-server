@@ -229,10 +229,65 @@ async fn test_info_serves_a_cached_canary_and_advertises_its_freshness() {
 /// advertises no reuse window at all rather than a misleading one.
 #[tokio::test]
 async fn test_info_advertises_no_freshness_for_an_env_canary() {
-    let (server, _) = crate::tests::test_server::new_test_server().await;
+    let mut state = crate::app::init();
+    state.info.set_canary_from_env_for_test(true);
+    state.storage.initialize().unwrap();
+    let server = axum_test::TestServer::new(crate::router::new_for_tests(state)).unwrap();
     let response = server.get("/info").expect_success().await;
     assert_eq!(
         response.header("cache-control").to_str().unwrap(),
         "public, max-age=0"
     );
+}
+
+/// A cold or expired cache is one transaction: a request burst causes one
+/// dotenv read, and every waiter reuses the value published by that reader.
+/// The artificial delay makes the old check/read/publish split reliably send
+/// several worker threads into the file reader at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_concurrent_info_refresh_reads_the_canary_once() {
+    let mut state = crate::app::init();
+    state.info.set_canary_from_env_for_test(false);
+    state
+        .info
+        .set_canary_reread_interval_for_test(std::time::Duration::from_secs(600));
+    state
+        .info
+        .set_canary_read_delay_for_test(std::time::Duration::from_millis(50));
+    let canary_path = std::env::temp_dir().join(format!(
+        "keychain-test-info-canary-single-flight-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    state.info.set_canary_path_for_test(canary_path.clone());
+    std::fs::write(&canary_path, "CANARY=single-flight\n").unwrap();
+
+    const REQUESTS: usize = 16;
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(REQUESTS + 1));
+    let mut requests = Vec::with_capacity(REQUESTS);
+    for _ in 0..REQUESTS {
+        let info = state.info.clone();
+        let barrier = barrier.clone();
+        requests.push(tokio::spawn(async move {
+            barrier.wait().await;
+            info.current_canary().await
+        }));
+    }
+    barrier.wait().await;
+
+    for request in requests {
+        let (value, max_age) = request.await.unwrap();
+        assert_eq!(value, "single-flight");
+        assert!(max_age > 0 && max_age <= 600);
+    }
+    assert_eq!(
+        state.info.canary_file_reads_for_test(),
+        1,
+        "one expired interval must cause exactly one dotenv read"
+    );
+
+    std::fs::remove_file(canary_path).ok();
 }

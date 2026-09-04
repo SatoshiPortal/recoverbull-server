@@ -97,23 +97,7 @@ impl SqliteStorage {
     }
 
     pub(crate) fn initialize(&self) -> Result<(), ConnectionSetupError> {
-        let mut connection = establish_connection_without_wal_check(self.database_url.clone())?;
-        verify_sqlite_runtime(&mut connection)?;
-        run_migrations(&mut connection).map_err(|_| ConnectionSetupError::Migration)?;
-        sql_query("PRAGMA journal_mode = WAL;")
-            .execute(&mut connection)
-            .map_err(|_| ConnectionSetupError::Wal)?;
-        let journal_mode = sql_query("SELECT journal_mode AS value FROM pragma_journal_mode")
-            .load::<PragmaText>(&mut connection)
-            .map_err(|_| ConnectionSetupError::Wal)?
-            .into_iter()
-            .next()
-            .ok_or(ConnectionSetupError::Wal)?;
-        if journal_mode.value != "wal" {
-            return Err(ConnectionSetupError::Wal);
-        }
-        tracing::info!(target: "security", "database initialized");
-        Ok(())
+        initialize_database(self.database_url.clone())
     }
 
     #[cfg(test)]
@@ -133,6 +117,31 @@ impl SqliteStorage {
     pub(crate) fn database_semaphore_for_test(&self) -> Arc<Semaphore> {
         self.database_semaphore.clone()
     }
+}
+
+/// Applies the exact database initialization used by server startup.
+///
+/// The restore drill invokes this through `keychain check-database` on the
+/// restored copy, so an independent Python schema approximation cannot be
+/// the final authority on whether this application can open and migrate it.
+pub(crate) fn initialize_database(database_url: String) -> Result<(), ConnectionSetupError> {
+    let mut connection = establish_connection_without_wal_check(database_url)?;
+    verify_sqlite_runtime(&mut connection)?;
+    run_migrations(&mut connection).map_err(|_| ConnectionSetupError::Migration)?;
+    sql_query("PRAGMA journal_mode = WAL;")
+        .execute(&mut connection)
+        .map_err(|_| ConnectionSetupError::Wal)?;
+    let journal_mode = sql_query("SELECT journal_mode AS value FROM pragma_journal_mode")
+        .load::<PragmaText>(&mut connection)
+        .map_err(|_| ConnectionSetupError::Wal)?
+        .into_iter()
+        .next()
+        .ok_or(ConnectionSetupError::Wal)?;
+    if journal_mode.value != "wal" {
+        return Err(ConnectionSetupError::Wal);
+    }
+    tracing::info!(target: "security", "database initialized");
+    Ok(())
 }
 
 impl SqliteOperation {

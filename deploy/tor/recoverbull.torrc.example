@@ -1,3 +1,5 @@
+# Operator-adapted example; see deploy/README.md. Validate supported directives,
+# paths, ownership, and the complete onion route with the installed Tor build.
 HiddenServiceDir /var/lib/tor/recoverbull/
 HiddenServicePort 80 127.0.0.1:3000
 HiddenServiceEnableIntroDoSDefense 1

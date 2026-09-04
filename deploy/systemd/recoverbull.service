@@ -1,3 +1,5 @@
+# Operator-adapted example; see deploy/README.md. Validate the installed unit,
+# resource limits, filesystem paths, journal policy, and service identity.
 [Unit]
 Description=RecoverBull keychain server
 After=network-online.target
@@ -18,6 +20,8 @@ ProtectSystem=full
 ProtectHome=true
 PrivateTmp=true
 NoNewPrivileges=true
+CapabilityBoundingSet=
+PrivateDevices=true
 ReadWritePaths=/var/lib/recoverbull
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 

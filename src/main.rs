@@ -82,12 +82,54 @@ where
 /// blocking tasks are not cancellable, so a thread may still be running when
 /// the process exits.
 fn main() {
+    if let Some(exit_code) = database_check_command(std::env::args_os().skip(1)) {
+        std::process::exit(exit_code);
+    }
+
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("failed to build the Tokio runtime");
     let remaining = runtime.block_on(serve());
     runtime.shutdown_timeout(remaining);
+}
+
+/// Runs the restore-drill database check without loading server configuration
+/// or binding a listener. It deliberately calls the same initialization as
+/// normal startup, including embedded migrations and WAL verification.
+fn database_check_command(mut arguments: impl Iterator<Item = std::ffi::OsString>) -> Option<i32> {
+    let command = arguments.next()?;
+    if command != "check-database" {
+        eprintln!("usage: keychain check-database DATABASE_PATH");
+        return Some(2);
+    }
+    let Some(database_path) = arguments.next() else {
+        eprintln!("usage: keychain check-database DATABASE_PATH");
+        return Some(2);
+    };
+    if arguments.next().is_some() {
+        eprintln!("usage: keychain check-database DATABASE_PATH");
+        return Some(2);
+    }
+    let database_path = std::path::PathBuf::from(database_path);
+    if !database_path.is_file() {
+        eprintln!("database check failed: path is not an existing file");
+        return Some(1);
+    }
+    let Some(database_url) = database_path.to_str() else {
+        eprintln!("database check failed: path is not valid UTF-8");
+        return Some(1);
+    };
+    match crate::storage::sqlite::initialize_database(database_url.to_owned()) {
+        Ok(()) => {
+            println!("database check: ok");
+            Some(0)
+        }
+        Err(error) => {
+            eprintln!("database check failed: {error:?}");
+            Some(1)
+        }
+    }
 }
 
 /// Starts the server after configuration and SQLite capability checks, and

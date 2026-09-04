@@ -21,42 +21,78 @@ pub(crate) use app::AppState;
 #[cfg(test)]
 mod tests;
 
-use std::future::IntoFuture;
+use std::{future::IntoFuture, time::Duration};
 
-const APP_GRACE_PERIOD: std::time::Duration = std::time::Duration::from_secs(35);
+/// The whole budget for stopping, from the moment shutdown begins to the
+/// moment the process is gone. It covers both halves: Axum draining its
+/// in-flight requests, and the detached SQLite work those requests handed to
+/// blocking threads.
+const APP_GRACE_PERIOD: Duration = Duration::from_secs(35);
 
 enum ShutdownResult<E> {
     Completed(Result<(), E>),
     TimedOut,
 }
 
+/// Runs the server until it stops, and reports what is left of the grace
+/// period so the caller can bound the wait for detached blocking work.
 async fn run_with_graceful_shutdown<F, S, E>(
     server: F,
     signal: S,
     shutdown_trigger: tokio::sync::oneshot::Sender<()>,
-    grace_period: std::time::Duration,
-) -> ShutdownResult<E>
+    grace_period: Duration,
+) -> (ShutdownResult<E>, Duration)
 where
     F: std::future::Future<Output = Result<(), E>>,
     S: std::future::Future<Output = &'static str>,
 {
     tokio::pin!(server);
-    tokio::select! {
-        result = &mut server => ShutdownResult::Completed(result),
+    let (result, shutdown_started) = tokio::select! {
+        result = &mut server => (ShutdownResult::Completed(result), std::time::Instant::now()),
         signal = signal => {
             tracing::info!(signal, "shutdown signal received; starting graceful shutdown");
+            let shutdown_started = std::time::Instant::now();
             let _ = shutdown_trigger.send(());
-            tokio::select! {
+            let result = tokio::select! {
                 result = &mut server => ShutdownResult::Completed(result),
                 _ = tokio::time::sleep(grace_period) => ShutdownResult::TimedOut,
-            }
+            };
+            (result, shutdown_started)
         }
-    }
+    };
+    let remaining = match result {
+        ShutdownResult::TimedOut => Duration::ZERO,
+        ShutdownResult::Completed(_) => grace_period.saturating_sub(shutdown_started.elapsed()),
+    };
+    (result, remaining)
 }
 
-#[tokio::main]
-/// Starts the server after configuration and SQLite capability checks.
-async fn main() {
+/// Starts the runtime, serves, then bounds the wait for detached work.
+///
+/// The runtime is built explicitly rather than by `#[tokio::main]` because
+/// dropping a runtime waits, without any limit, for every `spawn_blocking`
+/// task that has already started — and those tasks are deliberate: a
+/// transferred SQLite operation must finish rather than be abandoned
+/// mid-transaction. So Axum could drain its requests well inside the grace
+/// period while one stuck blocking thread kept the process alive
+/// indefinitely. `shutdown_timeout` gives that work the rest of the grace
+/// period and then stops waiting, which makes the documented 35 seconds a
+/// property of this process instead of a promise kept only by systemd's
+/// `TimeoutStopSec=40s`. The bound is on the *waiting*, not on the work:
+/// blocking tasks are not cancellable, so a thread may still be running when
+/// the process exits.
+fn main() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("failed to build the Tokio runtime");
+    let remaining = runtime.block_on(serve());
+    runtime.shutdown_timeout(remaining);
+}
+
+/// Starts the server after configuration and SQLite capability checks, and
+/// returns what is left of the grace period once it has stopped.
+async fn serve() -> Duration {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -95,12 +131,18 @@ async fn main() {
             }
             std::process::exit(1);
         }
-        result = run_with_graceful_shutdown(server, shutdown_signal(), shutdown_trigger, APP_GRACE_PERIOD) => {
+        (result, remaining) = run_with_graceful_shutdown(server, shutdown_signal(), shutdown_trigger, APP_GRACE_PERIOD) => {
             wiper.abort();
             let _ = wiper.await;
             match result {
-                ShutdownResult::Completed(Ok(())) => {}
-                ShutdownResult::Completed(Err(error)) => panic!("server failed: {error:?}"),
+                ShutdownResult::Completed(Ok(())) => remaining,
+                // Exit rather than unwind: a panic here would drop the
+                // runtime while unwinding, which is the unbounded wait this
+                // lifecycle exists to avoid.
+                ShutdownResult::Completed(Err(error)) => {
+                    tracing::error!("server failed: {error:?}");
+                    std::process::exit(1);
+                }
                 ShutdownResult::TimedOut => {
                     tracing::error!(grace_period_seconds = APP_GRACE_PERIOD.as_secs(), "graceful shutdown timed out; forcing process exit");
                     std::process::exit(1);
@@ -210,7 +252,7 @@ mod shutdown_tests {
     #[tokio::test]
     async fn ready_server_completes_without_waiting_for_grace_period() {
         let (trigger, _request) = tokio::sync::oneshot::channel();
-        let result = run_with_graceful_shutdown(
+        let (result, remaining) = run_with_graceful_shutdown(
             async { Ok::<(), ()>(()) },
             std::future::pending::<&'static str>(),
             trigger,
@@ -218,12 +260,16 @@ mod shutdown_tests {
         )
         .await;
         assert!(matches!(result, ShutdownResult::Completed(Ok(()))));
+        assert!(
+            remaining > Duration::ZERO,
+            "a server that stopped on its own leaves the grace period for detached work"
+        );
     }
 
     #[tokio::test]
     async fn shutdown_times_out_after_signal_with_bounded_grace_period() {
         let (trigger, request) = tokio::sync::oneshot::channel();
-        let result = run_with_graceful_shutdown(
+        let (result, remaining) = run_with_graceful_shutdown(
             std::future::pending::<Result<(), ()>>(),
             async { "SIGTERM" },
             trigger,
@@ -231,6 +277,57 @@ mod shutdown_tests {
         )
         .await;
         assert!(matches!(result, ShutdownResult::TimedOut));
+        assert_eq!(
+            remaining,
+            Duration::ZERO,
+            "a shutdown that already used its whole budget leaves nothing"
+        );
         assert!(request.await.is_ok());
+    }
+
+    /// The grace period is one budget for both halves of stopping: whatever a
+    /// graceful drain spends is no longer available to detached blocking work.
+    #[tokio::test]
+    async fn the_grace_period_is_shared_between_draining_and_detached_work() {
+        let (trigger, _request) = tokio::sync::oneshot::channel();
+        let grace_period = Duration::from_millis(500);
+        let (result, remaining) = run_with_graceful_shutdown(
+            async {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                Ok::<(), ()>(())
+            },
+            async { "SIGTERM" },
+            trigger,
+            grace_period,
+        )
+        .await;
+        assert!(matches!(result, ShutdownResult::Completed(Ok(()))));
+        assert!(
+            remaining < grace_period && remaining > Duration::ZERO,
+            "the drain must consume part of the budget, {remaining:?} left of {grace_period:?}"
+        );
+    }
+
+    /// The reason the runtime is built by hand: dropping a runtime waits
+    /// without limit for a `spawn_blocking` task that has already started,
+    /// and this server deliberately hands SQLite work to such tasks. Without
+    /// `shutdown_timeout` this test would take as long as the stuck task.
+    #[test]
+    fn shutdown_timeout_bounds_a_stuck_blocking_task() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.spawn_blocking(|| std::thread::sleep(Duration::from_secs(30)));
+        // let the blocking task start, so it is no longer cancellable
+        runtime.block_on(async { tokio::time::sleep(Duration::from_millis(50)).await });
+
+        let started = std::time::Instant::now();
+        runtime.shutdown_timeout(Duration::from_millis(100));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the wait for detached blocking work must be bounded, took {:?}",
+            started.elapsed()
+        );
     }
 }

@@ -18,8 +18,15 @@ restart resets the budget and collection.
 For the SQLite backup, verification, and restore drill, follow
 [deploy/backup/README.md](../deploy/backup/README.md).
 
-The application grace period is 35 seconds. systemd allows 40 seconds for
-stop, and `Restart=no` avoids turning a crash loop into repeated budget resets.
+The application grace period is 35 seconds, and it is one budget for both
+halves of stopping: Axum draining its in-flight requests, and the detached
+SQLite work those requests handed to blocking threads. The process bounds
+both itself — it builds its Tokio runtime explicitly and stops waiting for
+detached work when the period is spent — so `TimeoutStopSec=40s` is the outer
+safety net rather than the only bound. Blocking work is not cancellable, so a
+thread may still be finishing when the process exits; that is why the SQLite
+operations are transactional. `Restart=no` avoids turning a crash loop into
+repeated budget resets.
 `LimitCORE=0`, `UMask=0077`, and the SQLite-compatible sandbox are intentional.
 `MemoryMax=512M` is a reference gate, not a universal guarantee. Startup reads
 the limit the kernel will actually enforce on the process from the cgroup and

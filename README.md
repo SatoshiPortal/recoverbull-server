@@ -219,12 +219,15 @@ shape choice, not a protection: `/attempts` publishes **every** active
 entry, so counting them yields the live map size exactly. Treat the ratio as
 public.
 
-The canary from the dotenv file is read on a blocking worker for every `/info`
-request, without cache metadata. File reads are serialized by a dedicated
-permit to protect Tokio's bounded blocking pool; the selected reverse-proxy/Tor limits remain
-necessary. A readable file without CANARY returns an empty string; an
-unavailable file falls back to startup. A process-environment `CANARY` is
-authoritative and skips file access.
+The canary from the dotenv file is re-read at most once every ten minutes,
+and `/info` advertises what remains of that freshness in `Cache-Control`, so
+a client or proxy cache cannot make the signal older than one interval. The
+file semantics are unchanged and are the signal itself: a readable file
+without `CANARY` returns an empty string, and an unavailable file falls back
+to the startup value. A process-environment `CANARY` is authoritative, skips
+file access entirely, and is advertised with `max-age=0` because only a
+restart can change it. `/info` is never rate-limited, so an operator editing
+the file sees the change within the interval without a restart.
 
 The global wipe is a process-memory boundary, not guaranteed erasure: a
 suspended process, swap, or core dump may retain old pages. The 24-hour timer

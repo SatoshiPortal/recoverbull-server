@@ -481,6 +481,11 @@ until an operator intervenes.
 Token bursts are validated mathematically: they must be finite, contain at
 least one token, and `burst - 1.0` must differ from `burst` in `f64`. This
 rejects numerically ineffective values without an arbitrary throughput cap.
+Every refill rate must be strictly positive: a zero rate is not a strict
+limit but a quota for the life of the process, since the bucket never
+produces another token once its burst is spent, and on the lookup bucket that
+means every recovery receives `503` until someone restarts the service.
+Startup refuses it.
 Operators must still set a memory gate with headroom: the budget check uses
 a conservative estimate, not a guarantee.
 The release bundles SQLite 3.51.3 through `libsqlite3-sys`, the upstream WAL

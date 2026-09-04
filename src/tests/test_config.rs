@@ -224,18 +224,33 @@ fn test_canary_file_state_distinguishes_removal_from_unavailable() {
 #[test]
 fn test_validate_token_bucket_accepts_valid_values() {
     assert!(validate_token_bucket("STORE", 10.0, 2.0).is_ok());
-    // a zero refill rate is a valid, deliberately strict bucket
-    assert!(validate_token_bucket("STORE", 1.0, 0.0).is_ok());
+    assert!(validate_token_bucket("STORE", 1.0, 0.1).is_ok());
+}
+
+/// Every configured bucket must refill. A zero rate is not a strict limit but
+/// a quota for the life of the process: once the burst is spent the bucket
+/// never produces another token, so on the lookup bucket every recovery
+/// receives `503` until someone restarts the service, and no `Retry-After`
+/// can describe a token that will never arrive.
+#[test]
+fn test_validate_token_bucket_rejects_a_zero_refill() {
+    for name in ["STORE", "LOOKUP", "ATTEMPTS"] {
+        assert!(
+            validate_token_bucket(name, 10.0, 0.0).is_err(),
+            "{name} must refuse a zero refill"
+        );
+    }
+    assert!(validate_token_bucket("STORE", 10.0, -0.0).is_err());
 }
 
 #[test]
 fn test_validate_token_bucket_rejects_sub_token_bursts() {
-    assert!(validate_token_bucket("STORE", 0.5, 0.0).is_err());
+    assert!(validate_token_bucket("STORE", 0.5, 2.0).is_err());
 }
 
 #[test]
 fn test_validate_token_bucket_rejects_f64_max() {
-    assert!(validate_token_bucket("STORE", f64::MAX, 0.0).is_err());
+    assert!(validate_token_bucket("STORE", f64::MAX, 2.0).is_err());
 }
 
 #[test]

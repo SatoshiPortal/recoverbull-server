@@ -365,17 +365,27 @@ pub fn validate_capacity(
 ///
 /// The burst must be finite and at least one token. It must also survive the
 /// first subtraction in f64 without rounding back to the original capacity.
-/// The refill rate must be finite and non-negative (zero disables refilling but
-/// is otherwise a valid, deliberately strict bucket).
+///
+/// The refill rate must be finite and **strictly positive**: every bucket
+/// refills. A zero rate used to be accepted as a "deliberately strict"
+/// bucket, but it is not a rate limit at all — it is a quota for the life of
+/// the process. Once the initial burst is spent, the bucket never produces
+/// another token, so on the lookup bucket every recovery receives `503`
+/// until an operator restarts the service, and no `Retry-After` value can
+/// describe a token that will never arrive. Making the service depend on a
+/// restart is not a limit an operator can reason about, so startup refuses
+/// it. Tests that need an exhaustible bucket construct one directly and
+/// bypass this validation.
 pub fn validate_token_bucket(name: &str, burst: f64, refill: f64) -> Result<(), String> {
     if !burst.is_finite() || burst < 1.0 || burst - 1.0 == burst {
         return Err(format!(
             "{name}_RATE_LIMIT_BURST must be finite, represent at least one token, and change after consuming one token, got {burst}"
         ));
     }
-    if !refill.is_finite() || refill < 0.0 {
+    if !refill.is_finite() || refill <= 0.0 {
         return Err(format!(
-            "{name}_RATE_LIMIT_REFILL_PER_SECOND must be finite and >= 0, got {refill}"
+            "{name}_RATE_LIMIT_REFILL_PER_SECOND must be finite and greater than 0 (a zero rate \
+             is a quota that only a restart resets, not a rate limit), got {refill}"
         ));
     }
     Ok(())

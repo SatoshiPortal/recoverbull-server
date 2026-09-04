@@ -799,7 +799,10 @@ fn test_token_bucket_backoff_rounds_up_and_floors_at_one_second() {
         BucketDecision::Consumed
     );
 
-    // no refill: never refills, and the backoff stays advisory
+    // no refill: never refills, and the backoff stays advisory. Startup
+    // refuses this configuration (see test_validate_token_bucket_rejects_a
+    // _zero_refill); only a test can build such a bucket, and the tests that
+    // need an exhaustible bucket rely on this behaviour.
     let mut quota = TokenBucket::new_at(1.0, 0.0, start);
     assert_eq!(quota.try_consume_at(start), BucketDecision::Consumed);
     assert_eq!(

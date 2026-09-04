@@ -3,8 +3,9 @@
 use std::time::Instant;
 
 /// Smallest backoff ever advertised. A rounded-up estimate below one second
-/// would tell a client to retry immediately at the boundary; a bucket without
-/// refill has no deadline at all and gets this advisory value.
+/// would tell a client to retry immediately at the boundary. A bucket without
+/// refill has no deadline at all and gets this advisory value; startup
+/// refuses such a configuration, so that case is reachable only from a test.
 const ADVISORY_RETRY_AFTER_SECS: u64 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,7 +79,8 @@ impl TokenBucket {
     }
 
     /// Seconds until the current deficit refills, rounded up and floored at
-    /// the advisory minimum. Without refill there is no deadline to derive.
+    /// the advisory minimum. Startup rejects a non-positive configured rate,
+    /// so the guard below only covers a bucket built directly by a test.
     fn retry_after_secs(&self) -> u64 {
         if self.refill_per_second <= 0.0 {
             return ADVISORY_RETRY_AFTER_SECS;

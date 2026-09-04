@@ -79,7 +79,7 @@ are never logged.
 - Retain only the derived `CandidateTag` in memory. It is exactly `secret_id/key_id`: never raw authentication or password material. Candidate tags are state-only, have at most `RATE_LIMIT_MAX_ATTEMPTS` slots, are wiped after the cooldown or a restart, and are never logged or included in a snapshot.
 - A new candidate immediately reserves one slot and counts in the budget. A duplicate `Pending` candidate receives `503` before saturation rather than taking another slot.
 - If `candidate_count >= max`, return `429` before membership or database work for **every** candidate, including known, `Pending`, and `Committed`, so saturation cannot be an authentication oracle.
-- A `Committed` replay is free only before saturation: it increments `total_requests`, does not extend the candidate cooldown, and does not add another attempt. `/fetch` and `/trash` share this candidate set.
+- A `Committed` replay is free only before saturation: it increments `total_requests`, does not extend the candidate cooldown, and does not add another attempt. `/fetch` and `/trash` share this candidate set. A successful `/trash` is the one exception: the candidate that authenticated the deletion keeps its consumed slot but stops being recognizable, so presenting it again afterwards is a new candidate like any other. Otherwise its free replay would tell a Backup File holder which PIN had been used for the deletion.
 - Finalization is detached and generation-safe. A hit or miss commits the candidate; a miss increments `failed_attempts` exactly once. A database error or cancellation before database work removes `Pending`; a trash race returning `202`/`401` does not create a false failed candidate.
 
  5. The user can fetch his `secret` by deciphering `encrypted_secret` using his `encryption_key` as encryption key.
@@ -101,7 +101,7 @@ are never logged.
 > }
 > ```
 >
-> - `total_attempts` is the number of distinct candidates admitted in the current cooldown window. A hit does not prove ownership, because a public `/store` caller can plant a matching row.
+> - `total_attempts` is the number of candidate slots consumed in the current cooldown window: one per distinct candidate admitted, never refunded by a successful `/trash`. After a deletion the deleting candidate is no longer recognizable, so it consumes a new slot if presented again. A hit does not prove ownership, because a public `/store` caller can plant a matching row.
 > - `failed_attempts` counts distinct candidates for which no database row existed, incremented once when that candidate is finalized as a miss.
 > - `remaining_attempts` is `rate_limit_max_attempts - total_attempts`, saturating at zero.
 > - `total_requests` counts every `/fetch` and `/trash` request attached to this identifier's active entry, including replays, pending duplicates, and saturation rejections. Requests rejected because the global identifier map is already full have no per-identifier entry and are not included. The global lookup bucket remains the defense against floods of identical replays.
@@ -163,7 +163,7 @@ one-second advisory. Framework-generated rejections such as `404`, `405`,
 ```
 
 - `id_hash`: SHA-256 of the raw `identifier` **bytes** (not the hex string). A client recognizes its own identifier by hashing it locally; nobody can recover a raw identifier from the list (pre-image resistance), which keeps the list useless for griefing or targeted lockout.
-- `total_attempts`: number of distinct candidates admitted in the current cooldown window.
+- `total_attempts`: number of candidate slots consumed in the current cooldown window (distinct candidates admitted; a candidate presented again after it deleted the row through `/trash` counts as a new one).
 - `failed_attempts`: number of distinct candidates for which no database row existed.
 - `total_requests`: every `/fetch` and `/trash` request attached to this identifier's active entry, including replays; map-capacity rejections for previously unseen identifiers cannot be attributed to an entry. It is telemetry, not candidate budget.
 - `window_started_at` / `last_attempt_at`: hour-truncated timestamps of the current window; `last_attempt_at` is the last distinct candidate timestamp, not the latest replay request. The JSON field name is retained for compatibility.

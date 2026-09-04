@@ -34,7 +34,16 @@ pub(crate) struct RateLimitInfo {
     /// wants. Public timestamps stay wall-clock so clients keep absolute
     /// values they can display.
     pub(crate) last_candidate_instant: Instant,
+    /// CandidateTags still recognizable in this window, as `Pending` or as a
+    /// free `Committed` replay.
     pub(crate) candidates: HashMap<CandidateTag, CandidateState>,
+    /// Slots consumed by candidates whose tag was deliberately forgotten: a
+    /// successful `/trash` deletes the row and forgets the tag that found it,
+    /// so presenting that candidate again is a new candidate like any other.
+    /// Keeping the tag would make its replay free and its counter stable,
+    /// which told a Backup File holder which PIN had been used for the
+    /// deletion. The slot stays consumed so the deletion never refunds budget.
+    pub(crate) forgotten_slots: u8,
     pub(crate) failed_candidates: u8,
     pub(crate) total_requests: u64,
 }
@@ -49,6 +58,7 @@ impl RateLimitInfo {
             last_request_at: now,
             last_candidate_instant: Instant::now(),
             candidates: HashMap::new(),
+            forgotten_slots: 0,
             failed_candidates: 0,
             total_requests: 0,
         }
@@ -64,9 +74,12 @@ impl RateLimitInfo {
             .expect("test monotonic back-date stays within the process clock");
     }
 
+    /// Slots consumed in this window: the recognizable candidates plus the
+    /// forgotten ones. Admission refuses at `max`, so the sum fits a `u8`.
     pub(crate) fn candidate_count(&self) -> u8 {
         self.candidates
             .len()
+            .saturating_add(usize::from(self.forgotten_slots))
             .try_into()
             .expect("candidate map cannot exceed the configured u8 bound")
     }
@@ -92,10 +105,14 @@ pub(crate) struct AttemptsLedgerState {
     map: Arc<Mutex<HashMap<String, RateLimitInfo>>>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 /// Database result used to finalize or refund a pending reservation.
 pub(crate) enum LookupOutcome {
+    /// The row exists and was read.
     Hit,
+    /// The row existed and was deleted: the candidate is committed as a
+    /// consumed slot but its tag is forgotten (see `forgotten_slots`).
+    Deleted,
     Miss,
     Error,
 }
@@ -225,15 +242,42 @@ impl AttemptsLedgerState {
                     }
                     false
                 }
+                LookupOutcome::Deleted => {
+                    forget_tag(info, candidate);
+                    false
+                }
                 LookupOutcome::Error => {
                     info.candidates.remove(candidate);
-                    info.candidates.is_empty()
+                    is_blank(info)
                 }
             }
         };
         if remove_identifier {
             map.remove(id_hash);
         }
+    }
+
+    /// Forgets the tag of a `Committed` candidate whose replay deleted the
+    /// row, only in the same generation. The slot stays consumed. A replay
+    /// carries no reservation, so this is the only ledger transition a
+    /// replayed `/trash` performs; the generation check keeps a late worker
+    /// from touching a replacement window.
+    pub(crate) async fn forget_committed(
+        &self,
+        id_hash: &str,
+        candidate: &str,
+        generation: DateTime<Utc>,
+    ) {
+        let mut map = self.map.lock().await;
+        let Some(info) = map.get_mut(id_hash) else {
+            return;
+        };
+        if info.window_started_at != generation
+            || info.candidates.get(candidate) != Some(&CandidateState::Committed)
+        {
+            return;
+        }
+        forget_tag(info, candidate);
     }
 
     /// Removes a still-pending candidate only when its generation matches.
@@ -347,11 +391,25 @@ fn remove_pending(
         {
             info.candidates.remove(candidate);
         }
-        info.window_started_at == generation && info.candidates.is_empty()
+        info.window_started_at == generation && is_blank(info)
     });
     if remove_identifier {
         map.remove(id_hash);
     }
+}
+
+/// Converts a recognizable candidate into a consumed, unrecognizable slot.
+fn forget_tag(info: &mut RateLimitInfo, candidate: &str) {
+    if info.candidates.remove(candidate).is_some() {
+        info.forgotten_slots = info.forgotten_slots.saturating_add(1);
+    }
+}
+
+/// An entry with no recognizable candidate and no consumed slot holds no
+/// budget and may be dropped after a refund. A forgotten slot is still
+/// budget, so an entry keeping one must survive.
+fn is_blank(info: &RateLimitInfo) -> bool {
+    info.candidates.is_empty() && info.forgotten_slots == 0
 }
 
 #[must_use = "a reservation must stay alive until SQLite responsibility is transferred"]

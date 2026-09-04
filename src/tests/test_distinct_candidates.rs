@@ -355,6 +355,7 @@ async fn test_old_trash_completion_cannot_update_a_replaced_rate_limit_window() 
             last_request_at: fresh_at,
             last_candidate_instant: tokio::time::Instant::now(),
             candidates: std::collections::HashMap::new(),
+            forgotten_slots: 0,
             failed_candidates: 0,
             total_requests: 0,
         },
@@ -462,4 +463,265 @@ async fn test_committed_trash_race_returns_accepted_and_unauthorized_without_fai
         .cloned()
         .expect("trash requests must create a rate-limit entry");
     assert_eq!(info.failed_candidates, 0);
+}
+
+/// After a successful `/trash`, the candidate that authenticated the deletion
+/// must be indistinguishable from any other candidate: same status, same
+/// counters. Keeping its tag recognizable made its replay free (`attempts`
+/// unchanged) while a different PIN consumed a slot (`attempts` + 1), which
+/// told a Backup File holder which PIN had been used for the deletion.
+#[tokio::test]
+async fn test_deleted_candidate_is_indistinguishable_from_a_new_candidate_after_trash() {
+    let (server, state) = crate::tests::test_server::new_test_server().await;
+    let mut observed = Vec::new();
+    for (identifier, probe) in [
+        (SHA256_111111, SHA256_222222),     // the PIN used for the deletion
+        (SHA256_222222, NOT_PASSWORD_HASH), // a different PIN
+    ] {
+        server
+            .post("/store")
+            .json(&store(identifier, SHA256_222222, BASE64_ENCRYPTED_SECRET))
+            .expect_success()
+            .await;
+        let deleted = server
+            .post("/trash")
+            .json(&fetch(identifier, SHA256_222222))
+            .expect_success()
+            .await;
+        assert_eq!(deleted.status_code(), StatusCode::ACCEPTED);
+
+        let response = server
+            .post("/fetch")
+            .json(&fetch(identifier, probe))
+            .expect_failure()
+            .await;
+        assert_eq!(response.status_code(), StatusCode::UNAUTHORIZED);
+        let body = response.json::<ResponseFailedAttempt>();
+        let info = state
+            .attempts
+            .ledger
+            .lock_for_test()
+            .await
+            .get(&identifier_hash(identifier).unwrap())
+            .cloned()
+            .expect("the entry survives the deletion");
+        observed.push((
+            body.attempts,
+            body.total_requests,
+            info.candidate_count(),
+            info.failed_candidates,
+        ));
+    }
+    assert_eq!(
+        observed[0], observed[1],
+        "deleted PIN and new PIN must produce identical counters after a trash"
+    );
+    assert_eq!(observed[0].0, 2, "the deletion's slot stays consumed");
+}
+
+/// The replay path forgets too: a candidate committed by a `/fetch` hit and
+/// then replayed by a `/trash` that deletes the row is no longer recognizable.
+/// The trash response itself still reports one attempt, because the budget
+/// is unchanged by the deletion.
+#[tokio::test]
+async fn test_trash_of_a_fetched_candidate_forgets_its_tag_without_refunding_the_slot() {
+    let (server, state) = crate::tests::test_server::new_test_server().await;
+    server
+        .post("/store")
+        .json(&store(
+            SHA256_111111,
+            SHA256_222222,
+            BASE64_ENCRYPTED_SECRET,
+        ))
+        .expect_success()
+        .await;
+    server
+        .post("/fetch")
+        .json(&fetch(SHA256_111111, SHA256_222222))
+        .expect_success()
+        .await;
+    let trashed = server
+        .post("/trash")
+        .json(&fetch(SHA256_111111, SHA256_222222))
+        .expect_success()
+        .await;
+    assert_eq!(
+        trashed.json::<serde_json::Value>()["attempt_status"]["total_attempts"],
+        1
+    );
+    // the detached worker forgets the tag after the response; wait for it
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let forgotten = state
+                .attempts
+                .ledger
+                .lock_for_test()
+                .await
+                .get(&identifier_hash(SHA256_111111).unwrap())
+                .is_some_and(|info| info.candidates.is_empty() && info.candidate_count() == 1);
+            if forgotten {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the deleted candidate's tag must be forgotten");
+
+    let response = server
+        .post("/fetch")
+        .json(&fetch(SHA256_111111, SHA256_222222))
+        .expect_failure()
+        .await;
+    assert_eq!(response.status_code(), StatusCode::UNAUTHORIZED);
+    assert_eq!(response.json::<ResponseFailedAttempt>().attempts, 2);
+}
+
+/// A forgotten slot is budget: it survives refunds and counts toward
+/// saturation, so a deletion never hands back an attempt. Re-storing the
+/// secret in the same window does not recover the slot either.
+#[tokio::test]
+async fn test_forgotten_slots_count_toward_saturation_and_survive_refunds() {
+    let (server, state) = crate::tests::test_server::new_test_server().await;
+    let max = state.attempts.policy.max_attempts();
+    let id_hash = identifier_hash(SHA256_111111).unwrap();
+    server
+        .post("/store")
+        .json(&store(
+            SHA256_111111,
+            SHA256_222222,
+            BASE64_ENCRYPTED_SECRET,
+        ))
+        .expect_success()
+        .await;
+    server
+        .post("/trash")
+        .json(&fetch(SHA256_111111, SHA256_222222))
+        .expect_success()
+        .await;
+
+    // a refund of a Pending candidate must not drop the entry holding the slot
+    let generation = state
+        .attempts
+        .ledger
+        .lock_for_test()
+        .await
+        .get(&id_hash)
+        .expect("entry")
+        .window_started_at;
+    state
+        .attempts
+        .ledger
+        .lock_for_test()
+        .await
+        .get_mut(&id_hash)
+        .expect("entry")
+        .candidates
+        .insert(
+            "pending-tag".to_owned(),
+            crate::attempts::ledger::CandidateState::Pending,
+        );
+    state
+        .attempts
+        .ledger
+        .refund(&id_hash, "pending-tag", generation)
+        .await;
+    let info = state
+        .attempts
+        .ledger
+        .lock_for_test()
+        .await
+        .get(&id_hash)
+        .cloned()
+        .expect("the entry keeps the consumed slot through a refund");
+    assert_eq!(info.candidate_count(), 1);
+    assert!(info.candidates.is_empty());
+
+    // the remaining budget is max - 1, then saturation
+    for index in 1..usize::from(max) {
+        let response = server
+            .post("/fetch")
+            .json(&fetch(
+                SHA256_111111,
+                &crate::tests::distinct_candidate(index),
+            ))
+            .expect_failure()
+            .await;
+        assert_eq!(response.status_code(), StatusCode::UNAUTHORIZED);
+    }
+    server
+        .post("/store")
+        .json(&store(
+            SHA256_111111,
+            SHA256_222222,
+            BASE64_ENCRYPTED_SECRET,
+        ))
+        .expect_success()
+        .await;
+    let response = server
+        .post("/fetch")
+        .json(&fetch(SHA256_111111, SHA256_222222))
+        .expect_failure()
+        .await;
+    assert_eq!(
+        response.status_code(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "the deletion's slot counts toward saturation even after a re-store"
+    );
+}
+
+/// A late replayed `/trash` from an old window must not forget a tag in the
+/// window that replaced it.
+#[tokio::test]
+async fn test_old_replay_forget_cannot_touch_a_replaced_window() {
+    let (_server, state) = crate::tests::test_server::new_test_server().await;
+    let id_hash = identifier_hash(SHA256_111111).unwrap();
+    let fresh_at = chrono::Utc::now();
+    let stale_generation = fresh_at - chrono::Duration::hours(1);
+    {
+        let mut map = state.attempts.ledger.lock_for_test().await;
+        let mut info = RateLimitInfo::new(fresh_at);
+        info.candidates.insert(
+            "committed-tag".to_owned(),
+            crate::attempts::ledger::CandidateState::Committed,
+        );
+        map.insert(id_hash.clone(), info);
+    }
+
+    state
+        .attempts
+        .ledger
+        .forget_committed(&id_hash, "committed-tag", stale_generation)
+        .await;
+    let info = state
+        .attempts
+        .ledger
+        .lock_for_test()
+        .await
+        .get(&id_hash)
+        .cloned()
+        .expect("entry");
+    assert_eq!(
+        info.candidates.len(),
+        1,
+        "a stale generation changes nothing"
+    );
+    assert_eq!(info.forgotten_slots, 0);
+
+    state
+        .attempts
+        .ledger
+        .forget_committed(&id_hash, "committed-tag", fresh_at)
+        .await;
+    let info = state
+        .attempts
+        .ledger
+        .lock_for_test()
+        .await
+        .get(&id_hash)
+        .cloned()
+        .expect("entry");
+    assert!(info.candidates.is_empty(), "the current generation forgets");
+    assert_eq!(info.forgotten_slots, 1);
+    assert_eq!(info.candidate_count(), 1);
 }

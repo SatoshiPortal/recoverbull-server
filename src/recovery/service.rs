@@ -312,12 +312,17 @@ impl RecoveryService {
                 self.counters.lookup_rate_limited();
                 LookupResult::Pending
             }
-            Admission::Replay {
-                status,
-                generation: _generation,
-            } => {
-                self.run_lookup(None, id_hash, candidate, requested_at, status, kind)
-                    .await
+            Admission::Replay { status, generation } => {
+                self.run_lookup(
+                    generation,
+                    None,
+                    id_hash,
+                    candidate,
+                    requested_at,
+                    status,
+                    kind,
+                )
+                .await
             }
             Admission::New {
                 status,
@@ -325,7 +330,8 @@ impl RecoveryService {
                 reservation,
             } => {
                 self.run_lookup(
-                    Some((generation, reservation)),
+                    generation,
+                    Some(reservation),
                     id_hash,
                     candidate,
                     requested_at,
@@ -337,19 +343,22 @@ impl RecoveryService {
         }
     }
 
+    /// Runs the storage operation for an admitted candidate. `reservation` is
+    /// `Some` for a new candidate and `None` for a committed replay; the
+    /// generation is carried in both cases so that a replayed `/trash` can
+    /// forget its tag without touching a replacement window.
+    #[allow(clippy::too_many_arguments)]
     async fn run_lookup(
         &self,
-        reservation: Option<(DateTime<Utc>, ReservationGuard)>,
+        generation: DateTime<Utc>,
+        mut reservation: Option<ReservationGuard>,
         id_hash: String,
         candidate: String,
         requested_at: DateTime<Utc>,
         attempt_status: AttemptStatus,
         kind: LookupKind,
     ) -> LookupResult {
-        let (generation, mut reservation) = match reservation {
-            Some(value) => (Some(value.0), Some(value.1)),
-            None => (None, None),
-        };
+        let reserved = reservation.is_some();
         // A detached task receives both the opaque permit and reservation
         // finalization responsibility; only its JoinHandle is awaited here.
         let operation = match self.storage.acquire().await {
@@ -379,14 +388,21 @@ impl RecoveryService {
                 Ok(result) => result,
                 Err(_) => Err(StorageError::Database),
             };
-            if let Some(generation) = generation {
-                let outcome = match &final_result {
-                    Ok(Some(_)) => LookupOutcome::Hit,
-                    Ok(None) => LookupOutcome::Miss,
-                    Err(_) => LookupOutcome::Error,
-                };
+            let outcome = match (&final_result, kind) {
+                (Ok(Some(_)), LookupKind::Trash) => LookupOutcome::Deleted,
+                (Ok(Some(_)), LookupKind::Fetch) => LookupOutcome::Hit,
+                (Ok(None), _) => LookupOutcome::Miss,
+                (Err(_), _) => LookupOutcome::Error,
+            };
+            if reserved {
                 task_ledger
                     .finalize(&task_id_hash, &task_candidate, generation, outcome)
+                    .await;
+            } else if outcome == LookupOutcome::Deleted {
+                // A committed replay that deleted the row: the tag must not
+                // stay recognizable after the deletion it authenticated.
+                task_ledger
+                    .forget_committed(&task_id_hash, &task_candidate, generation)
                     .await;
             }
             match &final_result {
@@ -416,7 +432,7 @@ impl RecoveryService {
         let result = match task.await {
             Ok(result) => result,
             Err(_) => {
-                if let Some(generation) = generation {
+                if reserved {
                     self.attempts
                         .ledger
                         .refund(&id_hash, &candidate, generation)

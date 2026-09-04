@@ -185,7 +185,10 @@ Operators are responsible for retention of those copies.
    for a guessed key through `/store` and then "successfully" fetch it.
    Distinct candidate counters therefore include database hits and never reset
    on success. A committed replay is free only before saturation, increments
-   `total_requests`, and does not extend cooldown.
+   `total_requests`, and does not extend cooldown. A successful `/trash` is
+   the exception: the deleting candidate keeps its consumed slot but its tag
+   is forgotten, so its free replay cannot reveal which PIN performed the
+   deletion (see the transition table).
 3. **Telemetry is readable by identifier holders.** `/attempts` publishes
    `SHA-256(identifier)` only. Entries are indistinguishable: real usage,
    another device, and attacker probes produce the same entry shape. This
@@ -320,6 +323,14 @@ Operators are responsible for retention of those copies.
     advance while the process is stopped or suspended, so entries do not
     expire during suspension; that also keeps budgets rather than resetting
     them, and matches the existing behaviour of the 24-hour wipe timer.
+16. **A `Pending` duplicate during an in-flight `/trash` is a narrow
+    membership signal.** While a trash is in flight, an identical candidate
+    receives `503` (pending duplicate) whereas a different candidate proceeds
+    to a lookup. This distinguishes the in-flight candidate for the duration
+    of one database operation only, and vanishes once the trash finalizes and
+    forgets its tag. Closing it would require serializing or uniformizing all
+    lookups of one identifier, at a real availability and griefing cost; the
+    stable post-deletion oracle is closed instead (transition table above).
 
 ## Invariants (each guarded by tests)
 
@@ -352,7 +363,7 @@ The table below is the minimal primary-guard index for the security invariants; 
 
 ### Candidate admission and transition table
 
-Admission is ordered and shared by `/fetch` and `/trash`: expiry and capacity are checked first, `total_requests` is then updated for an existing entry, saturation is checked before membership, and only then is candidate membership inspected. A full map rejects a new identifier fail-closed. Saturation rejects every candidate, including known candidates, before database work. A `Pending` duplicate returns `503` without another reservation; a `Committed` replay is free before saturation. A new candidate creates `Pending` and reserves one slot.
+Admission is ordered and shared by `/fetch` and `/trash`: expiry and capacity are checked first, `total_requests` is then updated for an existing entry, saturation is checked before membership, and only then is candidate membership inspected. A full map rejects a new identifier fail-closed. Saturation rejects every candidate, including known candidates, before database work. A `Pending` duplicate returns `503` without another reservation; a `Committed` replay is free before saturation. A new candidate creates `Pending` and reserves one slot. The budget is `candidate_count = recognizable candidates + forgotten_slots`: a slot, once consumed, is never handed back by a deletion, but the tag that deleted the row is forgotten so that it cannot be replayed for free afterwards.
 
 | Current state / admission | Result | Final state and accounting |
 |---|---|---|
@@ -362,10 +373,12 @@ Admission is ordered and shared by `/fetch` and `/trash`: expiry and capacity ar
 | `Pending` duplicate | `503` | Existing reservation remains; no second reservation. |
 | `Committed` replay | Continue lookup | Remains `Committed`; `total_requests` increments, with no new attempt or cooldown extension. |
 | New candidate | Continue lookup | `Pending` owns one reserved slot. |
-| Admitted hit or miss | Finalize | `Committed`; a miss increments `failed_attempts` once and a hit does not reset the budget. |
-| Error or refund before commit | Refund/remove | `Pending` is removed and refunded once. |
+| Admitted fetch hit or miss | Finalize | `Committed`; a miss increments `failed_attempts` once and a hit does not reset the budget. |
+| Admitted trash hit (row deleted) | Finalize | Tag forgotten, `forgotten_slots` + 1: the slot stays consumed and the candidate is no longer recognizable. |
+| `Committed` replay whose trash deletes the row | Forget | Same as above, in the same generation only; the budget does not change. |
+| Error or refund before commit | Refund/remove | `Pending` is removed and refunded once; an entry holding forgotten slots survives. |
 
-External statuses are `400` invalid data, `401` invalid credentials, `429` targeted lockout, `503` pressure/unavailability, and `500` internal failure. `429` and `503` carry `Retry-After`; clients classify by status, not error text. `total_attempts` counts distinct admitted candidates, `failed_attempts` finalized misses, and `total_requests` requests attached to an active entry.
+External statuses are `400` invalid data, `401` invalid credentials, `429` targeted lockout, `503` pressure/unavailability, and `500` internal failure. `429` and `503` carry `Retry-After`; clients classify by status, not error text. `total_attempts` counts consumed slots (distinct admitted candidates, a deleting candidate counting again if re-presented), `failed_attempts` finalized misses, and `total_requests` requests attached to an active entry.
 
 ### Cancellation ownership
 
@@ -401,6 +414,7 @@ code, keep the invariant — and run the guarding test.
 | SQLite is bundled at least 3.51.3; startup verifies runtime version and WAL, while every connection verifies WAL and secure deletion | `storage::sqlite` | Reproducible WAL-reset fix and deletion invariant without a per-connection version query | `test_application_connection_enables_secure_delete`, `test_application_connection_uses_patched_sqlite_and_wal`, `test_memory_database_fails_closed_when_wal_is_unavailable` |
 | Errors are classified by HTTP status only: `429` = targeted lockout, `503` = global pressure, both with `Retry-After` | `http::{contract,error}`, `router` | Clients must not match on error text | `test_503_responses_have_no_machine_code`, `test_global_buckets_use_503_without_targeted_metadata`, `test_targeted_429_has_targeted_metadata` |
 | POST requests matching `/store`, `/fetch`, and `/trash` have a uniform minimum server-side response time, including extractor rejections; `/info`, `/attempts`, 404s, 405s, other routes, and already-slow processing are excluded | `router` | Reduce fast success/failure timing differences without holding database resources or pretending to equalize network time | `production_router_applies_the_500_millisecond_floor`, `sensitive_post_success_and_failures_have_the_configured_floor`, `default_body_limit_rejection_is_also_delayed` |
+| A candidate that deleted the row through `/trash` is forgotten but its slot stays consumed: presenting it again afterwards is indistinguishable, in status and counters, from presenting any other candidate | `attempts::ledger::{forget_tag,forget_committed,RateLimitInfo::forgotten_slots}`, `LookupOutcome::Deleted` | Keeping the deleting tag recognizable made its replay free while a different PIN consumed a slot, which told a Backup File holder which PIN had performed the deletion within the cooldown window | `test_deleted_candidate_is_indistinguishable_from_a_new_candidate_after_trash`, `test_trash_of_a_fetched_candidate_forgets_its_tag_without_refunding_the_slot`, `test_forgotten_slots_count_toward_saturation_and_survive_refunds`, `test_old_replay_forget_cannot_touch_a_replaced_window`, `test_trash_does_not_reset_the_counter` |
 | The snapshot is a projection of ledger counters, never a copy of ledger state: replacing every retained CandidateTag leaves the published bytes and the ETag identical | `AttemptsLedgerState::snapshot_entries`, `AttemptsLedgerEntry` | A CandidateTag must be unable to reach the payload, and the snapshot's peak cost must not scale with the candidate budget (measured: the snapshot's marginal cost fell from 37,530 to 199 bytes per entry at `RATE_LIMIT_MAX_ATTEMPTS=255`) | `test_snapshot_is_independent_of_candidate_tags`, `test_snapshot_never_contains_secret_material`, `test_attempts_snapshot_at_full_map_scale` |
 | A global-bucket `503` carries a `Retry-After` derived from the bucket's own state at the moment of refusal: the missing fraction of a token over the configured refill rate, rounded up, at least one second | `rate_limit::{BucketDecision,TokenBucket::try_consume_at}` | A fixed `1` was only right for the default rates; with a slower refill it told clients to retry before a token could exist, turning the backoff into extra load during overload | `test_token_bucket_refill_is_deterministic_on_an_injected_clock`, `test_token_bucket_backoff_rounds_up_and_floors_at_one_second`, `test_global_bucket_retry_after_follows_the_configured_refill` |
 | The non-loopback deployment warning is decided on the address the listener actually bound, not on the `SERVER_ADDRESS` text | `main::is_loopback_bind`, `main::warn_unless_loopback` | A textual prefix check accepted `localhost.attacker.example` and flagged the loopback `127.0.0.2`; the warning remains advisory, as the runbook states | `loopback_is_decided_on_the_bound_address`, `bound_localhost_is_judged_by_its_resolved_address` |
@@ -467,8 +481,10 @@ code, keep the invariant — and run the guarding test.
   release binary and fixed in the same PR (`ATT-002` pre-wipe snapshot
   republication, `RTR-001` timeout status, `DB-001`/`BKP-001` schema
   postcondition, `CFG-001`/`CFG-002`/`RTR-002` configuration bounds,
-  `MAIN-001` loopback check, `RL-001`/`RL-003` `Retry-After`). Left open
-  for a maintainer decision: `ATT-003` (post-`/trash` counter oracle),
+  `MAIN-001` loopback check, `RL-001`/`RL-003` `Retry-After`, and, by
+  maintainer decision, `ATT-003` post-`/trash` counter oracle, which changes
+  the published meaning of `total_attempts` to consumed slots and must be
+  mirrored in the specification). Left open for a maintainer decision:
   `RL-002` (zero refill), `MAIN-002` (shutdown bound), `SYS-001` (Bull
   Mobile polling), `F-J` (Caddy `x/net` pin), `F-K` (`created_at`
   precision), `DOC-001` (nginx conditional-request caveat).

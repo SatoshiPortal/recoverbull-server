@@ -574,6 +574,7 @@ async fn test_expired_entry_disappears_from_snapshot() {
                         .unwrap(),
                 ),
                 candidates: std::collections::HashMap::new(),
+                forgotten_slots: 0,
                 failed_candidates: 3,
                 total_requests: 3,
             },
@@ -617,8 +618,10 @@ async fn test_trash_does_not_reset_the_counter() {
         .expect_success()
         .await;
 
-    // the row is gone, but the distinct-candidate counter stays stable while
-    // total_requests records the replay
+    // The row is gone and the deletion's slot stays consumed. The tag that
+    // authenticated the deletion is forgotten, so presenting it again is a
+    // new candidate: the counter grows to 2 exactly as for any other PIN,
+    // and never drops back.
     let response = server
         .post("/fetch")
         .json(&FetchSecret {
@@ -629,7 +632,7 @@ async fn test_trash_does_not_reset_the_counter() {
         .await;
     assert_eq!(response.status_code(), StatusCode::UNAUTHORIZED);
     let body = response.json::<serde_json::Value>();
-    assert_eq!(body["attempts"], 1, "trash must not reset the counter");
+    assert_eq!(body["attempts"], 2, "trash must not reset the counter");
     assert_eq!(body["total_requests"], 2);
 }
 
@@ -1117,6 +1120,7 @@ async fn test_attempts_counter_does_not_overflow_at_u8_max() {
                     })
                     .collect(),
                 failed_candidates: 254,
+                forgotten_slots: 0,
                 total_requests: 254,
             },
         );

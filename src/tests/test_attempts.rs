@@ -368,6 +368,7 @@ async fn test_attempts_omit_entries_after_cooldown_without_waiting_for_sweeper()
                         .unwrap(),
                 ),
                 candidates: std::collections::HashMap::new(),
+                forgotten_slots: 0,
                 failed_candidates: 1,
                 total_requests: 1,
             },
@@ -404,6 +405,7 @@ async fn test_attempts_last_attempt_at_is_last_distinct_candidate() {
                 // remains two hours old: that decoupling is the point here.
                 last_candidate_instant: tokio::time::Instant::now(),
                 candidates: std::collections::HashMap::new(),
+                forgotten_slots: 0,
                 failed_candidates: 1,
                 total_requests: 4,
             },
@@ -466,6 +468,7 @@ async fn test_attempts_snapshot_at_full_map_scale() {
                     last_request_at: now,
                     last_candidate_instant: tokio::time::Instant::now(),
                     candidates: std::collections::HashMap::new(),
+                    forgotten_slots: 0,
                     failed_candidates: 0,
                     total_requests: 1,
                 },

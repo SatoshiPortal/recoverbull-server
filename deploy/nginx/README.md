@@ -13,8 +13,20 @@ sure no other proxy owns that listener, and keep Axum private on
 them with permissions appropriate to the installed nginx identity and apply
 the retention policy in `docs/RETENTION.md`.
 
+**Upgrade order (important).** This example listens with `proxy_protocol`, so
+nginx **rejects any connection without a PROXY header**. It works only once Tor
+sends one (`HiddenServiceExportCircuitID haproxy`, Tor >= 0.4.4). Enable the Tor
+export first — an older nginx ignores the header harmlessly — then switch nginx
+to this include; on rollback, revert nginx first. Enabling `proxy_protocol`
+before Tor exports the id refuses every request. The `proxy_protocol` source is
+trusted from `127.0.0.1` (`set_real_ip_from`), so keep the `:3000` listener
+reachable only by Tor; a co-located process could otherwise forge circuit ids
+(consider a unix-socket hop, see SECURITY.md, AUD-09).
+
 The example intentionally provides:
 
+* per-circuit rate and connection limits via the PROXY-protocol source address,
+  so one onion client cannot exhaust the budget for all;
 * one Host/query-independent GET cache key for `/attempts`;
 * a 35-second cache lock timeout and age, covering a cold Axum build;
 * a GET-only global edge bucket (Tor clients share one source address);

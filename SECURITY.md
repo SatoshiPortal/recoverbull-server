@@ -400,6 +400,28 @@ whose Tor build predates 0.4.4, or who omits the export, falls back to the
 shared-bucket behaviour and must treat the global `/attempts` rate and the
 connection cap as accepted denial-of-service ceilings.
 
+Two consequences of this change, both confirmed against the running binary
+under podman:
+
+- **The two files are coupled and must be upgraded Tor-first.** `listen …
+  proxy_protocol` makes the PROXY header mandatory: nginx rejects any
+  connection that arrives without one. So enabling `proxy_protocol` on nginx
+  before `HiddenServiceExportCircuitID` is active on Tor refuses **every**
+  request — a full outage, not a degradation. The safe order is to enable the
+  Tor export first (old nginx ignores the header harmlessly), then switch nginx
+  to `proxy_protocol`; roll back nginx first. A validated end-to-end smoke
+  before admitting traffic (README runbook) catches a mismatch.
+- **The PROXY header is trusted from loopback, so co-located processes can
+  forge a circuit id.** `set_real_ip_from 127.0.0.1` trusts the header from any
+  source that can reach `127.0.0.1:3000`, which on a shared host is any local
+  process, not only Tor. A local process could therefore rotate forged circuit
+  ids to evade the per-circuit limit, or attribute traffic to a victim's
+  circuit. This needs local access to the box, which is already a strong
+  position, so it is accepted; operators wanting to close it should give Tor a
+  private hop to nginx — a dedicated loopback address or, better, a unix socket
+  reachable only by the Tor service account (`listen unix:/run/recoverbull.sock
+  proxy_protocol;` with `HiddenServicePort 80 unix:/run/recoverbull.sock`).
+
 ## Invariants (each guarded by tests)
 
 The table below is the minimal primary-guard index for the security invariants; it is not an exhaustive index of every test. Supplemental tests are classified here by module so an auditor can locate evidence without listing all 220 tests individually.

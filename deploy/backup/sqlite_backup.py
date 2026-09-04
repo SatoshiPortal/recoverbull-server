@@ -84,9 +84,9 @@ def _sync_directory(directory: Path) -> None:
 
 
 def _remove_temporary(path: Path) -> None:
-    for candidate in (path, *_sidecars(path)):
+    for file_to_remove in (path, *_sidecars(path)):
         try:
-            candidate.unlink()
+            file_to_remove.unlink()
         except FileNotFoundError:
             pass
 

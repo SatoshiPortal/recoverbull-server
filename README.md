@@ -172,7 +172,7 @@ one-second advisory. Framework-generated rejections such as `404`, `405`,
 
 Identifiers are kept and published hashed, never raw. The entire identifier map, including the retained `secret_id` values, is wiped every 24 hours from map startup and the attempt budget resets at that boundary. Individual entries disappear earlier, as soon as their cooldown has elapsed: expiry is applied to an entry when it is next used, to the whole map whenever it is full, and to the whole map before every snapshot build, so an expired entry is never published and never causes a refusal. Nothing is persisted.
 
-The body is **always gzip-compressed JSON** (`Content-Encoding: gzip`); clients must be gzip-capable. This initial telemetry contract, version `1`, reports distinct-`secret_id` counters plus `total_requests` and never exposes a `secret_id`. The snapshot is rebuilt at most once per minute and served as immutable shared bytes with a strong `ETag`: send `If-None-Match` to receive a bodyless `304` when nothing changed. `Cache-Control: public, max-age=<remaining seconds>` reflects the real freshness. A dedicated global token bucket (`ATTEMPTS_RATE_LIMIT_*`) bounds cache-bypass traffic; production deployments must additionally cache and rate-limit this route at the reverse proxy (see Deployment). Nginx is the reference template; Caddy is a conditional, mutually exclusive alternative under `deploy/caddy/`.
+The body is **always gzip-compressed JSON** (`Content-Encoding: gzip`); clients must be gzip-capable. This initial telemetry contract, version `1`, reports distinct-`secret_id` counters plus `total_requests` and never exposes a `secret_id`. The snapshot is rebuilt at most once per minute and served as immutable shared bytes with a strong `ETag`: send `If-None-Match` to receive a bodyless `304` when nothing changed. `Cache-Control: public, max-age=<remaining seconds>` reflects the real freshness. A dedicated global token bucket (`ATTEMPTS_RATE_LIMIT_*`) bounds cache-bypass traffic; production deployments must additionally cache and rate-limit this route at the reverse proxy (see Deployment). Caddy is the reference proxy, under `deploy/caddy/`; the nginx template is an unsupported alternative.
 
 **Proactive detection is the client's responsibility.** The server publishes
 the snapshot and cannot notify anyone; only a wallet that polls it can turn an
@@ -196,7 +196,7 @@ If a client opts into proactive detection, it should implement these semantics:
 - **Poll `/attempts` proactively** while foregrounded and, where supported, from a best-effort background task (never more often than the snapshot freshness, and with jitter): if your identifier hash appears with attempts you did not make, someone is probing your backup.
 - **Check the fill ratio, not only your own hash.** Compare the number of published entries with `max_attempt_identifiers` from `/info`. A saturated map means new identifiers are being refused with `503`, and **a victim in that situation has no entry of its own to find**: an attacker filling the map with identifiers it chose never touches yours. Recognizing your own `id_hash` is therefore not sufficient as a detection strategy — a high ratio is itself a first-order alarm. At the default capacity this costs an attacker about 1.16 requests per second sustained and roughly 50 MB of traffic per day, so a saturated ratio is cheap to produce and must be treated as expected, not exceptional.
 - **Treat a `429` or unexpected snapshot activity as an alarm**: global service pressure uses `503` instead. If the wallet is still accessible, rotate/transfer immediately; otherwise recovery availability depends on a **previously exported** Backup Key or a second independent server. See [Error responses](#error-responses) for the full table; do not match on the `error` text.
-- **`attempt_status` on a successful fetch is the freshest signal**: it needs no extra request and stays available even when `/attempts` is overloaded. Failures older than the cooldown expire (entries are swept and forgotten), but a success never resets the counters early.
+- **`attempt_status` on a successful fetch is the freshest signal**: it needs no extra request and stays available even when `/attempts` is overloaded. Failures older than the cooldown expire and are forgotten when the entry is next used, when the full map is checked, or before a snapshot build; a success never resets the counters early.
 - **Telemetry is advisory**: the server cannot distinguish an attacker from the user or another of the user's devices, and a compromised server can fabricate or suppress counters. Clients must warn, never act automatically.
 - **A failing `/attempts` means "I do not know", not "no alarm".** The snapshot carries a negative signal, so track the last *successful* poll and treat a stale one as unverified rather than as quiet. `/info` is never rate-limited and needs no snapshot, so the pair tells the two failures apart:
 
@@ -277,76 +277,49 @@ hours. An exceptional restart starts a new budget and collection and must not
 overlap the old instance.
 
 Use the maintained templates rather than copying this overview:
-`deploy/systemd/recoverbull.service`, `deploy/nginx/recoverbull.conf` (the
-reference proxy),
-`deploy/tor/recoverbull.torrc.example`, and `deploy/logrotate/recoverbull`.
-The conditional Caddy alternative is documented in `deploy/caddy/README.md`;
-choose exactly one proxy, and admit Caddy only after its build, validation, and
-specific smokes succeed.
+`deploy/systemd/recoverbull.service`, `deploy/caddy/` (the reference proxy:
+`Caddyfile`, the pinned build under `build/`, and `smoke.py`),
+and `deploy/tor/recoverbull.torrc.example`.
+Build and validate Caddy per `deploy/caddy/README.md` before admitting onion
+traffic; its build, checksums, vulnerability scan and smoke are gated by CI.
+Run exactly one proxy. `deploy/nginx/recoverbull.conf` is an unsupported
+alternative kept for operators who already run nginx: it is a configuration
+template only, with no executable smoke and no CI coverage, so an operator who
+chooses it owns its verification.
 
-The HTTP status contract is shared by both maintained proxy templates: `429` is
-exclusively a targeted Axum lockout, while all shared pressure is `503` with
+The HTTP status contract belongs to Axum, not to the proxy: `429` is
+exclusively a targeted lockout, while all shared pressure is `503` with
 `Retry-After`. Clients classify by standard status only; they must not depend
 on custom status codes or error text. Caddy has no native connection-count cap:
 its 10-second header timeout and Tor defenses are compensating controls, so
 operators must budget and monitor file descriptors and processes for the host.
 
 1. Keep Axum on a private loopback port: `SERVER_ADDRESS=127.0.0.1:3001`
-2. Configure nginx on `127.0.0.1:3000` with strict header/body timeouts and connection limits:
+2. Put the reference proxy in front of it on `127.0.0.1:3000`, from
+   `deploy/caddy/Caddyfile` and the pinned build in `deploy/caddy/build/`.
+   The template is the specification; this list is what it must provide, so
+   that an operator adapting it knows what may not be dropped:
 
-```nginx
-limit_conn_zone $binary_remote_addr zone=recoverbull_connections:10m;
-limit_req_zone $binary_remote_addr zone=recoverbull_attempts:10m rate=5r/s;
-proxy_cache_path /var/cache/nginx/recoverbull levels=1:2 keys_zone=recoverbull_cache:10m max_size=100m inactive=2m;
+   - **No access log.** Only `ERROR` diagnostics on stderr, routed by the
+     operator-provided service to restricted journald storage.
+   - **One cached representation of `/attempts`.** The cache key must ignore
+     the Host, the query, the body and the scheme, because the handler
+     ignores them: otherwise a reader mints a fresh entry per request and
+     bypasses the cache. The smoke proves that Host/query variants reuse one
+     entry and cause only one upstream call.
+   - **A request rate limit on `/attempts`**, above the shared Axum bucket, so
+     the cache absorbs normal reads.
+   - **Strict header and body timeouts** (10 s header read), which is where a
+     slow-loris is stopped; Axum's own 30-second bound covers the rest.
+   - **HTTP/1-only loopback transport**, keeping the listener private and the
+     protocol surface small.
 
-server {
-    listen 127.0.0.1:3000;
-    access_log off;
-    error_log /var/log/nginx/recoverbull-error.log crit;
-    client_max_body_size 1k;
-    client_header_timeout 10s;
-    client_body_timeout 10s;
-    send_timeout 35s;
-    limit_conn recoverbull_connections 100;
+   Every value is in the template. Do not restate them here: duplicated proxy
+   configuration drifts. Caddy has no native connection-count or throughput
+   cap, so the operator-managed FD/process budget and Tor defenses documented
+   in its README are required parts of the reference deployment.
 
-    # The telemetry snapshot can reach several megabytes: cache the
-    # precompressed body, coalesce concurrent fills and shape egress.
-    location = /attempts {
-        proxy_pass http://127.0.0.1:3001;
-        proxy_connect_timeout 2s;
-        proxy_read_timeout 35s;
-        proxy_cache recoverbull_cache;
-        # /attempts ignores query parameters. Exclude them from the key so an
-        # attacker cannot mint one cache entry per random query string.
-        proxy_cache_key $scheme$proxy_host$uri;
-        proxy_cache_lock on;
-        proxy_cache_valid 200 30s;
-        limit_req zone=recoverbull_attempts burst=20 nodelay;
-        limit_rate 512k;
-    }
-
-    location / {
-        proxy_pass http://127.0.0.1:3001;
-        proxy_connect_timeout 2s;
-        proxy_read_timeout 35s;
-    }
-}
-```
-
-Keep the error log readable only by service administrators, for example with
-owner `root:adm` and mode `0640`, and configure logrotate (or an equivalent
-collector) with an operator-selected short retention policy. `crit` reduces
-volume but does not guarantee that request metadata is absent. Apply the same
-level, permission, and explicitly configured retention policy to journald and
-Tor logs. Application log guarantees do not cover reverse-proxy or system logs
-unless this runbook is applied. The five-minute global counters retain coarse
-activity metadata and also require restricted access and retention.
-
-All Tor connections reach nginx from loopback, so these connection and request limits are intentionally global. The backend already serves `/attempts` precompressed: nginx caches that exact body instead of recompressing per request. The explicit cache key uses `$uri`, not the default `$request_uri`, because `/attempts` ignores query parameters: `/attempts?x=1` and `/attempts?x=2` must share one entry and one cache-fill lock. The Caddy alternative enforces the same invariant with `disable_query` and `disable_host`, and its smoke test proves that different Host/query values cause only one backend call. `limit_rate` caps per-connection throughput; multiplied by the connection limit it bounds aggregate snapshot egress. The proxy is also what lets slow clients take their time: with default `proxy_buffering`, nginx drains Axum quickly (within its 30s route timeout) and feeds the client at its own pace.
-
-> **Conditional requests behind nginx**: nginx evaluates a client's `If-None-Match` against a cached `200` and answers a bodyless `304` when the `ETag` matches. Early releases did not: cached responses without a `Last-Modified` header were served in full ([ticket #558](https://trac.nginx.org/nginx/ticket/558)), fixed by changeset `5fb1e57c758a` and released in nginx 1.7.3 (July 2014); the [nginx caching guide](https://blog.nginx.org/blog/nginx-caching-guide) documents `ETag`/`If-None-Match` support from that release. Every supported nginx is newer, so a client behind nginx gets the `304` path too. This was established from the nginx tracker and documentation, not reproduced against this template: before relying on it for egress planning, prime the cache, repeat the request with the returned `ETag`, and confirm a `304` with no second upstream call. Clients must compare the received `ETag` in any case, and aggregate egress stays bounded by `limit_conn` × `limit_rate`.
-
-3. Configure the onion service in `torrc` to reach nginx, with Tor's built-in DoS defenses enabled (they cover connection floods; body downloads remain an nginx concern):
+3. Configure the onion service in `torrc` to reach the proxy, with Tor's built-in DoS defenses enabled (they cover connection floods; body downloads remain a proxy concern):
 
 ```
 HiddenServiceDir /var/lib/tor/recoverbull/
@@ -354,14 +327,15 @@ HiddenServicePort 80 127.0.0.1:3000
 HiddenServiceEnableIntroDoSDefense 1
 # Tor 0.4.8+: proof-of-work defense, makes opening many new rendezvous
 # circuits expensive under load. Neither defense covers body downloads
-# over established circuits — that remains an nginx concern (above).
+# over established circuits — that remains a proxy concern (above).
 HiddenServicePoWDefensesEnabled 1
 ```
 
-4. Reload nginx and Tor, then read the onion hostname:
+4. Restart the proxy (its admin API is disabled), reload Tor, then read the
+   onion hostname:
 
 ```sh
-sudo systemctl reload nginx
+sudo systemctl restart caddy
 sudo systemctl reload tor
 sudo cat /var/lib/tor/recoverbull/hostname
 ```
@@ -381,13 +355,13 @@ The file holds the database path and the canary: keep it readable by the
 service account only (`chmod 600 .env`, same `0700` directory discipline as
 the database volume).
 
-`CANARY` is the warrant canary served by `/info`. When it is provided by
-this file (the common case), `/info` re-reads the file on every request,
-following the whitepaper's warrant-canary workflow without a restart. Reads
-are serialized to protect Tokio's bounded blocking pool; selected reverse-proxy
-and Tor limits remain necessary:
+`CANARY` is the warrant canary served by `/info`. When it is provided by this
+file (the common case), `/info` re-reads the file at most once every ten
+minutes, following the whitepaper's warrant-canary workflow without a restart.
+The read is a small synchronous operation and needs neither a semaphore nor a
+blocking worker; reverse-proxy and Tor limits remain necessary:
 
-- **Edit the value** → the new value is served immediately.
+- **Edit the value** → the new value is served within ten minutes.
 - **Remove the `CANARY` line** → an **empty** canary is served: this is the
   compromise signal clients watch for, and it is never masked by a fallback.
 - **File missing or unreadable** (ops error) → the startup value is served,
@@ -421,8 +395,8 @@ request has a new identifier and a maximum-size secret, SQLite grows by about
 43 to 86 MB/day, depending on page and index overhead.
 `RATE_LIMIT_MAX_ATTEMPTS` is the canonical configuration name for the
 per-identifier `secret_id` budget. Every distinct `secret_id` consumes it,
-including database hits and misses; replay requests consume no new slot
-slot. If the canonical variable is absent, the server accepts
+including database hits and misses; replay requests consume no new slot.
+If the canonical variable is absent, the server accepts
 `RATE_LIMIT_MAX_FAILED_ATTEMPTS` as a deprecated legacy alias and logs a
 warning; when both are present, the canonical variable wins. The
 `remaining_attempts` field of `attempt_status` derives from it.

@@ -1,10 +1,10 @@
-# RecoverBull Caddy alternative
+# RecoverBull reference Caddy proxy
 
-This directory is an alternative to the reference nginx template, not an
-additional proxy. Activate exactly one of nginx or Caddy on `127.0.0.1:3000`.
+This directory defines the reference reverse proxy on `127.0.0.1:3000`.
 Caddy must be custom-built and validated before it is admitted to onion traffic.
 The audited build module is versioned in `build/`; it is the reproducible source
-of the binary, not the prose xcaddy command below.
+of the binary, not the prose xcaddy command below. The nginx file elsewhere in
+the repository is an unsupported migration aid; never activate both proxies.
 
 ## Exact build pins
 
@@ -48,22 +48,25 @@ xcaddy build v2.11.4 \
   --replace go.opentelemetry.io/otel=go.opentelemetry.io/otel@v1.44.0 \
   --replace go.opentelemetry.io/otel/metric=go.opentelemetry.io/otel/metric@v1.44.0 \
   --replace go.opentelemetry.io/otel/trace=go.opentelemetry.io/otel/trace@v1.44.0 \
-  --replace golang.org/x/net=golang.org/x/net@v0.56.0 \
-  --replace golang.org/x/text=golang.org/x/text@v0.39.0 \
+  --replace golang.org/x/net=golang.org/x/net@v0.58.0 \
+  --replace golang.org/x/text=golang.org/x/text@v0.41.0 \
   --replace golang.org/x/mod=golang.org/x/mod@v0.40.0 \
   --replace google.golang.org/grpc=google.golang.org/grpc@v1.82.1
 ```
 
 With `build-info`, confirm the Caddy v2.11.4 module hash, Go 1.26.7, the three
-pinned primary modules, and all runtime replacements above. `x/mod` is a build
-dependency and may not appear in the runtime binary's build-info; confirm it
-from the retained build module instead.
-From that retained build-module directory, run govulncheck v1.7.0 or newer in
-source and binary modes, plus OSV Scanner v2.5.1 or newer with Go call analysis.
-These are release gates, not per-PR CI checks. Any change to `build/go.mod` or
-`build/go.sum` requires fresh source, binary, and OSV audits and a new audited
-release-binary hash; a CI-built binary is not publishable merely because the
-build and smoke pass:
+pinned primary modules, and all runtime replacements above. In particular,
+`golang.org/x/net` must resolve to v0.58.0: the retained graph selects that
+version and the explicit replacement pins the same version rather than
+downgrading it. `x/mod` is a build dependency and may not appear in the runtime
+binary's build-info; confirm it from the retained build module instead.
+
+CI installs the pinned govulncheck v1.7.0 tool and scans this source graph on
+every pull request and on the daily security schedule. For a release, also run
+govulncheck in binary mode and OSV Scanner v2.5.1 or newer with Go call
+analysis. Any change to `build/go.mod` or `build/go.sum` requires fresh source,
+binary, and OSV audits and a new audited release-binary hash; a CI-built binary
+is not publishable merely because the build and smoke pass:
 
 ```sh
 govulncheck -mode=source ./...
@@ -74,8 +77,8 @@ osv-scanner scan source --call-analysis=go .
 No called vulnerability is admissible. These commands are required for each
 release audit; a past empty result does not establish that every future scan
 will be empty. The measured Go 1.26.7 build without overrides reported 10
-binary-mode findings, while the override build's source-mode scan had zero
-called vulnerabilities.
+binary-mode findings; every retained override therefore remains part of the
+release audit surface.
 
 The binary scan remains conservative for dormant `cel-go` GO-2026-6094 and
 `x/crypto` OpenPGP GO-2026-5932. Such a finding may only be resolved by
@@ -138,8 +141,8 @@ portable nftables rule; connection budgeting is host and deployment specific.
 
 ## Required smoke protocol
 
-Before switching from nginx, exercise the onion endpoint through Caddy and
-record the results:
+Before admitting onion traffic, exercise the endpoint through Caddy and record
+the results:
 
 1. Run `python3 deploy/caddy/smoke.py /path/to/caddy`. It validates the config,
    required modules and build-info pins, then verifies deterministic gzip bytes,
@@ -153,8 +156,8 @@ record the results:
    `503` retaining `Retry-After`.
 5. Confirm upstream `4xx` and `5xx` responses are not cached.
 
-This is not perfect nginx equivalence: unlike the nginx template, this
-Caddyfile has no explicit 100-connection limit and no 512 KiB/s throttle.
-Global `/attempts` limits, the bounded cache, Axum buckets, and Tor defenses
-remain necessary. Caddy is admissible only after its build, validation, and
-these smokes succeed.
+The reference Caddyfile has no native connection-count limit or per-connection
+throughput throttle. Global `/attempts` limits, the bounded cache, Axum
+buckets, Tor defenses, and an operator-managed FD/process budget are therefore
+all necessary. Caddy is admissible only after its build, validation, and these
+smokes succeed.

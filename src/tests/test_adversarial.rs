@@ -618,7 +618,7 @@ async fn test_trash_does_not_reset_the_counter() {
         .expect_success()
         .await;
 
-    // The row is gone and the deletion's slot stays consumed. The tag that
+    // The row is gone and the deletion's slot stays consumed. The `secret_id` that
     // authenticated the deletion is forgotten, so presenting it again is a
     // new secret_id: the counter grows to 2 exactly as for any other PIN,
     // and never drops back.

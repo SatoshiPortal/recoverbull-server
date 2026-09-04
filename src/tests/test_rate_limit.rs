@@ -17,7 +17,7 @@ async fn test_global_wipe_clears_secret_ids_resets_timestamp_and_snapshot() {
         let mut map = state.attempts.ledger.lock_for_test().await;
         let mut info = RateLimitInfo::new(chrono::Utc::now());
         info.secret_ids
-            .insert("secret_id-tag".to_owned(), SecretIdState::Committed);
+            .insert("example-secret-id".to_owned(), SecretIdState::Committed);
         map.insert(SHA256_111111.to_owned(), info);
     }
     crate::attempts::maintenance::wipe_identifier_rate_limit(

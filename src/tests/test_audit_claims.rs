@@ -283,25 +283,12 @@ async fn test_audit_f12_hex_case_is_canonicalized() {
 }
 
 /// The public `/attempts` representation does not depend on Host or query
-/// parameters. Both supported reverse proxies must therefore collapse such
-/// attacker-controlled variants into one cache entry. Caddy has an executable
-/// smoke for the resulting one-upstream-call property; this source-level guard
-/// prevents either maintained config from silently dropping the key controls.
+/// parameters. The reference Caddy proxy must therefore collapse every
+/// attacker-controlled variant into one cache entry. Its executable smoke
+/// proves the resulting one-upstream-call property; this source-level guard
+/// prevents the reference config from silently dropping the key controls.
 #[test]
-fn test_attempts_proxy_cache_keys_ignore_host_and_query_variants() {
-    let nginx = include_str!("../../deploy/nginx/recoverbull.conf");
-    let attempts_location = nginx_block(nginx, "location = /attempts {");
-    let cache_keys: Vec<_> = attempts_location
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.starts_with('#') && line.starts_with("proxy_cache_key "))
-        .collect();
-    assert_eq!(
-        cache_keys,
-        ["proxy_cache_key $scheme$proxy_host$uri;"],
-        "nginx /attempts must have exactly one query-independent cache key"
-    );
-
+fn test_reference_caddy_cache_key_ignores_request_variants() {
     let caddy = include_str!("../../deploy/caddy/Caddyfile");
     let attempts_route = caddy
         .split_once("route @attempts {")
@@ -326,28 +313,4 @@ fn test_attempts_proxy_cache_keys_ignore_host_and_query_variants() {
             && caddy_smoke.contains("Backend.calls.get(\"/attempts\", 0) - attempts_before == 1"),
         "Caddy smoke must prove Host/query variants make one backend call"
     );
-}
-
-/// Returns the body of the first nginx block opened by `header`, by brace
-/// depth rather than by indentation, so reformatting the template cannot
-/// silently truncate what the guard above inspects.
-fn nginx_block<'a>(config: &'a str, header: &str) -> &'a str {
-    let body = config
-        .split_once(header)
-        .unwrap_or_else(|| panic!("nginx must define `{header}`"))
-        .1;
-    let mut depth = 1usize;
-    for (offset, byte) in body.bytes().enumerate() {
-        match byte {
-            b'{' => depth += 1,
-            b'}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return &body[..offset];
-                }
-            }
-            _ => {}
-        }
-    }
-    panic!("nginx block `{header}` is not closed");
 }

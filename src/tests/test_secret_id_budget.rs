@@ -467,7 +467,7 @@ async fn test_committed_trash_race_returns_accepted_and_unauthorized_without_fai
 
 /// After a successful `/trash`, the secret_id that authenticated the deletion
 /// must be indistinguishable from any other secret_id: same status, same
-/// counters. Keeping its tag recognizable made its replay free (`attempts`
+/// counters. Keeping its `secret_id` recognizable made its replay free (`attempts`
 /// unchanged) while a different PIN consumed a slot (`attempts` + 1), which
 /// told a Backup File holder which PIN had been used for the deletion.
 #[tokio::test]
@@ -549,7 +549,7 @@ async fn test_trash_of_a_fetched_secret_id_forgets_it_without_refunding_the_slot
         trashed.json::<serde_json::Value>()["attempt_status"]["total_attempts"],
         1
     );
-    // the detached worker forgets the tag after the response; wait for it
+    // the detached worker forgets the `secret_id` after the response; wait for it
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         loop {
             let forgotten = state
@@ -566,7 +566,7 @@ async fn test_trash_of_a_fetched_secret_id_forgets_it_without_refunding_the_slot
         }
     })
     .await
-    .expect("the deleted secret_id's tag must be forgotten");
+    .expect("the deleted secret_id must be forgotten");
 
     let response = server
         .post("/fetch")
@@ -618,13 +618,13 @@ async fn test_forgotten_slots_count_toward_saturation_and_survive_refunds() {
         .expect("entry")
         .secret_ids
         .insert(
-            "pending-tag".to_owned(),
+            "pending-secret-id".to_owned(),
             crate::attempts::ledger::SecretIdState::Pending,
         );
     state
         .attempts
         .ledger
-        .refund(&id_hash, "pending-tag", generation)
+        .refund(&id_hash, "pending-secret-id", generation)
         .await;
     let info = state
         .attempts
@@ -670,7 +670,7 @@ async fn test_forgotten_slots_count_toward_saturation_and_survive_refunds() {
     );
 }
 
-/// A late replayed `/trash` from an old window must not forget a tag in the
+/// A late replayed `/trash` from an old window must not forget a `secret_id` in the
 /// window that replaced it.
 #[tokio::test]
 async fn test_old_replay_forget_cannot_touch_a_replaced_window() {
@@ -682,7 +682,7 @@ async fn test_old_replay_forget_cannot_touch_a_replaced_window() {
         let mut map = state.attempts.ledger.lock_for_test().await;
         let mut info = RateLimitInfo::new(fresh_at);
         info.secret_ids.insert(
-            "committed-tag".to_owned(),
+            "committed-secret-id".to_owned(),
             crate::attempts::ledger::SecretIdState::Committed,
         );
         map.insert(id_hash.clone(), info);
@@ -691,7 +691,7 @@ async fn test_old_replay_forget_cannot_touch_a_replaced_window() {
     state
         .attempts
         .ledger
-        .forget_committed(&id_hash, "committed-tag", stale_generation)
+        .forget_committed(&id_hash, "committed-secret-id", stale_generation)
         .await;
     let info = state
         .attempts
@@ -711,7 +711,7 @@ async fn test_old_replay_forget_cannot_touch_a_replaced_window() {
     state
         .attempts
         .ledger
-        .forget_committed(&id_hash, "committed-tag", fresh_at)
+        .forget_committed(&id_hash, "committed-secret-id", fresh_at)
         .await;
     let info = state
         .attempts

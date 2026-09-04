@@ -119,6 +119,14 @@ def main():
         "github.com/caddyserver/cache-handler\tv0.16.0",
         "github.com/darkweak/storages/otter/caddy\tv0.0.15",
         "github.com/mholt/caddy-ratelimit\tv0.1.1-0.20260612195517-5625512f24f6",
+        "github.com/go-chi/chi/v5\tv5.3.0",
+        "github.com/klauspost/compress\tv1.18.7",
+        "go.opentelemetry.io/otel\tv1.44.0",
+        "go.opentelemetry.io/otel/metric\tv1.44.0",
+        "go.opentelemetry.io/otel/trace\tv1.44.0",
+        "golang.org/x/net\tv0.58.0",
+        "golang.org/x/text\tv0.41.0",
+        "google.golang.org/grpc\tv1.82.1",
     ):
         assert_true(pin in build_info, f"build-info missing pin: {pin}")
 

@@ -100,6 +100,15 @@ jobs:
       - name: Verify Caddy module checksums
         working-directory: deploy/caddy/build
         run: go mod download && go mod verify
+      - name: Scan Caddy module for known vulnerabilities
+        working-directory: deploy/caddy/build
+        # The reverse proxy has the larger dependency tree of the two
+        # languages; the Rust side is gated daily by cargo audit, and this is
+        # its equivalent. It also gates the deliberate golang.org/x/net pin
+        # documented in go.mod.
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
+          GOFLAGS=-mod=readonly "$(go env GOPATH)/bin/govulncheck" -mode=source ./...
       - name: Build audited Caddy module
         working-directory: deploy/caddy/build
         run: go build -mod=readonly -trimpath -o "$RUNNER_TEMP/caddy"

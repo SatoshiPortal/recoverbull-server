@@ -346,7 +346,7 @@ impl RecoveryService {
     /// Runs the storage operation for an admitted secret_id. `reservation` is
     /// `Some` for a new secret_id and `None` for a committed replay; the
     /// generation is carried in both cases so that a replayed `/trash` can
-    /// forget its tag without touching a replacement window.
+    /// forget its `secret_id` without touching a replacement window.
     #[allow(clippy::too_many_arguments)]
     async fn run_lookup(
         &self,
@@ -399,7 +399,7 @@ impl RecoveryService {
                     .finalize(&task_id_hash, &task_secret_id, generation, outcome)
                     .await;
             } else if outcome == LookupOutcome::Deleted {
-                // A committed replay that deleted the row: the tag must not
+                // A committed replay that deleted the row: the `secret_id` must not
                 // stay recognizable after the deletion it authenticated.
                 task_ledger
                     .forget_committed(&task_id_hash, &task_secret_id, generation)

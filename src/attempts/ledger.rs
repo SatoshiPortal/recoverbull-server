@@ -1,10 +1,9 @@
 //! Admission of derived `secret_id` values, reservation ownership, and the
 //! Pending/Committed state machine.
 //!
-//! A `secret_id` is what the specification calls a *candidate*: the value
+//! A `secret_id` is the value
 //! `SHA256(lowerhex(identifier) || lowerhex(authentication_key))` a client
-//! presents to `/fetch` or `/trash`. This module speaks of `secret_id`
-//! throughout, because in this server the two words name one thing.
+//! presents to `/fetch` or `/trash`.
 
 use super::AttemptStatus;
 use chrono::{DateTime, TimeDelta, Utc};
@@ -117,7 +116,7 @@ pub(crate) enum LookupOutcome {
     /// The row exists and was read.
     Hit,
     /// The row existed and was deleted: the secret_id is committed as a
-    /// consumed slot but its tag is forgotten (see `forgotten_slots`).
+    /// consumed slot but its `secret_id` is forgotten (see `forgotten_slots`).
     Deleted,
     Miss,
     Error,
@@ -249,7 +248,7 @@ impl AttemptsLedgerState {
                     false
                 }
                 LookupOutcome::Deleted => {
-                    forget_tag(info, secret_id);
+                    forget_secret_id(info, secret_id);
                     false
                 }
                 LookupOutcome::Error => {
@@ -263,7 +262,7 @@ impl AttemptsLedgerState {
         }
     }
 
-    /// Forgets the tag of a `Committed` secret_id whose replay deleted the
+    /// Forgets a `Committed` `secret_id` whose replay deleted the
     /// row, only in the same generation. The slot stays consumed. A replay
     /// carries no reservation, so this is the only ledger transition a
     /// replayed `/trash` performs; the generation check keeps a late worker
@@ -283,7 +282,7 @@ impl AttemptsLedgerState {
         {
             return;
         }
-        forget_tag(info, secret_id);
+        forget_secret_id(info, secret_id);
     }
 
     /// Removes a still-pending secret_id only when its generation matches.
@@ -405,7 +404,7 @@ fn remove_pending(
 }
 
 /// Converts a recognizable secret_id into a consumed, unrecognizable slot.
-fn forget_tag(info: &mut RateLimitInfo, secret_id: &str) {
+fn forget_secret_id(info: &mut RateLimitInfo, secret_id: &str) {
     if info.secret_ids.remove(secret_id).is_some() {
         info.forgotten_slots = info.forgotten_slots.saturating_add(1);
     }

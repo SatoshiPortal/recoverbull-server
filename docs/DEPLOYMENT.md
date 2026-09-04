@@ -6,8 +6,8 @@ This repository contains templates for one service instance:
 * user/group: `recoverbull:recoverbull`
 * working and data directory: `/var/lib/recoverbull`
 * dotenv: `/var/lib/recoverbull/.env` (read from the working directory)
-* Axum: `127.0.0.1:3001` → reference nginx (or the conditional Caddy
-  alternative): `127.0.0.1:3000` → Tor onion service
+* Axum: `127.0.0.1:3001` → reference Caddy:
+  `127.0.0.1:3000` → Tor onion service
 
 The model requires strict single-instance operation. The binary does not
 enforce that requirement, and only warns when bound publicly. Stop the old
@@ -75,9 +75,10 @@ LogRateLimitBurst=200
 Never run a live service with `RUST_LOG=trace`: Axum traces extractor
 rejections at that level with a message derived from the request body. The
 reference `RUST_LOG` is `info`. Reverse-proxy and Tor logs are not covered by
-the application's log guarantees; `deploy/logrotate/recoverbull` is the
-reference rotation policy for the proxy error log, and
-[docs/RETENTION.md](RETENTION.md) governs retention.
+the application's log guarantees. The reference Caddy proxy sends its error
+log to journald; configure its service's journald retention explicitly.
+`deploy/logrotate/recoverbull` belongs only to the unsupported nginx migration
+aid. [docs/RETENTION.md](RETENTION.md) governs retention.
 
 ## Reproducible installation
 
@@ -101,22 +102,26 @@ path, loopback address, canary, cooldown, and `secret_id` budget; this document
 does not provide example secrets or canary values. Keep the SQLite database,
 WAL, and any Litestream state below `/var/lib/recoverbull`.
 
-Install the maintained application, Tor, and logging templates without changing
-their concrete paths. Nginx is the default runbook path; choose exactly one
-reverse proxy and never install/start both listeners:
+Install the maintained application and Tor templates without changing their
+concrete paths:
 
 ```sh
 sudo install -o root -g root -m 0644 deploy/systemd/recoverbull.service /etc/systemd/system/recoverbull.service
-sudo install -o root -g root -m 0644 deploy/nginx/recoverbull.conf /etc/nginx/conf.d/recoverbull.conf
 sudo install -o root -g root -m 0644 deploy/tor/recoverbull.torrc.example /etc/tor/conf.d/recoverbull.conf
-sudo install -o root -g root -m 0644 deploy/logrotate/recoverbull /etc/logrotate.d/recoverbull
 ```
 
-To choose Caddy instead, do not install the nginx template. Follow
-[deploy/caddy/README.md](../deploy/caddy/README.md) for the pinned custom build,
-atomic binary/config installation, service ownership, and Caddy validation; the
-repository does not provide a versioned Caddy systemd unit. Caddy is admissible
-only after those checks and its required HTTP smokes pass.
+Follow [deploy/caddy/README.md](../deploy/caddy/README.md) for the pinned custom
+build, vulnerability gates, atomic binary/config installation, service
+ownership, and validation. The repository does not provide a versioned Caddy
+systemd unit, so the operator must provide one whose error output goes to
+journald. Caddy is admissible only after the documented checks and HTTP smokes
+pass.
+
+`deploy/nginx/recoverbull.conf` and `deploy/logrotate/recoverbull` are
+unsupported migration aids for operators who already run nginx. They have no
+executable smoke or CI coverage. An operator retaining them owns validation,
+upgrades, and any divergence from the reference Caddy behavior. Never install
+or start both listeners.
 
 The Tor service account must be able to create and read
 `/var/lib/tor/recoverbull/`; do not copy its private hostname keys into this
@@ -128,17 +133,15 @@ service:
 
 ```sh
 sudo systemd-analyze verify /etc/systemd/system/recoverbull.service
-sudo nginx -t
+/path/to/caddy adapt --config /path/to/Caddyfile --adapter caddyfile --validate
+/path/to/caddy validate --config /path/to/Caddyfile --adapter caddyfile
+python3 deploy/caddy/smoke.py /path/to/caddy
 sudo -u debian-tor tor --verify-config -f /etc/tor/conf.d/recoverbull.conf
 ```
 
-For the exclusive Caddy choice, replace `nginx -t` with the `adapt --validate`
-and `validate` commands in the Caddy README. Do not start either proxy until
-its validation succeeds.
-
 If the Tor account is named differently, use that account. `systemd-analyze`
-can validate the unit without starting it; nginx and Tor validation may need
-root or their service account because the configured directories are private.
+can validate the unit without starting it; Caddy and Tor validation may need
+their service accounts because the configured directories are private.
 The unit's `ProtectSystem=full` leaves the system tree protected while
 `ReadWritePaths=/var/lib/recoverbull` permits SQLite's database and WAL. Its
 address-family restriction permits loopback TCP and Unix sockets, not public
@@ -148,16 +151,16 @@ Start in dependency order and smoke-test each boundary:
 
 ```sh
 sudo systemctl daemon-reload
-sudo systemctl enable recoverbull nginx tor
+sudo systemctl enable recoverbull caddy tor
 sudo systemctl start recoverbull
-sudo systemctl start nginx
+sudo systemctl start caddy
 sudo systemctl start tor
 curl --fail http://127.0.0.1:3000/info
 curl --fail --compressed http://127.0.0.1:3000/attempts
 ```
 
-For Caddy, enable/start the operator-provided Caddy service instead of nginx,
-using the start/stop procedure in `deploy/caddy/README.md`; never run both.
+Here `caddy` is the operator-provided service described in its README; substitute
+its actual unit name if different.
 
 Run store/fetch/trash with a test fixture appropriate to the environment, then
 verify the canary and inspect `systemctl status` and restricted logs before

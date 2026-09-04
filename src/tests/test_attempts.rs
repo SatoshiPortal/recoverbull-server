@@ -522,11 +522,11 @@ async fn test_snapshot_is_independent_of_secret_ids() {
 
     let id_hash = crate::recovery::identifiers::identifier_hash(SHA256_111111).unwrap();
     let now = chrono::Utc::now();
-    let seed = |tag_prefix: &'static str| {
+    let seed = |secret_id_prefix: &'static str| {
         let mut info = RateLimitInfo::new(now);
         for index in 0..3u8 {
             info.secret_ids.insert(
-                sha256_hex(format!("{tag_prefix}-{index}").as_bytes()),
+                sha256_hex(format!("{secret_id_prefix}-{index}").as_bytes()),
                 crate::attempts::ledger::SecretIdState::Committed,
             );
         }
@@ -551,7 +551,7 @@ async fn test_snapshot_is_independent_of_secret_ids() {
         assert_eq!(
             existing.consumed_slots(),
             replacement.consumed_slots(),
-            "the two tag sets must present the same counters"
+            "the two secret_id sets must present the same counters"
         );
         existing.secret_ids = replacement.secret_ids;
     }
@@ -568,13 +568,13 @@ async fn test_snapshot_is_independent_of_secret_ids() {
         "replacing every SecretId must not change the published bytes"
     );
 
-    // and no tag from either set appears in the payload
+    // and no secret_id from either set appears in the payload
     let (body, snapshot) = decode_gzip(second.as_bytes());
-    for tag_prefix in ["first-secret_id-set", "totally-different-secret_id-set"] {
+    for secret_id_prefix in ["first-secret_id-set", "totally-different-secret_id-set"] {
         for index in 0..3u8 {
-            let tag = sha256_hex(format!("{tag_prefix}-{index}").as_bytes());
+            let secret_id = sha256_hex(format!("{secret_id_prefix}-{index}").as_bytes());
             assert!(
-                !body.contains(&tag),
+                !body.contains(&secret_id),
                 "a SecretId must never appear in the snapshot"
             );
         }

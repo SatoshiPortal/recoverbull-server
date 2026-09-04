@@ -87,6 +87,12 @@ def main() -> None:
         naive = root / "naive.sqlite3"
         permissive = root / "permissive"
         source.touch()
+        # AUD-05: check-database refuses an uninitialized file rather than
+        # creating the schema in it and reporting the empty file as valid.
+        run_database_check(binary, source, expected=1)
+        with sqlite3.connect(source) as connection:
+            connection.executescript(SCHEMA.read_text(encoding="utf-8"))
+            create_diesel_ledger(connection)
         run_database_check(binary, source)
         with sqlite3.connect(source) as connection:
             connection.execute("PRAGMA journal_mode=WAL")
@@ -108,6 +114,9 @@ def main() -> None:
 
         replace_destination = root / "replace.sqlite3"
         replace_destination.touch()
+        with sqlite3.connect(replace_destination) as connection:
+            connection.executescript(SCHEMA.read_text(encoding="utf-8"))
+            create_diesel_ledger(connection)
         run_database_check(binary, replace_destination)
         with sqlite3.connect(replace_destination) as connection:
             connection.execute("PRAGMA journal_mode=WAL")

@@ -120,7 +120,7 @@ fn database_check_command(mut arguments: impl Iterator<Item = std::ffi::OsString
         eprintln!("database check failed: path is not valid UTF-8");
         return Some(1);
     };
-    match crate::storage::sqlite::initialize_database(database_url.to_owned()) {
+    match crate::storage::sqlite::check_database(database_url.to_owned()) {
         Ok(()) => {
             println!("database check: ok");
             Some(0)

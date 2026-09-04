@@ -314,17 +314,33 @@ fn test_example_nginx_preserves_attempts_proxy_contract() {
         "proxy_request_buffering off;",
         "error_page 503 = @recoverbull_shared_pressure;",
         "add_header Retry-After 1 always;",
+        // AUD-09: the rate/connection limits must count per Tor circuit, not
+        // once for all onion clients that share the 127.0.0.1 forwarder.
+        "listen 127.0.0.1:3000 proxy_protocol;",
+        "set_real_ip_from 127.0.0.1;",
+        "real_ip_header proxy_protocol;",
     ] {
         assert!(nginx.contains(contract), "nginx is missing {contract}");
     }
+
+    // The Tor example must export the per-circuit identifier the nginx real_ip
+    // directive consumes, or the per-circuit keying above is inert.
+    let torrc = include_str!("../../deploy/tor/recoverbull.torrc.example");
+    assert!(
+        torrc.contains("HiddenServiceExportCircuitID haproxy"),
+        "torrc example must export the per-circuit id as a PROXY header"
+    );
 
     let nginx_smoke = include_str!("../../deploy/nginx/smoke.py");
     assert!(
         nginx_smoke.contains("Backend.count(\"GET\", \"/attempts\") - before == 1")
             && nginx_smoke.contains("json.loads(body)")
             && nginx_smoke.contains("status == 304")
-            && nginx_smoke.contains("Backend.slow_body_started.wait(timeout=5)"),
-        "nginx smoke must prove body streaming, cache single-flight, edge JSON, and conditional reuse"
+            && nginx_smoke.contains("Backend.slow_body_started.wait(timeout=5)")
+            && nginx_smoke.contains("assert_per_circuit_isolation")
+            && nginx_smoke.contains("PROXY TCP4"),
+        "nginx smoke must prove body streaming, cache single-flight, edge JSON, conditional reuse, \
+         and per-circuit rate-limit isolation"
     );
 }
 
@@ -348,10 +364,27 @@ fn test_repository_ignores_sqlite_sidecars() {
 #[test]
 fn test_systemd_example_drops_capabilities_and_privatises_devices() {
     let systemd = include_str!("../../deploy/systemd/recoverbull.service");
-    for control in ["CapabilityBoundingSet=", "PrivateDevices=true"] {
+    for control in [
+        "CapabilityBoundingSet=",
+        "PrivateDevices=true",
+        // AUD-10 hardening. PrivateNetwork is intentionally absent: the process
+        // must stay reachable on loopback by the reverse proxy.
+        "ProtectSystem=strict",
+        "RestrictNamespaces=true",
+        "ProtectKernelModules=true",
+        "ProtectKernelTunables=true",
+        "MemoryDenyWriteExecute=true",
+        "SystemCallArchitectures=native",
+        "SystemCallFilter=@system-service",
+        "IPAddressDeny=any",
+    ] {
         assert!(
             systemd.lines().any(|line| line == control),
             "systemd example is missing {control}"
         );
     }
+    assert!(
+        !systemd.lines().any(|line| line == "PrivateNetwork=true"),
+        "PrivateNetwork must not be set: it would cut the loopback path to the proxy"
+    );
 }

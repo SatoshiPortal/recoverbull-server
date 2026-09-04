@@ -119,6 +119,28 @@ impl SqliteStorage {
     }
 }
 
+/// Validates an already-initialized database for the restore drill.
+///
+/// A restore drill points `keychain check-database` at a RESTORED copy, which
+/// already carries the schema of the live database it was backed up from. An
+/// empty or truncated file has no `secret` table; letting the shared
+/// initialization create one would report a brand-new or damaged file as a
+/// valid backup (AUD-05). This path therefore refuses an uninitialized file
+/// before any migration runs, so the check can only ever validate a real
+/// database and never manufacture one. It still runs the full startup
+/// initialization afterwards (idempotent migrations, schema postcondition, WAL
+/// setup) on the restored copy, as the drill documents.
+pub(crate) fn check_database(database_url: String) -> Result<(), ConnectionSetupError> {
+    let mut probe = establish_connection_without_wal_check(database_url.clone())?;
+    let initialized =
+        table_exists(&mut probe, "secret").map_err(|_| ConnectionSetupError::Migration)?;
+    drop(probe);
+    if !initialized {
+        return Err(ConnectionSetupError::Uninitialized);
+    }
+    initialize_database(database_url)
+}
+
 /// Applies the exact database initialization used by server startup.
 ///
 /// The restore drill invokes this through `keychain check-database` on the
@@ -209,6 +231,10 @@ pub enum ConnectionSetupError {
     SecureDeleteVerification,
     Wal,
     Migration,
+    /// The `check-database` restore-drill target has no `secret` table, so it
+    /// is not an initialized database. Only the check path returns this: normal
+    /// startup deliberately creates the schema on a fresh `DATABASE_URL`.
+    Uninitialized,
 }
 
 #[derive(QueryableByName)]

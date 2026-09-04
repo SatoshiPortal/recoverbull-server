@@ -4,3 +4,11 @@ HiddenServiceDir /var/lib/tor/recoverbull/
 HiddenServicePort 80 127.0.0.1:3000
 HiddenServiceEnableIntroDoSDefense 1
 HiddenServicePoWDefensesEnabled 1
+# Tor >= 0.4.4. Prepend a HAProxy PROXY-protocol header to each forwarded
+# connection, carrying a stable per-rendezvous-circuit identifier as the
+# source address. The nginx example consumes it (listen ... proxy_protocol;
+# real_ip_header proxy_protocol) so its rate and connection limits count per
+# circuit instead of once for all clients that share the 127.0.0.1 forwarder.
+# Without this, an onion client cannot be told apart from any other and one
+# attacker at a few requests per second denies the service to everyone.
+HiddenServiceExportCircuitID haproxy

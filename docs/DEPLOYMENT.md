@@ -148,9 +148,13 @@ sudo -u debian-tor tor --verify-config -f /etc/tor/conf.d/recoverbull.conf
 If the Tor account is named differently, use that account. `systemd-analyze`
 can validate the unit without starting it; nginx and Tor validation may need
 their service accounts because the configured directories are private.
-The unit's `ProtectSystem=full` leaves the system tree protected while
-`ReadWritePaths=/var/lib/recoverbull` permits SQLite's database and WAL. It
-drops every capability and exposes only systemd's private minimal device set;
+The unit's `ProtectSystem=strict` leaves the whole file tree read-only except
+`ReadWritePaths=/var/lib/recoverbull`, which permits SQLite's database and WAL.
+It drops every capability, filters system calls to `@system-service`, restricts
+namespaces, protects kernel tunables/modules/logs, and allows only loopback IP
+traffic (`IPAddressDeny=any` with `localhost`); `PrivateNetwork` is deliberately
+not set because the process must remain reachable on loopback by the proxy. It
+exposes only systemd's private minimal device set;
 operators must preserve those controls unless an installed dependency has a
 tested, documented requirement. Its address-family restriction permits
 loopback TCP and Unix sockets, not public exposure policy; the binary's

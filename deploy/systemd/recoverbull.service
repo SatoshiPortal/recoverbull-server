@@ -16,7 +16,6 @@ TimeoutStopSec=40s
 LimitCORE=0
 UMask=0077
 MemoryMax=512M
-ProtectSystem=full
 ProtectHome=true
 PrivateTmp=true
 NoNewPrivileges=true
@@ -24,6 +23,33 @@ CapabilityBoundingSet=
 PrivateDevices=true
 ReadWritePaths=/var/lib/recoverbull
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# Hardening (AUD-10). These raise the systemd-analyze exposure score and are
+# safe for this process (loopback TCP to the reverse proxy, SQLite/WAL on the
+# ReadWritePaths volume, a plain multi-thread Tokio runtime). PrivateNetwork is
+# deliberately NOT set: the process must remain reachable on loopback by the
+# proxy. Validate each directive against the installed build before relying on
+# it, as deploy/README.md requires.
+ProtectSystem=strict
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RemoveIPC=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+# Enforce the loopback-only model the binary can only warn about.
+IPAddressAllow=localhost
+IPAddressDeny=any
 
 [Install]
 WantedBy=multi-user.target

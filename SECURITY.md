@@ -345,6 +345,60 @@ Operators are responsible for retention of those copies.
     forgets its `secret_id`. Closing it would require serializing or uniformizing all
     lookups of one identifier, at a real availability and griefing cost; the
     stable post-deletion oracle is closed instead (transition table above).
+17. **Public `/attempts` timestamp precision is the snapshot TTL, not the
+    hour.** Every published timestamp is hour-truncated, but the snapshot is
+    rebuilt every `ATTEMPTS_SNAPSHOT_TTL_SECONDS` (60 s by default) and lists
+    every active entry with an exact `total_requests`. A persistent public
+    poller that diffs consecutive snapshots therefore learns when an entry
+    first appeared, and each request against it, to within one TTL. The hour
+    truncation only blunts a single snapshot read; it does not hide activity
+    from a continuous observer. This is accepted: detection latency is the
+    point of the endpoint, so a delay long enough to defeat diffing would
+    defeat the feature. Operators who want coarser public timing raise the TTL,
+    trading detection latency for it. A Backup File holder already gets exact
+    times through `429`/`attempt_status`, and the server operator sees exact
+    times regardless.
+18. **A pre-planted `/store` row silently wins.** `/store` is idempotent and
+    answers `201` whether or not the `secret_id` already exists (the F1 oracle
+    fix, which must stay). The residual is that the first writer of a
+    `secret_id` owns the row forever: an attacker who learns an identifier and
+    can enumerate the PIN space can pre-plant rows, and the victim's later
+    `/store` under the same identifier and PIN is acknowledged with `201`
+    while writing nothing, so recovery returns the attacker's bytes and the
+    HMAC fails. The normal Profile 1 flow does not expose this — the whitepaper
+    stores on the Key Server before uploading the Backup File, so a fresh
+    identifier never leaks first — so it requires identifier reuse (a PIN
+    change or re-backup keeping `id`/`salt`, or an upload-before-store retry).
+    The server cannot close it without reopening the F1 oracle; the mitigation
+    is a client/specification rule: **generate a fresh `identifier` (and
+    `salt`) for every `/store`, and verify a store with one `/fetch` and a
+    ciphertext comparison before declaring the backup complete.**
+19. **A lost `/trash` `202` turns the owner's retry into a consumed guess.**
+    Because the deleting `secret_id` is forgotten (invariant below), if the
+    `202` is lost in transit the owner's natural retry with the correct PIN is
+    a new `secret_id`: it consumes a slot, misses, and increments
+    `failed_attempts`, indistinguishable from a wrong guess. This is the cost
+    of closing the post-deletion PIN oracle. Client rule: treat a `401` after
+    a `/trash` whose response was lost as "possibly already deleted", and do
+    not retry a `/trash` more than once.
+
+## Deployment: per-circuit rate limiting (AUD-09)
+
+Behind a Tor onion service every client reaches the proxy from `127.0.0.1`, so
+a proxy that keys its rate and connection limits on the source address gives
+the entire world one shared bucket: one attacker at a few requests per second
+denies `/attempts`, `/fetch`, and `/trash` to every client, and legitimate
+polling at scale trips the same limit. The reference deployment closes this by
+carrying Tor's per-rendezvous-circuit identifier to nginx as a HAProxy
+PROXY-protocol header (`HiddenServiceExportCircuitID haproxy`, Tor ≥ 0.4.4) and
+letting nginx rewrite `$binary_remote_addr` to it (`listen … proxy_protocol`,
+`real_ip_header proxy_protocol`, `set_real_ip_from 127.0.0.1`). The limits then
+count per circuit, and opening many circuits is what
+`HiddenServicePoWDefensesEnabled` prices. The nginx example, its CI smoke
+(`assert_per_circuit_isolation`), and the torrc example carry this; an operator
+whose Tor build predates 0.4.4, or who omits the export, falls back to the
+shared-bucket behaviour and must treat the global `/attempts` rate and the
+connection cap as accepted denial-of-service ceilings.
 
 ## Invariants (each guarded by tests)
 

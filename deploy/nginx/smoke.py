@@ -103,8 +103,27 @@ class Backend(BaseHTTPRequestHandler):
         pass
 
 
-def request(path, headers=None, method="GET", body=None, timeout=40):
-    connection = http.client.HTTPConnection("127.0.0.1", 3000, timeout=timeout)
+# The nginx example now expects a PROXY-protocol header (Tor supplies it via
+# HiddenServiceExportCircuitID). The source address becomes the per-circuit
+# key for limit_req/limit_conn; distinct sources therefore get independent
+# budgets, which the isolation test below exercises.
+DEFAULT_SOURCE = "10.200.0.1"
+
+
+class _ProxyConnection(http.client.HTTPConnection):
+    def __init__(self, *args, source=DEFAULT_SOURCE, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._source = source
+
+    def connect(self):
+        super().connect()
+        self.sock.sendall(
+            f"PROXY TCP4 {self._source} 127.0.0.1 40000 3000\r\n".encode()
+        )
+
+
+def request(path, headers=None, method="GET", body=None, timeout=40, source=DEFAULT_SOURCE):
+    connection = _ProxyConnection("127.0.0.1", 3000, timeout=timeout, source=source)
     connection.request(method, path, body=body, headers=headers or {})
     response = connection.getresponse()
     result = (
@@ -125,6 +144,7 @@ def assert_request_body_is_streamed():
     Backend.slow_body_started.clear()
     with socket.create_connection(("127.0.0.1", 3000), timeout=5) as connection:
         connection.sendall(
+            b"PROXY TCP4 10.200.0.1 127.0.0.1 40000 3000\r\n"
             b"POST /slow-body HTTP/1.1\r\n"
             b"Host: localhost\r\n"
             b"Content-Type: application/json\r\n"
@@ -327,6 +347,45 @@ def assert_other_routes_and_pressure():
     )
 
 
+def assert_per_circuit_isolation():
+    # AUD-09 fix: with the PROXY header carrying a per-circuit source address,
+    # limit_req/limit_conn count per circuit. A burst that trips a shared
+    # bucket for one source must all succeed when spread across circuits, and a
+    # single circuit flooding must still be limited to its own bucket.
+    time.sleep(2)  # let earlier per-default-source buckets refill
+    count = 40
+    results = []
+    result_lock = threading.Lock()
+    barrier = threading.Barrier(count)
+
+    def poll(index):
+        barrier.wait()
+        status = request(
+            f"/attempts?circuit={index}",
+            {"Host": f"c{index}.example"},
+            source=f"10.50.{(index >> 8) & 255}.{(index & 255) or 1}",
+        )[0]
+        with result_lock:
+            results.append(status)
+
+    threads = [threading.Thread(target=poll, args=(index,)) for index in range(count)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=40)
+        assert_true(not thread.is_alive(), "per-circuit request did not finish")
+    assert_true(
+        all(status == 200 for status in results),
+        f"distinct per-circuit sources must not share a bucket: {sorted(set(results))}",
+    )
+
+    flood = [request(f"/attempts?flood={k}", source="10.99.99.99")[0] for k in range(60)]
+    assert_true(
+        503 in flood,
+        "a single circuit flooding must still trip its own limit_req bucket",
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=Path, help="nginx binary to validate and run")
@@ -385,10 +444,12 @@ def main():
             assert_statuses_are_not_cached()
             assert_single_flight_cache()
             assert_other_routes_and_pressure()
+            assert_per_circuit_isolation()
             passed = True
             print(
                 "nginx smoke passed: syntax, methods, cache single-flight, "
-                "normalization, gzip/304, body streaming/limit, and status contract"
+                "normalization, gzip/304, body streaming/limit, status contract, "
+                "and per-circuit rate-limit isolation"
             )
         finally:
             backend.shutdown()

@@ -64,6 +64,18 @@ Log volume control belongs to the log daemon (see
 - created_at: `DateTime.now()`
 - value: `encrypted_secret`
 
+> **`/store` is idempotent and never overwrites.** A store for a `secret_id`
+> that already exists returns `201` and keeps the existing row, exactly like a
+> fresh store: this is deliberate, so the response cannot become an
+> `authentication_key` existence oracle. The consequence is that the **first**
+> writer of a `secret_id` owns the row. A client MUST therefore generate a
+> fresh random `identifier` (and `salt`) for every `/store` and MUST NOT
+> re-store under an identifier that has already left the device, otherwise a
+> party that learned that identifier could have pre-planted a row and the
+> real backup would be silently discarded. A client SHOULD confirm a store
+> with one `/fetch` and a ciphertext comparison before declaring the backup
+> complete.
+
 
 ### Fetch
 
@@ -108,6 +120,17 @@ Log volume control belongs to the log daemon (see
 > - `total_requests` counts every `/fetch` and `/trash` request attached to this identifier's active entry, including replays, pending duplicates, and saturation rejections. Requests rejected because the global identifier map is already full have no per-identifier entry and are not included. The global lookup bucket remains the defense against floods of identical replays.
 > - `previous_attempt_at` is the admitted attempt immediately preceding this request (`null` when this request opened the window), and `resets_at` is when the budget expires.
 > - A successful lookup never resets the counters; they expire only after the configured cooldown.
+
+> **Retrying a `/trash` whose `202` was lost.** A successful `/trash` deletes
+> the row and forgets the `secret_id` that authenticated it, so that a later
+> replay cannot reveal which PIN performed the deletion. As a result, if the
+> `202` response is lost in transit and the client retries the same request,
+> the retry is a brand-new `secret_id` that finds no row: it returns `401`,
+> consumes a slot, and counts as a `failed_attempts`. A client SHOULD treat a
+> `401` following a `/trash` whose response it never received as "possibly
+> already deleted", and MUST NOT retry a `/trash` more than once, so a lost
+> acknowledgement does not spend the identifier's budget or look like an attack
+> in its own telemetry.
 
 #### Timestamp precision by response
 
@@ -308,6 +331,12 @@ monitor file descriptors and processes for the host.
      entry and cause only one upstream call.
    - **A request rate limit on `/attempts`**, above the shared Axum bucket, so
      the cache absorbs normal reads.
+   - **Per-circuit rate and connection limits.** The rate and connection zones
+     are keyed on the PROXY-protocol source address Tor supplies per circuit
+     (`HiddenServiceExportCircuitID haproxy`), not on the shared `127.0.0.1`
+     forwarder, so one client cannot exhaust the budget for all. Without the
+     circuit export the proxy falls back to one shared bucket, an accepted DoS
+     ceiling (see SECURITY.md, AUD-09).
    - **Bounded header and body reads.** nginx stops an incomplete header after
      10 seconds and rejects an inactive body; request buffering is disabled so
      Axum sees the body immediately and bounds its total lifetime to 30 seconds.
@@ -328,6 +357,14 @@ HiddenServiceEnableIntroDoSDefense 1
 # circuits expensive under load. Neither defense covers body downloads
 # over established circuits — that remains a proxy concern (above).
 HiddenServicePoWDefensesEnabled 1
+# Tor 0.4.4+: prepend a HAProxy PROXY-protocol header carrying a stable
+# per-circuit identifier as the source address. The example nginx consumes it
+# (listen ... proxy_protocol; real_ip_header proxy_protocol) so its rate and
+# connection limits count per circuit instead of once for all clients that
+# share the 127.0.0.1 forwarder — otherwise one client at a few requests per
+# second denies the service to everyone. Without it the proxy falls back to a
+# single shared bucket, which the operator must then accept as a DoS ceiling.
+HiddenServiceExportCircuitID haproxy
 ```
 
 4. Restart the proxy (its admin API is disabled), reload Tor, then read the

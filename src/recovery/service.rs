@@ -396,7 +396,13 @@ impl RecoveryService {
             };
             if reserved {
                 task_ledger
-                    .finalize(&task_id_hash, &task_secret_id, generation, outcome)
+                    .finalize(
+                        &task_id_hash,
+                        &task_secret_id,
+                        generation,
+                        outcome,
+                        requested_at,
+                    )
                     .await;
             } else if outcome == LookupOutcome::Deleted {
                 // A committed replay that deleted the row: the `secret_id` must not

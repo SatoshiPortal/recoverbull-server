@@ -177,3 +177,37 @@ async fn initialize_fails_closed_when_the_secret_table_is_missing() {
         Err(crate::storage::sqlite::ConnectionSetupError::Migration)
     );
 }
+
+/// AUD-05: `check-database` must validate an already-initialized database and
+/// refuse to manufacture one. An empty or truncated file has no `secret`
+/// table and must be rejected before any migration runs, so a brand-new file
+/// is never reported as a valid backup.
+#[test]
+fn check_database_refuses_an_uninitialized_file() {
+    let (url, _guard) = crate::config::unique_test_database();
+    std::fs::File::create(&url).unwrap();
+    assert_eq!(
+        crate::storage::sqlite::check_database(url.clone()),
+        Err(crate::storage::sqlite::ConnectionSetupError::Uninitialized)
+    );
+    let mut connection = SqliteConnection::establish(&url).unwrap();
+    let tables = sql_query(
+        "SELECT COUNT(*) AS value FROM sqlite_master WHERE type='table' \
+         AND name IN ('secret','__diesel_schema_migrations')",
+    )
+    .get_result::<Count>(&mut connection)
+    .unwrap()
+    .value;
+    assert_eq!(
+        tables, 0,
+        "check-database must not create tables in the file it inspects"
+    );
+}
+
+/// A genuinely initialized database still passes the check.
+#[test]
+fn check_database_accepts_an_initialized_file() {
+    let (url, _guard) = crate::config::unique_test_database();
+    crate::storage::sqlite::initialize_database(url.clone()).unwrap();
+    crate::storage::sqlite::check_database(url).expect("an initialized database must pass");
+}

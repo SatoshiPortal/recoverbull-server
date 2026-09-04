@@ -725,3 +725,165 @@ async fn test_old_replay_forget_cannot_touch_a_replaced_window() {
     assert_eq!(info.forgotten_slots, 1);
     assert_eq!(info.consumed_slots(), 1);
 }
+
+/// AUD-01 regression: a reservation that is admitted and then refunded without
+/// committing (database busy, cancellation before transfer, error before
+/// commit) must consume nothing AND leave the window untouched. Before the
+/// fix, `admit` advanced `last_secret_id_at`/`last_secret_id_instant` eagerly,
+/// so a refunded request still slid `resets_at` and postponed expiry for a
+/// request that spent no budget.
+#[tokio::test]
+async fn test_refunded_reservation_does_not_slide_the_window() {
+    use crate::attempts::ledger::{Admission, AttemptsLedgerState, LookupOutcome};
+    use crate::recovery::identifiers::{generate_secret_id, identifier_hash};
+
+    let ledger = AttemptsLedgerState::new();
+    let cooldown = chrono::TimeDelta::minutes(60);
+    let (max, max_identifiers) = (3u8, 10usize);
+    let id_hash = identifier_hash(SHA256_111111).unwrap();
+    let secret_a = generate_secret_id(SHA256_111111, SHA256_222222);
+    let secret_b = generate_secret_id(SHA256_111111, &crate::tests::distinct_authentication_key(7));
+
+    // A first distinct candidate commits (miss) at t0.
+    let t0 = chrono::Utc::now();
+    let Admission::New {
+        reservation,
+        generation,
+        status: first,
+    } = ledger
+        .admit(
+            id_hash.clone(),
+            secret_a.clone(),
+            t0,
+            max,
+            max_identifiers,
+            cooldown,
+        )
+        .await
+    else {
+        panic!("first secret_id must be admitted as New");
+    };
+    reservation.transfer();
+    ledger
+        .finalize(&id_hash, &secret_a, generation, LookupOutcome::Miss, t0)
+        .await;
+    assert_eq!(first.resets_at, t0 + cooldown);
+
+    // Ten minutes later a second candidate is admitted then refunded.
+    let t1 = t0 + chrono::TimeDelta::minutes(10);
+    let Admission::New {
+        mut reservation, ..
+    } = ledger
+        .admit(
+            id_hash.clone(),
+            secret_b.clone(),
+            t1,
+            max,
+            max_identifiers,
+            cooldown,
+        )
+        .await
+    else {
+        panic!("second secret_id must be admitted as New");
+    };
+    reservation.refund().await;
+
+    // The refund returns the slot AND leaves the window at t0.
+    {
+        let map = ledger.lock_for_test().await;
+        let info = map.get(&id_hash).expect("entry survives the refund");
+        assert_eq!(info.consumed_slots(), 1, "the refund must return the slot");
+        assert!(!info.secret_ids.contains_key(&secret_b));
+        assert_eq!(
+            info.last_secret_id_at, t0,
+            "a refunded reservation must not move the window off the last committed candidate"
+        );
+    }
+
+    // The replay of the committed candidate still resets from t0, not t1.
+    let Admission::Replay { status: replay, .. } = ledger
+        .admit(id_hash, secret_a, t1, max, max_identifiers, cooldown)
+        .await
+    else {
+        panic!("secret_a is Committed and must be a Replay");
+    };
+    assert_eq!(replay.total_attempts, 1);
+    assert_eq!(
+        replay.resets_at,
+        t0 + cooldown,
+        "resets_at must not slide by a request that consumed nothing"
+    );
+}
+
+/// A committed second distinct candidate DOES move the window: the fix keeps
+/// the intended behaviour, it only stops refunded reservations from doing so.
+#[tokio::test]
+async fn test_committed_distinct_candidate_advances_the_window() {
+    use crate::attempts::ledger::{Admission, AttemptsLedgerState, LookupOutcome};
+    use crate::recovery::identifiers::{generate_secret_id, identifier_hash};
+
+    let ledger = AttemptsLedgerState::new();
+    let cooldown = chrono::TimeDelta::minutes(60);
+    let (max, max_identifiers) = (3u8, 10usize);
+    let id_hash = identifier_hash(SHA256_111111).unwrap();
+    let secret_a = generate_secret_id(SHA256_111111, SHA256_222222);
+    let secret_b = generate_secret_id(SHA256_111111, &crate::tests::distinct_authentication_key(7));
+
+    let t0 = chrono::Utc::now();
+    let Admission::New {
+        reservation,
+        generation,
+        ..
+    } = ledger
+        .admit(
+            id_hash.clone(),
+            secret_a.clone(),
+            t0,
+            max,
+            max_identifiers,
+            cooldown,
+        )
+        .await
+    else {
+        panic!("New");
+    };
+    reservation.transfer();
+    ledger
+        .finalize(&id_hash, &secret_a, generation, LookupOutcome::Miss, t0)
+        .await;
+
+    let t1 = t0 + chrono::TimeDelta::minutes(10);
+    let Admission::New {
+        reservation,
+        generation,
+        status,
+        ..
+    } = ledger
+        .admit(
+            id_hash.clone(),
+            secret_b.clone(),
+            t1,
+            max,
+            max_identifiers,
+            cooldown,
+        )
+        .await
+    else {
+        panic!("New");
+    };
+    // The just-admitted candidate already reports its own reset.
+    assert_eq!(status.resets_at, t1 + cooldown);
+    assert_eq!(status.previous_attempt_at, Some(t0));
+    reservation.transfer();
+    ledger
+        .finalize(&id_hash, &secret_b, generation, LookupOutcome::Miss, t1)
+        .await;
+
+    let map = ledger.lock_for_test().await;
+    let info = map.get(&id_hash).unwrap();
+    assert_eq!(
+        info.last_secret_id_at, t1,
+        "a committed distinct candidate must advance the window"
+    );
+    assert_eq!(info.consumed_slots(), 2);
+}

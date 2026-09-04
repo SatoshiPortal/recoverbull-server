@@ -192,19 +192,27 @@ impl AttemptsLedgerState {
         }
         match info.secret_ids.get(&secret_id).copied() {
             Some(SecretIdState::Pending) => Admission::Pending,
+            // A committed replay never moves the window; it resets from the
+            // last distinct attempt already recorded.
             Some(SecretIdState::Committed) => Admission::Replay {
-                status: attempt_status(info, max, None, cooldown),
+                status: attempt_status(info, max, None, cooldown, info.last_secret_id_at),
                 generation: info.window_started_at,
             },
             None => {
                 let previous = (info.consumed_slots() > 0).then_some(info.last_secret_id_at);
                 info.secret_ids
                     .insert(secret_id.clone(), SecretIdState::Pending);
-                info.last_secret_id_at = requested_at;
-                info.last_secret_id_instant = now;
+                // The window is deliberately NOT advanced here: a reservation
+                // that is later refunded (database busy, cancellation before
+                // transfer, or an error before commit) consumed nothing, so it
+                // must not slide `last_secret_id_at`/`resets_at` nor postpone
+                // expiry. Only `finalize` advances the window, once a distinct
+                // secret_id actually commits. The status returned now still
+                // resets from this request's own time, because a New admission
+                // that does commit resets its cooldown from itself.
                 let generation = info.window_started_at;
                 Admission::New {
-                    status: attempt_status(info, max, previous, cooldown),
+                    status: attempt_status(info, max, previous, cooldown, requested_at),
                     generation,
                     reservation: ReservationGuard::new(
                         self.clone(),
@@ -225,6 +233,7 @@ impl AttemptsLedgerState {
         secret_id: &str,
         generation: DateTime<Utc>,
         outcome: LookupOutcome,
+        requested_at: DateTime<Utc>,
     ) {
         // Generation and Pending checks prevent a late worker from changing a
         // newer cooldown window or committing a reservation twice.
@@ -245,12 +254,15 @@ impl AttemptsLedgerState {
                     if matches!(outcome, LookupOutcome::Miss) {
                         info.failed_secret_ids = info.failed_secret_ids.saturating_add(1);
                     }
+                    advance_window(info, requested_at);
                     false
                 }
                 LookupOutcome::Deleted => {
                     forget_secret_id(info, secret_id);
+                    advance_window(info, requested_at);
                     false
                 }
+                // An error commits nothing, so it must not advance the window.
                 LookupOutcome::Error => {
                     info.secret_ids.remove(secret_id);
                     is_blank(info)
@@ -370,6 +382,7 @@ fn attempt_status(
     max: u8,
     previous: Option<DateTime<Utc>>,
     cooldown: TimeDelta,
+    resets_from: DateTime<Utc>,
 ) -> AttemptStatus {
     let count = info.consumed_slots();
     AttemptStatus {
@@ -380,7 +393,22 @@ fn attempt_status(
         total_requests: info.total_requests,
         window_started_at: info.window_started_at,
         previous_attempt_at: previous,
-        resets_at: info.last_secret_id_at + cooldown,
+        // The cooldown is measured from the most recent distinct candidate.
+        // A New admission resets from its own request time; a replay resets
+        // from the last distinct candidate already recorded in the window.
+        resets_at: resets_from + cooldown,
+    }
+}
+
+/// Advances the window to a newly committed distinct secret_id, keeping
+/// `last_secret_id_at` at the latest committed candidate even when detached
+/// finalizations complete out of admission order. The monotonic twin is taken
+/// at commit time and only when the wall-clock timestamp actually moves
+/// forward, so a stale finalization never rewinds expiry.
+fn advance_window(info: &mut RateLimitInfo, requested_at: DateTime<Utc>) {
+    if requested_at > info.last_secret_id_at {
+        info.last_secret_id_at = requested_at;
+        info.last_secret_id_instant = Instant::now();
     }
 }
 

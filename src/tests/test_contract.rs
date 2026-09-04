@@ -288,7 +288,7 @@ async fn test_targeted_429_has_targeted_metadata() {
             .post("/fetch")
             .json(&FetchSecret {
                 identifier: SHA256_111111.to_string(),
-                authentication_key: crate::tests::distinct_candidate(index),
+                authentication_key: crate::tests::distinct_authentication_key(index),
             })
             .expect_failure()
             .await;

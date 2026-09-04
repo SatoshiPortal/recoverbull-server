@@ -18,7 +18,7 @@ The SQLite backup and restore procedure is in [deploy/backup/README.md](deploy/b
 - `authentication_key` A deterministic hash derived from `password` used server-side to compute an internal `secret_id`.
 - `encryption_key` A deterministic hash derived from `password` used client-side to **encrypt** the `secret` **before** storage on the server.
 - `identifier` random secure octets (e.g., in a local file), required to retrieve the `encrypted_secret`.
-- `secret_id` = `hash(identifier + authentication_key)` Unique record key in the server’s database. Concretely: **SHA-256 over the concatenation of the two lowercase hex *strings*** (128 ASCII bytes) — not over the decoded raw bytes. This differs from the `/attempts` `id_hash`, which hashes the raw identifier bytes; client implementations must not mix the two.
+- `secret_id` = `hash(identifier + authentication_key)` Unique record key in the server’s database. This is also the unit the rate limiter counts: what the specification calls a *candidate* is a distinct `secret_id`, and this document and the code use only the latter name. Concretely: **SHA-256 over the concatenation of the two lowercase hex *strings*** (128 ASCII bytes) — not over the decoded raw bytes. This differs from the `/attempts` `id_hash`, which hashes the raw identifier bytes; client implementations must not mix the two.
 - `encrypted_secret` = `encrypt(private_key: encryption_key, payload: secret)` The ciphertext of the secret using `encryption_key`.
 
 ### Request diagnostics and security counters
@@ -76,12 +76,12 @@ Log volume control belongs to the log daemon (see
 - `authentication_key`
 
   4. The server receives the `fetch secret` request and performs:
-- Compute the candidate tag `secret_id`/`key_id` from the identifier and authentication key. The per-identifier bucket is always `sha256(identifier)`.
-- Retain only the derived `CandidateTag` in memory. It is exactly `secret_id/key_id`: never raw authentication or password material. Candidate tags are state-only, have at most `RATE_LIMIT_MAX_ATTEMPTS` slots, are wiped after the cooldown or a restart, and are never logged or included in a snapshot.
-- A new candidate immediately reserves one slot and counts in the budget. A duplicate `Pending` candidate receives `503` before saturation rather than taking another slot.
-- If `candidate_count >= max`, return `429` before membership or database work for **every** candidate, including known, `Pending`, and `Committed`, so saturation cannot be an authentication oracle.
-- A `Committed` replay is free only before saturation: it increments `total_requests`, does not extend the candidate cooldown, and does not add another attempt. `/fetch` and `/trash` share this candidate set. A successful `/trash` is the one exception: the candidate that authenticated the deletion keeps its consumed slot but stops being recognizable, so presenting it again afterwards is a new candidate like any other. Otherwise its free replay would tell a Backup File holder which PIN had been used for the deletion.
-- Finalization is detached and generation-safe. A hit or miss commits the candidate; a miss increments `failed_attempts` exactly once. A database error or cancellation before database work removes `Pending`; a trash race returning `202`/`401` does not create a false failed candidate.
+- Compute the `secret_id`/`key_id` from the identifier and authentication key. The per-identifier bucket is always `sha256(identifier)`.
+- Retain only the derived `secret_id` in memory: never raw authentication or password material. These values are state-only, have at most `RATE_LIMIT_MAX_ATTEMPTS` slots, are wiped after the cooldown or a restart, and are never logged or included in a snapshot.
+- A new `secret_id` immediately reserves one slot and counts in the budget. A duplicate `Pending` `secret_id` receives `503` before saturation rather than taking another slot.
+- If the consumed slots reach `max`, return `429` before membership or database work for **every** `secret_id`, including known, `Pending`, and `Committed`, so saturation cannot be an authentication oracle.
+- A `Committed` replay is free only before saturation: it increments `total_requests`, does not extend the cooldown, and does not add another attempt. `/fetch` and `/trash` share this `secret_id` set. A successful `/trash` is the one exception: the `secret_id` that authenticated the deletion keeps its consumed slot but stops being recognizable, so presenting it again afterwards consumes a new slot like any other value. Otherwise its free replay would tell a Backup File holder which PIN had been used for the deletion.
+- Finalization is detached and generation-safe. A hit or miss commits the `secret_id`; a miss increments `failed_attempts` exactly once. A database error or cancellation before database work removes `Pending`; a trash race returning `202`/`401` does not create a false failed `secret_id`.
 
  5. The user can fetch his `secret` by deciphering `encrypted_secret` using his `encryption_key` as encryption key.
 
@@ -102,8 +102,8 @@ Log volume control belongs to the log daemon (see
 > }
 > ```
 >
-> - `total_attempts` is the number of candidate slots consumed in the current cooldown window: one per distinct candidate admitted, never refunded by a successful `/trash`. After a deletion the deleting candidate is no longer recognizable, so it consumes a new slot if presented again. A hit does not prove ownership, because a public `/store` caller can plant a matching row.
-> - `failed_attempts` counts distinct candidates for which no database row existed, incremented once when that candidate is finalized as a miss.
+> - `total_attempts` is the number of slots consumed in the current cooldown window: one per distinct `secret_id` admitted, never refunded by a successful `/trash`. After a deletion the `secret_id` that performed it is no longer recognizable, so it consumes a new slot if presented again. A hit does not prove ownership, because a public `/store` caller can plant a matching row.
+> - `failed_attempts` counts distinct `secret_id` values for which no database row existed, incremented once when that `secret_id` is finalized as a miss.
 > - `remaining_attempts` is `rate_limit_max_attempts - total_attempts`, saturating at zero.
 > - `total_requests` counts every `/fetch` and `/trash` request attached to this identifier's active entry, including replays, pending duplicates, and saturation rejections. Requests rejected because the global identifier map is already full have no per-identifier entry and are not included. The global lookup bucket remains the defense against floods of identical replays.
 > - `previous_attempt_at` is the admitted attempt immediately preceding this request (`null` when this request opened the window), and `resets_at` is when the budget expires.
@@ -129,7 +129,7 @@ retry or security decision.
 |---|---|---|
 | `400` | Invalid request data. | Fix the request. |
 | `401` | Invalid credentials. | Treat as an authentication failure. |
-| `429` | The targeted identifier's distinct-candidate budget is locked. This is the only security alarm. | Surface the targeted lockout and honor `Retry-After`. |
+| `429` | The targeted identifier's `secret_id` budget is locked. This is the only security alarm. | Surface the targeted lockout and honor `Retry-After`. |
 | `503` | Server pressure or unavailability, including global lookup/store/telemetry limits, a full rate-limit map, a busy database, or a request the server could not finish within its 30-second timeout. | Back off and retry using `Retry-After`. |
 | `500` | Internal server error. | Treat as a server failure. |
 
@@ -164,15 +164,15 @@ one-second advisory. Framework-generated rejections such as `404`, `405`,
 ```
 
 - `id_hash`: SHA-256 of the raw `identifier` **bytes** (not the hex string). A client recognizes its own identifier by hashing it locally; nobody can recover a raw identifier from the list (pre-image resistance), which keeps the list useless for griefing or targeted lockout.
-- `total_attempts`: number of candidate slots consumed in the current cooldown window (distinct candidates admitted; a candidate presented again after it deleted the row through `/trash` counts as a new one).
-- `failed_attempts`: number of distinct candidates for which no database row existed.
-- `total_requests`: every `/fetch` and `/trash` request attached to this identifier's active entry, including replays; map-capacity rejections for previously unseen identifiers cannot be attributed to an entry. It is telemetry, not candidate budget.
-- `window_started_at` / `last_attempt_at`: hour-truncated timestamps of the current window; `last_attempt_at` is the last distinct candidate timestamp, not the latest replay request. The JSON field name is retained for compatibility.
+- `total_attempts`: number of slots consumed in the current cooldown window (distinct `secret_id` values admitted; a `secret_id` presented again after it deleted the row through `/trash` counts as a new one).
+- `failed_attempts`: number of distinct `secret_id` values for which no database row existed.
+- `total_requests`: every `/fetch` and `/trash` request attached to this identifier's active entry, including replays; map-capacity rejections for previously unseen identifiers cannot be attributed to an entry. It is telemetry, not the `secret_id` budget.
+- `window_started_at` / `last_attempt_at`: hour-truncated timestamps of the current window; `last_attempt_at` is the last distinct `secret_id` timestamp, not the latest replay request. The JSON field name is retained for compatibility.
 - `collection_started_at`: hour-truncated start of the in-memory collection. It changes at startup and after each global 24-hour wipe; clients must reset their baseline.
 
-Identifiers are kept and published hashed, never raw. The entire identifier map, including CandidateTags, is wiped every 24 hours from map startup and the attempt budget resets at that boundary. Individual entries disappear earlier, as soon as their cooldown has elapsed: expiry is applied to an entry when it is next used, to the whole map whenever it is full, and to the whole map before every snapshot build, so an expired entry is never published and never causes a refusal. Nothing is persisted.
+Identifiers are kept and published hashed, never raw. The entire identifier map, including the retained `secret_id` values, is wiped every 24 hours from map startup and the attempt budget resets at that boundary. Individual entries disappear earlier, as soon as their cooldown has elapsed: expiry is applied to an entry when it is next used, to the whole map whenever it is full, and to the whole map before every snapshot build, so an expired entry is never published and never causes a refusal. Nothing is persisted.
 
-The body is **always gzip-compressed JSON** (`Content-Encoding: gzip`); clients must be gzip-capable. This initial telemetry contract, version `1`, reports distinct-candidate counters plus `total_requests` and never exposes CandidateTags. The snapshot is rebuilt at most once per minute and served as immutable shared bytes with a strong `ETag`: send `If-None-Match` to receive a bodyless `304` when nothing changed. `Cache-Control: public, max-age=<remaining seconds>` reflects the real freshness. A dedicated global token bucket (`ATTEMPTS_RATE_LIMIT_*`) bounds cache-bypass traffic; production deployments must additionally cache and rate-limit this route at the reverse proxy (see Deployment). Nginx is the reference template; Caddy is a conditional, mutually exclusive alternative under `deploy/caddy/`.
+The body is **always gzip-compressed JSON** (`Content-Encoding: gzip`); clients must be gzip-capable. This initial telemetry contract, version `1`, reports distinct-`secret_id` counters plus `total_requests` and never exposes a `secret_id`. The snapshot is rebuilt at most once per minute and served as immutable shared bytes with a strong `ETag`: send `If-None-Match` to receive a bodyless `304` when nothing changed. `Cache-Control: public, max-age=<remaining seconds>` reflects the real freshness. A dedicated global token bucket (`ATTEMPTS_RATE_LIMIT_*`) bounds cache-bypass traffic; production deployments must additionally cache and rate-limit this route at the reverse proxy (see Deployment). Nginx is the reference template; Caddy is a conditional, mutually exclusive alternative under `deploy/caddy/`.
 
 **Proactive detection is the client's responsibility.** The server publishes
 the snapshot and cannot notify anyone; only a wallet that polls it can turn an
@@ -258,7 +258,7 @@ listed in [SECURITY.md](SECURITY.md).
 
 ### Privacy and recovery security summary
 
-The protocol's privacy goals and accepted recovery-lockout trade-off are defined by the whitepaper. Implementation invariants, candidate accounting, telemetry limits, and review evidence are maintained in [SECURITY.md](SECURITY.md); clients must follow the wire contracts above and operators must follow the deployment runbook below.
+The protocol's privacy goals and accepted recovery-lockout trade-off are defined by the whitepaper. Implementation invariants, `secret_id` accounting, telemetry limits, and review evidence are maintained in [SECURITY.md](SECURITY.md); clients must follow the wire contracts above and operators must follow the deployment runbook below.
 
 
 ## Deployment
@@ -420,8 +420,8 @@ including an idempotent duplicate that does not create a new row. If every
 request has a new identifier and a maximum-size secret, SQLite grows by about
 43 to 86 MB/day, depending on page and index overhead.
 `RATE_LIMIT_MAX_ATTEMPTS` is the canonical configuration name for the
-per-identifier distinct-candidate budget. Every distinct candidate consumes it,
-including database hits and misses; replay requests consume no new candidate
+per-identifier `secret_id` budget. Every distinct `secret_id` consumes it,
+including database hits and misses; replay requests consume no new slot
 slot. If the canonical variable is absent, the server accepts
 `RATE_LIMIT_MAX_FAILED_ATTEMPTS` as a deprecated legacy alias and logs a
 warning; when both are present, the canonical variable wins. The
@@ -446,7 +446,7 @@ cooldown an attempt admitted just after a rebuild could expire before the next
 one and never appear in `/attempts`. Startup refuses such a value.
 The identifier cap bounds the number of `sha256(identifier)` buckets without
 evicting active security entries; new identifiers receive `503` while the cap
-is full. Each bucket's CandidateTag set is bounded by the distinct-candidate
+is full. Each bucket's `secret_id` set is bounded by the
 budget. SQLite work is limited to
 16 concurrent blocking operations, and requests waiting more than one second
 for a slot receive `503` without consuming their per-identifier attempt.
@@ -463,7 +463,7 @@ lowering `MemoryMax` without lowering the declared budget cannot silently
 disable the check. With no discoverable cgroup limit, only the declared budget
 applies. The model uses the measured per-entry cost,
 which also depends on `RATE_LIMIT_MAX_ATTEMPTS` because each retained
-CandidateTag is a 64-character string. The model reserves 64 MiB of the
+`secret_id` is a 64-character string. The model reserves 64 MiB of the
 budget for the base process, SQLite, and worker stacks, then requires
 `capacity x (1100 + 150 x max_attempts)` bytes to fit what remains. At the
 default budget that admits about 303,000 identifiers at
@@ -543,8 +543,8 @@ At the default `RATE_LIMIT_MAX_IDENTIFIERS=100000` with
 `RATE_LIMIT_MAX_ATTEMPTS=3`, a release build measured 22.1 MB JSON,
 4.01 MB gzip, and **117 MB peak RSS** (1121 bytes per entry). An earlier
 audit recorded about 254 MiB peak on a different host with the same 4.01 MB
-gzip body; the snapshot no longer copies the ledger's CandidateTag sets,
-which removed 27% of the peak at this candidate budget and about half of it
+gzip body; the snapshot no longer copies the ledger's `secret_id` sets,
+which removed 27% of the peak at this `secret_id` budget and about half of it
 at larger ones. These are measurements on specific hosts, not a universal
 guarantee: set service memory and capacity with headroom, and re-measure
 after changing `RATE_LIMIT_MAX_ATTEMPTS`, which is the term that dominates

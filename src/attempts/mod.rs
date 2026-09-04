@@ -11,16 +11,16 @@ use std::sync::{
 #[derive(Clone, Serialize, Deserialize)]
 /// JSON-compatible attempt counters and hour-precision window timestamps.
 pub(crate) struct AttemptStatus {
-    /// The initial telemetry contract distinguishes candidate counters from
+    /// The initial telemetry contract distinguishes secret_id counters from
     /// request-counting semantics.
     pub(crate) version: u8,
-    /// Total distinct candidates in the current window.
+    /// Total distinct secret_ids in the current window.
     pub(crate) total_attempts: u8,
     pub(crate) failed_attempts: u8,
     pub(crate) remaining_attempts: u8,
     pub(crate) total_requests: u64,
     pub(crate) window_started_at: DateTime<Utc>,
-    /// Distinct candidate immediately preceding this request, if any.
+    /// Distinct secret_id immediately preceding this request, if any.
     pub(crate) previous_attempt_at: Option<DateTime<Utc>>,
     pub(crate) resets_at: DateTime<Utc>,
 }
@@ -53,7 +53,7 @@ impl AttemptsPolicy {
                 .load(std::sync::atomic::Ordering::Relaxed),
         )
     }
-    /// Returns the maximum distinct candidates per identifier.
+    /// Returns the maximum distinct secret_ids per identifier.
     pub(crate) fn max_attempts(&self) -> u8 {
         self.max_attempts.load(std::sync::atomic::Ordering::Relaxed)
     }

@@ -79,8 +79,8 @@ async fn test_fetch_success_reports_exact_attempt_status() {
         "first window: resets_at is one cooldown after the first attempt"
     );
 
-    // second lookup replays the same candidate: attempts stay stable while
-    // requests increase, and no new candidate timestamp is published
+    // second lookup replays the same secret_id: attempts stay stable while
+    // requests increase, and no new secret_id timestamp is published
     let response = server.post("/fetch").json(&fetch).expect_success().await;
     let status = &response.json::<serde_json::Value>()["attempt_status"];
     assert_eq!(status["total_attempts"], 1);
@@ -142,7 +142,7 @@ async fn test_fetch_rate_limit_enforced_and_reset_after_cooldown() {
     for i in 0..state.attempts.policy.max_attempts() as usize {
         let fetch_wrong_authentication_key = FetchSecret {
             identifier: SHA256_111111.to_string(),
-            authentication_key: crate::tests::distinct_candidate(i),
+            authentication_key: crate::tests::distinct_authentication_key(i),
         };
         let response = server
             .post("/fetch")
@@ -160,7 +160,7 @@ async fn test_fetch_rate_limit_enforced_and_reset_after_cooldown() {
         .post("/fetch")
         .json(&FetchSecret {
             identifier: SHA256_111111.to_string(),
-            authentication_key: crate::tests::distinct_candidate(0),
+            authentication_key: crate::tests::distinct_authentication_key(0),
         })
         .expect_failure()
         .await;
@@ -183,7 +183,7 @@ async fn test_fetch_rate_limit_enforced_and_reset_after_cooldown() {
         let age = state.attempts.policy.cooldown() + chrono::Duration::minutes(1);
         let expired_at = chrono::Utc::now() - age;
         info.window_started_at = expired_at;
-        info.last_candidate_at = expired_at;
+        info.last_secret_id_at = expired_at;
         info.last_request_at = expired_at;
         // Expiry decides on the monotonic clock, so aging the published
         // wall-clock fields alone would leave the entry active.
@@ -210,6 +210,6 @@ async fn test_fetch_rate_limit_enforced_and_reset_after_cooldown() {
     let info = identifier_rate_limit
         .get(&identifier_hash(SHA256_111111).unwrap())
         .unwrap();
-    assert_eq!(info.candidate_count(), 1);
-    assert_eq!(info.failed_candidates, 0);
+    assert_eq!(info.consumed_slots(), 1);
+    assert_eq!(info.failed_secret_ids, 0);
 }

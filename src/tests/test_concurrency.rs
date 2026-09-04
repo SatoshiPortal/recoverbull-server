@@ -110,7 +110,7 @@ async fn test_rate_limit_holds_under_concurrency() {
         let body = format!(
             "{{\"identifier\":\"{}\",\"authentication_key\":\"{}\"}}",
             crate::tests::SHA256_111111,
-            crate::tests::distinct_candidate(index)
+            crate::tests::distinct_authentication_key(index)
         );
         handles.push(tokio::spawn(
             async move { raw_post(addr, "/fetch", body).await },

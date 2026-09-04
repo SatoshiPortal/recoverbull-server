@@ -139,7 +139,7 @@ async fn test_audit_f2_attacker_failures_deny_legitimate_owner() {
             .post("/fetch")
             .json(&FetchSecret {
                 identifier: SHA256_111111.to_string(),
-                authentication_key: crate::tests::distinct_candidate(index),
+                authentication_key: crate::tests::distinct_authentication_key(index),
             })
             .await;
         assert_eq!(response.status_code(), StatusCode::UNAUTHORIZED);

@@ -75,7 +75,7 @@ pub(crate) fn unique_test_database() -> (String, Arc<TestDatabaseGuard>) {
 /// (`attempts::maintenance::PRODUCTION_GLOBAL_WIPE_INTERVAL`), so a longer
 /// value announces a budget through `/info` and `resets_at` that the next
 /// wipe silently discards: the operator believes a weak PIN gets three
-/// candidates per week and it gets three per day.
+/// secret_ids per week and it gets three per day.
 pub const MAX_RATE_LIMIT_COOLDOWN_MINUTES: i64 = 24 * 60;
 
 /// Length of a RecoverBull Profile 1 encrypted secret in Base64 characters:
@@ -147,7 +147,7 @@ pub fn validate_config(
 }
 
 /// Peak process bytes one rate-limit entry costs, excluding the part that
-/// scales with the candidate budget.
+/// scales with the secret_id budget.
 ///
 /// Measured, not estimated: a release build filling the ledger and then
 /// building one `/attempts` snapshot costs 1121-1254 peak bytes per entry
@@ -161,14 +161,14 @@ pub fn validate_config(
 /// encoder. See `docs/DEPLOYMENT.md` for the measurement procedure.
 pub const RATE_LIMIT_BYTES_PER_IDENTIFIER: usize = 1_100;
 
-/// Peak process bytes each retained CandidateTag adds to an entry.
+/// Peak process bytes each retained SecretId adds to an entry.
 ///
-/// A CandidateTag is a 64-character `String` in a per-entry `HashMap`, so an
+/// A SecretId is a 64-character `String` in a per-entry `HashMap`, so an
 /// entry's cost grows with `RATE_LIMIT_MAX_ATTEMPTS`: measured at 147 bytes
-/// per candidate between 10 and 255 candidates, rounded up here. Ignoring
+/// per secret_id between 10 and 255 secret_ids, rounded up here. Ignoring
 /// this term is what made the previous fixed ceiling meaningless — at the
 /// u8 maximum budget an entry costs about 38 kB, not a few hundred bytes.
-pub const RATE_LIMIT_BYTES_PER_CANDIDATE: usize = 150;
+pub const RATE_LIMIT_BYTES_PER_SECRET_ID: usize = 150;
 
 /// Process memory the capacity model deliberately leaves unclaimed: the base
 /// process, SQLite connections and page cache, Tokio worker stacks, and the
@@ -270,13 +270,13 @@ pub fn effective_memory_budget_bytes(
 /// misconfiguration.
 pub const MAX_DATABASE_CONCURRENCY: usize = 1024;
 
-/// Estimated peak bytes for a capacity and candidate budget, or `None` when
+/// Estimated peak bytes for a capacity and secret_id budget, or `None` when
 /// the product overflows `usize` (which is itself over any real budget).
 pub fn estimated_peak_memory_bytes(
     rate_limit_max_identifiers: usize,
     rate_limit_max_attempts: u8,
 ) -> Option<usize> {
-    RATE_LIMIT_BYTES_PER_CANDIDATE
+    RATE_LIMIT_BYTES_PER_SECRET_ID
         .checked_mul(usize::from(rate_limit_max_attempts))?
         .checked_add(RATE_LIMIT_BYTES_PER_IDENTIFIER)?
         .checked_mul(rate_limit_max_identifiers)
@@ -288,7 +288,7 @@ pub fn max_identifiers_within_budget(
     memory_budget_bytes: usize,
 ) -> usize {
     let per_entry = RATE_LIMIT_BYTES_PER_IDENTIFIER.saturating_add(
-        RATE_LIMIT_BYTES_PER_CANDIDATE.saturating_mul(usize::from(rate_limit_max_attempts)),
+        RATE_LIMIT_BYTES_PER_SECRET_ID.saturating_mul(usize::from(rate_limit_max_attempts)),
     );
     memory_budget_bytes
         .saturating_sub(PROCESS_MEMORY_RESERVE_BYTES)
@@ -304,7 +304,7 @@ pub fn max_identifiers_within_budget(
 /// per-entry cost that was low by an order of magnitude, so the ceiling
 /// admitted configurations that produce exactly the silent
 /// memory-exhaustion kill it claimed to prevent — 10,000,000 entries cost
-/// about 15 GB at the documented candidate budget, not the ~2 GB claimed,
+/// about 15 GB at the documented secret_id budget, not the ~2 GB claimed,
 /// against a 512 MB `MemoryMax`. The bound is therefore derived from the
 /// operator's declared budget and the measured per-entry cost, and it
 /// accounts for `RATE_LIMIT_MAX_ATTEMPTS`, which the fixed ceiling ignored.
@@ -345,7 +345,7 @@ pub fn validate_capacity(
                  at snapshot peak, over the {} MiB available from an effective memory budget of \
                  {} MiB (the lower of RATE_LIMIT_MEMORY_BUDGET_MB and the enforced cgroup limit) \
                  after the {} MiB process reserve; lower the capacity to at most {}, lower the \
-                 candidate budget, or raise both the cgroup limit and the declared budget",
+                 secret_id budget, or raise both the cgroup limit and the declared budget",
                 rate_limit_max_identifiers,
                 rate_limit_max_attempts,
                 estimated_peak_memory_bytes(rate_limit_max_identifiers, rate_limit_max_attempts)

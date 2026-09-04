@@ -65,7 +65,7 @@ async fn test_successful_fetch_increments_total_attempts() {
 }
 
 /// A success never resets the counter: after a successful fetch, a distinct
-/// failed candidate continues the count instead of restarting at 1 — while a
+/// failed secret_id continues the count instead of restarting at 1 — while a
 /// replay only increases total_requests.
 #[tokio::test]
 async fn test_success_does_not_reset_the_counter() {
@@ -132,7 +132,7 @@ async fn test_successful_fetch_is_not_refunded() {
 
     let map = state.attempts.ledger.lock_for_test().await;
     let info = &map[&identifier_hash(SHA256_111111).unwrap()];
-    assert_eq!(info.candidate_count(), 1, "a 200 must not be refunded");
+    assert_eq!(info.consumed_slots(), 1, "a 200 must not be refunded");
 }
 
 /// A 429 does not consume budget: a locked-out identifier's rejected request
@@ -147,7 +147,7 @@ async fn test_429_does_not_consume_budget() {
             .post("/fetch")
             .json(&FetchSecret {
                 identifier: SHA256_111111.to_string(),
-                authentication_key: crate::tests::distinct_candidate(index),
+                authentication_key: crate::tests::distinct_authentication_key(index),
             })
             .expect_failure()
             .await;
@@ -157,8 +157,8 @@ async fn test_429_does_not_consume_budget() {
         .json(&FetchSecret {
             identifier: SHA256_111111.to_string(),
             // Replay an already admitted key: saturation must be based on
-            // distinct candidates, while this request still counts.
-            authentication_key: crate::tests::distinct_candidate(0),
+            // distinct secret_ids, while this request still counts.
+            authentication_key: crate::tests::distinct_authentication_key(0),
         })
         .expect_failure()
         .await;
@@ -166,7 +166,7 @@ async fn test_429_does_not_consume_budget() {
     let map = state.attempts.ledger.lock_for_test().await;
     let info = &map[&identifier_hash(SHA256_111111).unwrap()];
     assert_eq!(
-        info.candidate_count(),
+        info.consumed_slots(),
         state.attempts.policy.max_attempts(),
         "a 429 must not consume budget"
     );
@@ -194,7 +194,7 @@ async fn test_full_map_does_not_evict_protected_identifier() {
             .post("/fetch")
             .json(&FetchSecret {
                 identifier: SHA256_111111.to_string(),
-                authentication_key: crate::tests::distinct_candidate(index),
+                authentication_key: crate::tests::distinct_authentication_key(index),
             })
             .expect_failure()
             .await;
@@ -264,13 +264,13 @@ async fn test_remaining_attempts_relationship() {
     );
     assert_eq!(status["total_requests"], 1);
 
-    // a distinct failure consumes budget too; replaying the stored candidate
-    // reports the same distinct-candidate total
+    // a distinct failure consumes budget too; replaying the stored secret_id
+    // reports the same distinct-secret_id total
     server
         .post("/fetch")
         .json(&FetchSecret {
             identifier: SHA256_111111.to_string(),
-            authentication_key: crate::tests::distinct_candidate(2),
+            authentication_key: crate::tests::distinct_authentication_key(2),
         })
         .expect_failure()
         .await;
@@ -429,10 +429,10 @@ async fn test_401_attempts_and_snapshot_counters_agree() {
     assert_eq!(entry["total_attempts"].as_u64().unwrap(), direct_attempts);
 }
 
-/// `resets_at` advances for each distinct admitted candidate, but remains
-/// stable when the same candidate is replayed.
+/// `resets_at` advances for each distinct admitted secret_id, but remains
+/// stable when the same secret_id is replayed.
 #[tokio::test]
-async fn test_resets_at_advances_with_each_distinct_candidate() {
+async fn test_resets_at_advances_with_each_distinct_secret_id() {
     let (server, _) = crate::tests::test_server::new_test_server().await;
 
     server
@@ -483,7 +483,7 @@ async fn test_resets_at_advances_with_each_distinct_candidate() {
         .post("/store")
         .json(&StoreSecret {
             identifier: SHA256_111111.to_string(),
-            authentication_key: crate::tests::distinct_candidate(1),
+            authentication_key: crate::tests::distinct_authentication_key(1),
             encrypted_secret: BASE64_ENCRYPTED_SECRET.to_string(),
         })
         .expect_success()
@@ -493,7 +493,7 @@ async fn test_resets_at_advances_with_each_distinct_candidate() {
         .post("/fetch")
         .json(&FetchSecret {
             identifier: SHA256_111111.to_string(),
-            authentication_key: crate::tests::distinct_candidate(1),
+            authentication_key: crate::tests::distinct_authentication_key(1),
         })
         .expect_success()
         .await;
@@ -505,7 +505,7 @@ async fn test_resets_at_advances_with_each_distinct_candidate() {
 
     assert!(
         second_resets > first_resets,
-        "resets_at must advance with each distinct admitted candidate"
+        "resets_at must advance with each distinct admitted secret_id"
     );
 }
 
@@ -521,7 +521,7 @@ async fn test_429_requested_at_is_the_last_admitted_attempt() {
             .post("/fetch")
             .json(&FetchSecret {
                 identifier: SHA256_111111.to_string(),
-                authentication_key: crate::tests::distinct_candidate(index),
+                authentication_key: crate::tests::distinct_authentication_key(index),
             })
             .expect_failure()
             .await;
@@ -565,17 +565,17 @@ async fn test_expired_entry_disappears_from_snapshot() {
             identifier_hash(SHA256_111111).unwrap(),
             crate::attempts::ledger::RateLimitInfo {
                 window_started_at: expired_at,
-                last_candidate_at: expired_at,
+                last_secret_id_at: expired_at,
                 last_request_at: expired_at,
                 // expiry decides on the monotonic clock: back-date it too
-                last_candidate_instant: crate::tests::monotonic_age(
+                last_secret_id_instant: crate::tests::monotonic_age(
                     (state.attempts.policy.cooldown() + chrono::Duration::minutes(1))
                         .to_std()
                         .unwrap(),
                 ),
-                candidates: std::collections::HashMap::new(),
+                secret_ids: std::collections::HashMap::new(),
                 forgotten_slots: 0,
-                failed_candidates: 3,
+                failed_secret_ids: 3,
                 total_requests: 3,
             },
         );
@@ -620,7 +620,7 @@ async fn test_trash_does_not_reset_the_counter() {
 
     // The row is gone and the deletion's slot stays consumed. The tag that
     // authenticated the deletion is forgotten, so presenting it again is a
-    // new candidate: the counter grows to 2 exactly as for any other PIN,
+    // new secret_id: the counter grows to 2 exactly as for any other PIN,
     // and never drops back.
     let response = server
         .post("/fetch")
@@ -986,7 +986,7 @@ async fn test_lockout_boundary_is_exact() {
             .post("/fetch")
             .json(&FetchSecret {
                 identifier: SHA256_111111.to_string(),
-                authentication_key: crate::tests::distinct_candidate(i),
+                authentication_key: crate::tests::distinct_authentication_key(i),
             })
             .expect_failure()
             .await;
@@ -1108,18 +1108,18 @@ async fn test_attempts_counter_does_not_overflow_at_u8_max() {
             identifier_hash(SHA256_111111).unwrap(),
             crate::attempts::ledger::RateLimitInfo {
                 window_started_at: chrono::Utc::now(),
-                last_candidate_at: chrono::Utc::now(),
+                last_secret_id_at: chrono::Utc::now(),
                 last_request_at: chrono::Utc::now(),
-                last_candidate_instant: tokio::time::Instant::now(),
-                candidates: (0..254)
+                last_secret_id_instant: tokio::time::Instant::now(),
+                secret_ids: (0..254)
                     .map(|i| {
                         (
-                            format!("candidate-{i}"),
-                            crate::attempts::ledger::CandidateState::Committed,
+                            format!("secret_id-{i}"),
+                            crate::attempts::ledger::SecretIdState::Committed,
                         )
                     })
                     .collect(),
-                failed_candidates: 254,
+                failed_secret_ids: 254,
                 forgotten_slots: 0,
                 total_requests: 254,
             },
@@ -1150,7 +1150,7 @@ async fn test_attempts_counter_does_not_overflow_at_u8_max() {
 
     let map = state.attempts.ledger.lock_for_test().await;
     assert_eq!(
-        map[&identifier_hash(SHA256_111111).unwrap()].candidate_count(),
+        map[&identifier_hash(SHA256_111111).unwrap()].consumed_slots(),
         255,
         "the counter must cap at u8::MAX, never wrap to 0"
     );
@@ -1256,7 +1256,7 @@ async fn test_map_filling_denies_a_victim_without_creating_its_warning_entry() {
     let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone())).unwrap();
 
     // The attacker fills the map with identifiers it chose itself.
-    let attacker_key = crate::tests::distinct_candidate(0);
+    let attacker_key = crate::tests::distinct_authentication_key(0);
     for index in 0..capacity {
         let identifier = crate::digest::sha256_hex(format!("flood-{index}").as_bytes());
         server
@@ -1275,7 +1275,7 @@ async fn test_map_filling_denies_a_victim_without_creating_its_warning_entry() {
         .post("/fetch")
         .json(&FetchSecret {
             identifier: victim.clone(),
-            authentication_key: crate::tests::distinct_candidate(1),
+            authentication_key: crate::tests::distinct_authentication_key(1),
         })
         .expect_failure()
         .await;

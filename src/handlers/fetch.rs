@@ -77,7 +77,7 @@ fn map_lookup(result: LookupResult, kind: LookupKind) -> Response {
         LookupResult::Pending => retry_after_response(
             StatusCode::SERVICE_UNAVAILABLE,
             ADVISORY_RETRY_AFTER_SECS,
-            "Candidate lookup pending, retry later",
+            "Lookup for this secret_id is pending, retry later",
         ),
         LookupResult::DatabaseBusy => retry_after_response(
             StatusCode::SERVICE_UNAVAILABLE,

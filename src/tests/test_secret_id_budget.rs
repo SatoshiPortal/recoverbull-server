@@ -16,7 +16,7 @@ async fn wait_for_attempts(state: &crate::AppState, expected: u8) {
                 .lock_for_test()
                 .await
                 .get(&identifier_hash(SHA256_111111).unwrap())
-                .is_some_and(|info| info.candidate_count() == expected)
+                .is_some_and(|info| info.consumed_slots() == expected)
             {
                 break;
             }
@@ -52,7 +52,7 @@ fn store(identifier: &str, authentication_key: &str, encrypted_secret: &str) -> 
 }
 
 #[tokio::test]
-async fn test_replaying_one_valid_candidate_does_not_consume_more_attempts() {
+async fn test_replaying_one_valid_secret_id_does_not_consume_more_slots() {
     let (server, _) = crate::tests::test_server::new_test_server().await;
     server
         .post("/store")
@@ -70,7 +70,7 @@ async fn test_replaying_one_valid_candidate_does_not_consume_more_attempts() {
             .json(&fetch(SHA256_111111, SHA256_222222))
             .expect_success()
             .await;
-        // A replay of the same candidate must be idempotent, not a new lookup.
+        // A replay of the same secret_id must be idempotent, not a new lookup.
         assert_eq!(response.status_code(), StatusCode::OK);
         let body = response.json::<serde_json::Value>();
         assert_eq!(body["attempt_status"]["version"], 1);
@@ -80,7 +80,7 @@ async fn test_replaying_one_valid_candidate_does_not_consume_more_attempts() {
 }
 
 #[tokio::test]
-async fn test_replaying_one_invalid_candidate_does_not_consume_more_attempts() {
+async fn test_replaying_one_invalid_secret_id_does_not_consume_more_slots() {
     let (server, _) = crate::tests::test_server::new_test_server().await;
 
     for _ in 0..5 {
@@ -89,14 +89,14 @@ async fn test_replaying_one_invalid_candidate_does_not_consume_more_attempts() {
             .json(&fetch(SHA256_111111, NOT_PASSWORD_HASH))
             .expect_failure()
             .await;
-        // Replaying one bad candidate remains an authentication failure, not 429.
+        // Replaying one bad secret_id remains an authentication failure, not 429.
         assert_eq!(response.status_code(), StatusCode::UNAUTHORIZED);
         assert_eq!(response.json::<ResponseFailedAttempt>().attempts, 1);
     }
 }
 
 #[tokio::test]
-async fn test_fetch_and_trash_share_one_candidate_attempt() {
+async fn test_fetch_and_trash_share_one_secret_id_slot() {
     let (server, _) = crate::tests::test_server::new_test_server().await;
     server
         .post("/store")
@@ -119,7 +119,7 @@ async fn test_fetch_and_trash_share_one_candidate_attempt() {
         .expect_success()
         .await;
 
-    // Fetch and trash for one candidate must observe one logical attempt.
+    // Fetch and trash for one secret_id must observe one logical attempt.
     assert_eq!(response.status_code(), StatusCode::ACCEPTED);
     assert_eq!(
         response.json::<serde_json::Value>()["attempt_status"]["total_attempts"],
@@ -128,7 +128,7 @@ async fn test_fetch_and_trash_share_one_candidate_attempt() {
 }
 
 #[tokio::test]
-async fn test_replaying_one_candidate_does_not_slide_resets_at() {
+async fn test_replaying_one_secret_id_does_not_slide_resets_at() {
     let (server, _) = crate::tests::test_server::new_test_server().await;
     server
         .post("/store")
@@ -163,46 +163,46 @@ async fn test_replaying_one_candidate_does_not_slide_resets_at() {
         .expect("successful replay must report resets_at")
         .to_owned();
 
-    // A replay must not renew the candidate's cooldown window.
+    // A replay must not renew the secret_id's cooldown window.
     assert_eq!(second_resets_at, first_resets_at);
 }
 
 #[tokio::test]
-async fn test_known_candidate_is_rejected_when_distinct_candidate_capacity_is_full() {
+async fn test_known_secret_id_is_rejected_when_the_budget_is_full() {
     let (server, _) = crate::tests::test_server::new_test_server().await;
-    let candidates = [
+    let secret_ids = [
         SHA256_222222,
         "0000000000000000000000000000000000000000000000000000000000000001",
         "0000000000000000000000000000000000000000000000000000000000000002",
     ];
 
-    for authentication_key in candidates {
+    for authentication_key in secret_ids {
         let response = server
             .post("/fetch")
             .json(&fetch(SHA256_111111, authentication_key))
             .await;
-        // Each new candidate consumes one admission, even when authentication fails.
+        // Each new secret_id consumes one admission, even when authentication fails.
         assert_eq!(response.status_code(), StatusCode::UNAUTHORIZED);
     }
 
     let response = server
         .post("/fetch")
-        .json(&fetch(SHA256_111111, candidates[0]))
+        .json(&fetch(SHA256_111111, secret_ids[0]))
         .await;
-    // Full capacity must fail closed; a known candidate must not bypass it.
+    // Full capacity must fail closed; a known secret_id must not bypass it.
     assert_eq!(response.status_code(), StatusCode::TOO_MANY_REQUESTS);
 }
 
 #[tokio::test]
-async fn test_distinct_planted_candidates_consume_capacity() {
+async fn test_distinct_planted_secret_ids_consume_capacity() {
     let (server, _) = crate::tests::test_server::new_test_server().await;
-    let candidates = [
+    let secret_ids = [
         "0000000000000000000000000000000000000000000000000000000000000001",
         "0000000000000000000000000000000000000000000000000000000000000002",
         "0000000000000000000000000000000000000000000000000000000000000003",
     ];
 
-    for (index, authentication_key) in candidates.into_iter().enumerate() {
+    for (index, authentication_key) in secret_ids.into_iter().enumerate() {
         let marker = "dGVzdA==";
         server
             .post("/store")
@@ -215,7 +215,7 @@ async fn test_distinct_planted_candidates_consume_capacity() {
             .expect_success()
             .await;
         let body = response.json::<serde_json::Value>();
-        // A planted hit is still a counted candidate, preserving the anti-bypass oracle.
+        // A planted hit is still a counted secret_id, preserving the anti-bypass oracle.
         assert_eq!(body["encrypted_secret"], marker);
         assert_eq!(body["attempt_status"]["total_attempts"], index + 1);
     }
@@ -224,7 +224,7 @@ async fn test_distinct_planted_candidates_consume_capacity() {
         .post("/fetch")
         .json(&fetch(SHA256_111111, SHA256_222222))
         .await;
-    // Three planted candidates exhaust the distinct-candidate admission budget.
+    // Three planted secret_ids exhaust the distinct-secret_id admission budget.
     assert_eq!(fourth.status_code(), StatusCode::TOO_MANY_REQUESTS);
 }
 
@@ -241,7 +241,7 @@ async fn test_pending_duplicate_trash_is_rejected_without_a_second_reservation()
         .expect_success()
         .await;
     // Keep one free slot so checking Pending before saturation cannot become
-    // a membership oracle. Once the budget is full, every candidate — known
+    // a membership oracle. Once the budget is full, every secret_id — known
     // or unknown, Pending or Committed — must receive the same 429.
     state.recovery.set_max_attempts_for_test(3);
 
@@ -269,7 +269,7 @@ async fn test_pending_duplicate_trash_is_rejected_without_a_second_reservation()
             .lock_for_test()
             .await
             .get(&identifier_hash(SHA256_111111).unwrap())
-            .map(|info| info.candidate_count()),
+            .map(|info| info.consumed_slots()),
         Some(1),
         "a pending duplicate must not reserve another attempt"
     );
@@ -285,14 +285,14 @@ async fn test_pending_duplicate_trash_is_rejected_without_a_second_reservation()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_pending_distinct_candidates_consume_the_attempt_budget() {
+async fn test_pending_distinct_secret_ids_consume_the_budget() {
     let (server, state) = crate::tests::test_server::new_test_server().await;
-    let candidates = [
+    let secret_ids = [
         "0000000000000000000000000000000000000000000000000000000000000001",
         "0000000000000000000000000000000000000000000000000000000000000002",
         "0000000000000000000000000000000000000000000000000000000000000003",
     ];
-    for authentication_key in candidates {
+    for authentication_key in secret_ids {
         server
             .post("/store")
             .json(&store(SHA256_111111, authentication_key, "dGVzdA=="))
@@ -307,9 +307,9 @@ async fn test_pending_distinct_candidates_consume_the_attempt_budget() {
         .execute(&mut lock_connection)
         .expect("test must acquire the SQLite write lock");
 
-    let first = tokio::spawn(trash(state.clone(), candidates[0]));
-    let second = tokio::spawn(trash(state.clone(), candidates[1]));
-    let third = tokio::spawn(trash(state.clone(), candidates[2]));
+    let first = tokio::spawn(trash(state.clone(), secret_ids[0]));
+    let second = tokio::spawn(trash(state.clone(), secret_ids[1]));
+    let third = tokio::spawn(trash(state.clone(), secret_ids[2]));
     wait_for_attempts(&state, 3).await;
 
     let fourth = tokio::time::timeout(
@@ -351,12 +351,12 @@ async fn test_old_trash_completion_cannot_update_a_replaced_rate_limit_window() 
         id_hash.clone(),
         RateLimitInfo {
             window_started_at: fresh_at,
-            last_candidate_at: fresh_at,
+            last_secret_id_at: fresh_at,
             last_request_at: fresh_at,
-            last_candidate_instant: tokio::time::Instant::now(),
-            candidates: std::collections::HashMap::new(),
+            last_secret_id_instant: tokio::time::Instant::now(),
+            secret_ids: std::collections::HashMap::new(),
             forgotten_slots: 0,
-            failed_candidates: 0,
+            failed_secret_ids: 0,
             total_requests: 0,
         },
     );
@@ -380,8 +380,8 @@ async fn test_old_trash_completion_cannot_update_a_replaced_rate_limit_window() 
         .expect("fresh rate-limit window must remain present");
     assert_eq!(info.window_started_at, fresh_at);
     assert_eq!(info.last_request_at, fresh_at);
-    assert_eq!(info.candidate_count(), 0);
-    assert_eq!(info.failed_candidates, 0);
+    assert_eq!(info.consumed_slots(), 0);
+    assert_eq!(info.failed_secret_ids, 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -425,7 +425,7 @@ async fn test_concurrent_trash_hit_does_not_count_the_losing_miss_as_a_guess() {
         .get(&identifier_hash(SHA256_111111).unwrap())
         .cloned()
         .expect("trash requests must create a rate-limit entry");
-    assert_eq!(info.failed_candidates, 0);
+    assert_eq!(info.failed_secret_ids, 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -462,16 +462,16 @@ async fn test_committed_trash_race_returns_accepted_and_unauthorized_without_fai
         .get(&identifier_hash(SHA256_111111).unwrap())
         .cloned()
         .expect("trash requests must create a rate-limit entry");
-    assert_eq!(info.failed_candidates, 0);
+    assert_eq!(info.failed_secret_ids, 0);
 }
 
-/// After a successful `/trash`, the candidate that authenticated the deletion
-/// must be indistinguishable from any other candidate: same status, same
+/// After a successful `/trash`, the secret_id that authenticated the deletion
+/// must be indistinguishable from any other secret_id: same status, same
 /// counters. Keeping its tag recognizable made its replay free (`attempts`
 /// unchanged) while a different PIN consumed a slot (`attempts` + 1), which
 /// told a Backup File holder which PIN had been used for the deletion.
 #[tokio::test]
-async fn test_deleted_candidate_is_indistinguishable_from_a_new_candidate_after_trash() {
+async fn test_deleted_secret_id_is_indistinguishable_from_a_new_one_after_trash() {
     let (server, state) = crate::tests::test_server::new_test_server().await;
     let mut observed = Vec::new();
     for (identifier, probe) in [
@@ -508,8 +508,8 @@ async fn test_deleted_candidate_is_indistinguishable_from_a_new_candidate_after_
         observed.push((
             body.attempts,
             body.total_requests,
-            info.candidate_count(),
-            info.failed_candidates,
+            info.consumed_slots(),
+            info.failed_secret_ids,
         ));
     }
     assert_eq!(
@@ -519,12 +519,12 @@ async fn test_deleted_candidate_is_indistinguishable_from_a_new_candidate_after_
     assert_eq!(observed[0].0, 2, "the deletion's slot stays consumed");
 }
 
-/// The replay path forgets too: a candidate committed by a `/fetch` hit and
+/// The replay path forgets too: a secret_id committed by a `/fetch` hit and
 /// then replayed by a `/trash` that deletes the row is no longer recognizable.
 /// The trash response itself still reports one attempt, because the budget
 /// is unchanged by the deletion.
 #[tokio::test]
-async fn test_trash_of_a_fetched_candidate_forgets_its_tag_without_refunding_the_slot() {
+async fn test_trash_of_a_fetched_secret_id_forgets_it_without_refunding_the_slot() {
     let (server, state) = crate::tests::test_server::new_test_server().await;
     server
         .post("/store")
@@ -558,7 +558,7 @@ async fn test_trash_of_a_fetched_candidate_forgets_its_tag_without_refunding_the
                 .lock_for_test()
                 .await
                 .get(&identifier_hash(SHA256_111111).unwrap())
-                .is_some_and(|info| info.candidates.is_empty() && info.candidate_count() == 1);
+                .is_some_and(|info| info.secret_ids.is_empty() && info.consumed_slots() == 1);
             if forgotten {
                 break;
             }
@@ -566,7 +566,7 @@ async fn test_trash_of_a_fetched_candidate_forgets_its_tag_without_refunding_the
         }
     })
     .await
-    .expect("the deleted candidate's tag must be forgotten");
+    .expect("the deleted secret_id's tag must be forgotten");
 
     let response = server
         .post("/fetch")
@@ -600,7 +600,7 @@ async fn test_forgotten_slots_count_toward_saturation_and_survive_refunds() {
         .expect_success()
         .await;
 
-    // a refund of a Pending candidate must not drop the entry holding the slot
+    // a refund of a Pending secret_id must not drop the entry holding the slot
     let generation = state
         .attempts
         .ledger
@@ -616,10 +616,10 @@ async fn test_forgotten_slots_count_toward_saturation_and_survive_refunds() {
         .await
         .get_mut(&id_hash)
         .expect("entry")
-        .candidates
+        .secret_ids
         .insert(
             "pending-tag".to_owned(),
-            crate::attempts::ledger::CandidateState::Pending,
+            crate::attempts::ledger::SecretIdState::Pending,
         );
     state
         .attempts
@@ -634,8 +634,8 @@ async fn test_forgotten_slots_count_toward_saturation_and_survive_refunds() {
         .get(&id_hash)
         .cloned()
         .expect("the entry keeps the consumed slot through a refund");
-    assert_eq!(info.candidate_count(), 1);
-    assert!(info.candidates.is_empty());
+    assert_eq!(info.consumed_slots(), 1);
+    assert!(info.secret_ids.is_empty());
 
     // the remaining budget is max - 1, then saturation
     for index in 1..usize::from(max) {
@@ -643,7 +643,7 @@ async fn test_forgotten_slots_count_toward_saturation_and_survive_refunds() {
             .post("/fetch")
             .json(&fetch(
                 SHA256_111111,
-                &crate::tests::distinct_candidate(index),
+                &crate::tests::distinct_authentication_key(index),
             ))
             .expect_failure()
             .await;
@@ -681,9 +681,9 @@ async fn test_old_replay_forget_cannot_touch_a_replaced_window() {
     {
         let mut map = state.attempts.ledger.lock_for_test().await;
         let mut info = RateLimitInfo::new(fresh_at);
-        info.candidates.insert(
+        info.secret_ids.insert(
             "committed-tag".to_owned(),
-            crate::attempts::ledger::CandidateState::Committed,
+            crate::attempts::ledger::SecretIdState::Committed,
         );
         map.insert(id_hash.clone(), info);
     }
@@ -702,7 +702,7 @@ async fn test_old_replay_forget_cannot_touch_a_replaced_window() {
         .cloned()
         .expect("entry");
     assert_eq!(
-        info.candidates.len(),
+        info.secret_ids.len(),
         1,
         "a stale generation changes nothing"
     );
@@ -721,7 +721,7 @@ async fn test_old_replay_forget_cannot_touch_a_replaced_window() {
         .get(&id_hash)
         .cloned()
         .expect("entry");
-    assert!(info.candidates.is_empty(), "the current generation forgets");
+    assert!(info.secret_ids.is_empty(), "the current generation forgets");
     assert_eq!(info.forgotten_slots, 1);
-    assert_eq!(info.candidate_count(), 1);
+    assert_eq!(info.consumed_slots(), 1);
 }

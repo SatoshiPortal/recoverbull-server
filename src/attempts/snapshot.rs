@@ -231,11 +231,11 @@ impl AttemptsSnapshotState {
             .into_iter()
             .map(|entry| AttemptEntry {
                 id_hash: entry.id_hash,
-                total_attempts: entry.candidate_count,
-                failed_attempts: entry.failed_candidates,
+                total_attempts: entry.consumed_slots,
+                failed_attempts: entry.failed_secret_ids,
                 total_requests: entry.total_requests,
                 window_started_at: truncate_to_hour(entry.window_started_at),
-                last_attempt_at: truncate_to_hour(entry.last_candidate_at),
+                last_attempt_at: truncate_to_hour(entry.last_secret_id_at),
             })
             .collect();
         entries.sort_by(|a, b| a.id_hash.cmp(&b.id_hash));
@@ -309,14 +309,14 @@ pub(crate) struct AttemptEntry {
     /// SHA-256 of the raw identifier bytes, so clients can recognize their
     /// own identifier without exposing it (pre-image resistance).
     pub(crate) id_hash: String,
-    /// Total distinct candidates in the current cooldown window.
+    /// Total distinct secret_ids in the current cooldown window.
     pub(crate) total_attempts: u8,
     pub(crate) failed_attempts: u8,
     pub(crate) total_requests: u64,
     /// Hour-truncated: exact timestamps would ease correlation.
     pub(crate) window_started_at: chrono::DateTime<chrono::Utc>,
     /// Compatibility field name; this is the hour-truncated last distinct
-    /// candidate timestamp, never the timestamp of a replay request.
+    /// secret_id timestamp, never the timestamp of a replay request.
     pub(crate) last_attempt_at: chrono::DateTime<chrono::Utc>,
 }
 

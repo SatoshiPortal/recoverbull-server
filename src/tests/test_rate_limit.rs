@@ -1,5 +1,5 @@
 use crate::{
-    attempts::ledger::{CandidateState, RateLimitInfo},
+    attempts::ledger::{RateLimitInfo, SecretIdState},
     http::contract::{FetchSecret, ResponseFailedAttempt, StoreSecret},
     recovery::identifiers::{generate_secret_id, identifier_hash},
     tests::{BASE64_ENCRYPTED_SECRET, NOT_PASSWORD_HASH, SHA256_111111, SHA256_222222},
@@ -9,15 +9,15 @@ use diesel::RunQueryDsl;
 use std::time::Duration;
 
 #[tokio::test]
-async fn test_global_wipe_clears_candidates_resets_timestamp_and_snapshot() {
+async fn test_global_wipe_clears_secret_ids_resets_timestamp_and_snapshot() {
     let (server, state) = crate::tests::test_server::new_test_server().await;
     server.get("/attempts").expect_success().await;
     let before = state.attempts.snapshot.collection_started_at().await;
     {
         let mut map = state.attempts.ledger.lock_for_test().await;
         let mut info = RateLimitInfo::new(chrono::Utc::now());
-        info.candidates
-            .insert("candidate-tag".to_owned(), CandidateState::Committed);
+        info.secret_ids
+            .insert("secret_id-tag".to_owned(), SecretIdState::Committed);
         map.insert(SHA256_111111.to_owned(), info);
     }
     crate::attempts::maintenance::wipe_identifier_rate_limit(
@@ -61,17 +61,17 @@ async fn test_whole_map_retention_removes_only_expired_entries() {
             identifier_hash(SHA256_111111).unwrap(),
             RateLimitInfo {
                 window_started_at: expired_at,
-                last_candidate_at: expired_at,
+                last_secret_id_at: expired_at,
                 last_request_at: expired_at,
                 // expiry decides on the monotonic clock: back-date it too
-                last_candidate_instant: crate::tests::monotonic_age(
+                last_secret_id_instant: crate::tests::monotonic_age(
                     (state.attempts.policy.cooldown() + chrono::Duration::minutes(1))
                         .to_std()
                         .unwrap(),
                 ),
-                candidates: std::collections::HashMap::new(),
+                secret_ids: std::collections::HashMap::new(),
                 forgotten_slots: 0,
-                failed_candidates: 2,
+                failed_secret_ids: 2,
                 total_requests: 2,
             },
         );
@@ -79,12 +79,12 @@ async fn test_whole_map_retention_removes_only_expired_entries() {
             identifier_hash(SHA256_222222).unwrap(),
             RateLimitInfo {
                 window_started_at: now,
-                last_candidate_at: now,
+                last_secret_id_at: now,
                 last_request_at: now,
-                last_candidate_instant: tokio::time::Instant::now(),
-                candidates: std::collections::HashMap::new(),
+                last_secret_id_instant: tokio::time::Instant::now(),
+                secret_ids: std::collections::HashMap::new(),
                 forgotten_slots: 0,
-                failed_candidates: 1,
+                failed_secret_ids: 1,
                 total_requests: 1,
             },
         );
@@ -120,17 +120,17 @@ async fn test_fetch_expires_sub_threshold_entry_after_cooldown() {
             identifier_hash(SHA256_111111).unwrap(),
             RateLimitInfo {
                 window_started_at,
-                last_candidate_at: window_started_at,
+                last_secret_id_at: window_started_at,
                 last_request_at: window_started_at,
                 // expiry decides on the monotonic clock: back-date it too
-                last_candidate_instant: crate::tests::monotonic_age(
+                last_secret_id_instant: crate::tests::monotonic_age(
                     (state.attempts.policy.cooldown() + chrono::Duration::minutes(1))
                         .to_std()
                         .unwrap(),
                 ),
-                candidates: std::collections::HashMap::new(),
+                secret_ids: std::collections::HashMap::new(),
                 forgotten_slots: 0,
-                failed_candidates: 2,
+                failed_secret_ids: 2,
                 total_requests: 2,
             },
         );
@@ -253,7 +253,7 @@ async fn test_cancelled_request_does_not_consume_an_attempt() {
     let identifier_hash = identifier_hash(SHA256_111111).unwrap();
     let leaked_attempts = identifier_rate_limit
         .get(&identifier_hash)
-        .map(|info| info.candidate_count())
+        .map(|info| info.consumed_slots())
         .unwrap_or(0);
     assert_eq!(
         leaked_attempts, 0,
@@ -350,7 +350,7 @@ async fn test_cancelled_trash_after_sqlite_start_keeps_attempt_reserved() {
     assert_eq!(
         identifier_rate_limit
             .get(&identifier_hash(SHA256_111111).unwrap())
-            .map(|info| info.candidate_count()),
+            .map(|info| info.consumed_slots()),
         Some(1),
         "once SQLite has started, cancelling HTTP must not refund the committed attempt"
     );
@@ -448,7 +448,7 @@ async fn test_concurrent_cancellation_refunds_every_reservation() {
                 let map = state.attempts.ledger.lock_for_test().await;
                 if map
                     .get(&hash)
-                    .map(|info| info.candidate_count())
+                    .map(|info| info.consumed_slots())
                     .unwrap_or(0)
                     == 0
                 {
@@ -514,7 +514,7 @@ async fn test_deferred_refund_runs_when_drop_finds_the_lock_contended() {
                 let map = state.attempts.ledger.lock_for_test().await;
                 if map
                     .get(&hash)
-                    .map(|info| info.candidate_count())
+                    .map(|info| info.consumed_slots())
                     .unwrap_or(0)
                     == 1
                 {
@@ -543,7 +543,7 @@ async fn test_deferred_refund_runs_when_drop_finds_the_lock_contended() {
                 let map = state.attempts.ledger.lock_for_test().await;
                 if map
                     .get(&hash)
-                    .map(|info| info.candidate_count())
+                    .map(|info| info.consumed_slots())
                     .unwrap_or(0)
                     == 0
                 {
@@ -579,7 +579,7 @@ async fn test_a_forward_wall_clock_jump_does_not_reset_a_saturated_budget() {
             .post("/fetch")
             .json(&FetchSecret {
                 identifier: SHA256_111111.to_string(),
-                authentication_key: crate::tests::distinct_candidate(index),
+                authentication_key: crate::tests::distinct_authentication_key(index),
             })
             .expect_failure()
             .await;
@@ -603,7 +603,7 @@ async fn test_a_forward_wall_clock_jump_does_not_reset_a_saturated_budget() {
             .get_mut(&identifier_hash(SHA256_111111).unwrap())
             .expect("the saturated entry is present");
         info.window_started_at -= jump;
-        info.last_candidate_at -= jump;
+        info.last_secret_id_at -= jump;
         info.last_request_at -= jump;
     }
 
@@ -611,20 +611,20 @@ async fn test_a_forward_wall_clock_jump_does_not_reset_a_saturated_budget() {
         .post("/fetch")
         .json(&FetchSecret {
             identifier: SHA256_111111.to_string(),
-            authentication_key: crate::tests::distinct_candidate(max as usize + 1),
+            authentication_key: crate::tests::distinct_authentication_key(max as usize + 1),
         })
         .expect_failure()
         .await;
     assert_eq!(
         response.status_code(),
         StatusCode::TOO_MANY_REQUESTS,
-        "a forward wall-clock jump must not grant a fresh candidate budget"
+        "a forward wall-clock jump must not grant a fresh secret_id budget"
     );
 
     let map = state.attempts.ledger.lock_for_test().await;
     let info = &map[&identifier_hash(SHA256_111111).unwrap()];
     assert_eq!(
-        info.candidate_count(),
+        info.consumed_slots(),
         max,
         "the budget must still be fully consumed after the jump"
     );
@@ -643,7 +643,7 @@ async fn test_a_forward_wall_clock_jump_does_not_drop_active_entries() {
         let mut map = state.attempts.ledger.lock_for_test().await;
         // published timestamps far in the past, monotonic reading fresh
         let mut info = RateLimitInfo::new(jumped_past);
-        info.failed_candidates = 2;
+        info.failed_secret_ids = 2;
         info.total_requests = 2;
         map.insert(identifier_hash(SHA256_111111).unwrap(), info);
     }

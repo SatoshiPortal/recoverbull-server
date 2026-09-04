@@ -34,7 +34,7 @@ async fn test_attempts_publish_hashed_identifier_with_counters() {
             .post("/fetch")
             .json(&FetchSecret {
                 identifier: SHA256_111111.to_string(),
-                authentication_key: crate::tests::distinct_candidate(index),
+                authentication_key: crate::tests::distinct_authentication_key(index),
             })
             .expect_failure()
             .await;
@@ -94,7 +94,7 @@ async fn test_attempts_count_hits_and_planted_rows() {
             .post("/fetch")
             .json(&FetchSecret {
                 identifier: SHA256_111111.to_string(),
-                authentication_key: crate::tests::distinct_candidate(index),
+                authentication_key: crate::tests::distinct_authentication_key(index),
             })
             .expect_failure()
             .await;
@@ -133,7 +133,7 @@ async fn test_fetch_success_reports_status_without_resetting_attempt_budget() {
             .post("/fetch")
             .json(&FetchSecret {
                 identifier: SHA256_111111.to_string(),
-                authentication_key: crate::tests::distinct_candidate(index),
+                authentication_key: crate::tests::distinct_authentication_key(index),
             })
             .expect_failure()
             .await;
@@ -356,17 +356,17 @@ async fn test_attempts_omit_expired_entries_at_build_time() {
             crate::recovery::identifiers::identifier_hash(SHA256_111111).unwrap(),
             RateLimitInfo {
                 window_started_at,
-                last_candidate_at: window_started_at,
+                last_secret_id_at: window_started_at,
                 last_request_at: window_started_at,
                 // expiry decides on the monotonic clock: back-date it too
-                last_candidate_instant: crate::tests::monotonic_age(
+                last_secret_id_instant: crate::tests::monotonic_age(
                     (state.attempts.policy.cooldown() + chrono::Duration::seconds(1))
                         .to_std()
                         .unwrap(),
                 ),
-                candidates: std::collections::HashMap::new(),
+                secret_ids: std::collections::HashMap::new(),
                 forgotten_slots: 0,
-                failed_candidates: 1,
+                failed_secret_ids: 1,
                 total_requests: 1,
             },
         );
@@ -379,7 +379,7 @@ async fn test_attempts_omit_expired_entries_at_build_time() {
 }
 
 #[tokio::test]
-async fn test_attempts_last_attempt_at_is_last_distinct_candidate() {
+async fn test_attempts_last_attempt_at_is_last_distinct_secret_id() {
     let state = crate::app::init();
     state
         .attempts
@@ -387,7 +387,7 @@ async fn test_attempts_last_attempt_at_is_last_distinct_candidate() {
         .set_cooldown_for_test(chrono::TimeDelta::hours(24));
     let now = chrono::Utc::now();
     let window_started_at = now - chrono::TimeDelta::hours(4);
-    let last_candidate_at = now - chrono::TimeDelta::hours(2);
+    let last_secret_id_at = now - chrono::TimeDelta::hours(2);
     let last_request_at = now - chrono::TimeDelta::hours(1);
     {
         let mut entries = state.attempts.ledger.lock_for_test().await;
@@ -395,15 +395,15 @@ async fn test_attempts_last_attempt_at_is_last_distinct_candidate() {
             crate::recovery::identifiers::identifier_hash(SHA256_111111).unwrap(),
             RateLimitInfo {
                 window_started_at,
-                last_candidate_at,
+                last_secret_id_at,
                 last_request_at,
                 // The entry is active (24-hour cooldown), so the monotonic
-                // clock stays fresh while the *published* last_candidate_at
+                // clock stays fresh while the *published* last_secret_id_at
                 // remains two hours old: that decoupling is the point here.
-                last_candidate_instant: tokio::time::Instant::now(),
-                candidates: std::collections::HashMap::new(),
+                last_secret_id_instant: tokio::time::Instant::now(),
+                secret_ids: std::collections::HashMap::new(),
                 forgotten_slots: 0,
-                failed_candidates: 1,
+                failed_secret_ids: 1,
                 total_requests: 4,
             },
         );
@@ -414,7 +414,7 @@ async fn test_attempts_last_attempt_at_is_last_distinct_candidate() {
     let (_, snapshot) = decode_gzip(response.as_bytes());
     assert_eq!(
         snapshot.entries[0].last_attempt_at,
-        crate::attempts::snapshot::truncate_to_hour(last_candidate_at)
+        crate::attempts::snapshot::truncate_to_hour(last_secret_id_at)
     );
     assert_eq!(snapshot.entries[0].total_requests, 4);
 }
@@ -461,12 +461,12 @@ async fn test_attempts_snapshot_at_full_map_scale() {
                 format!("{:064x}", i),
                 crate::attempts::ledger::RateLimitInfo {
                     window_started_at: now,
-                    last_candidate_at: now,
+                    last_secret_id_at: now,
                     last_request_at: now,
-                    last_candidate_instant: tokio::time::Instant::now(),
-                    candidates: std::collections::HashMap::new(),
+                    last_secret_id_instant: tokio::time::Instant::now(),
+                    secret_ids: std::collections::HashMap::new(),
                     forgotten_slots: 0,
-                    failed_candidates: 0,
+                    failed_secret_ids: 0,
                     total_requests: 1,
                 },
             );
@@ -501,12 +501,12 @@ async fn test_attempts_snapshot_at_full_map_scale() {
 }
 
 /// The published snapshot is a function of the counters and timestamps only:
-/// changing every retained CandidateTag, while leaving the counters alone,
+/// changing every retained SecretId, while leaving the counters alone,
 /// must not change a single published byte. The snapshot build projects the
-/// ledger instead of cloning it, so a CandidateTag cannot reach the payload
+/// ledger instead of cloning it, so a SecretId cannot reach the payload
 /// and cannot be inferred from its size either.
 #[tokio::test]
-async fn test_snapshot_is_independent_of_candidate_tags() {
+async fn test_snapshot_is_independent_of_secret_ids() {
     let mut state = crate::app::init();
     // force a rebuild on every request
     state
@@ -525,57 +525,57 @@ async fn test_snapshot_is_independent_of_candidate_tags() {
     let seed = |tag_prefix: &'static str| {
         let mut info = RateLimitInfo::new(now);
         for index in 0..3u8 {
-            info.candidates.insert(
+            info.secret_ids.insert(
                 sha256_hex(format!("{tag_prefix}-{index}").as_bytes()),
-                crate::attempts::ledger::CandidateState::Committed,
+                crate::attempts::ledger::SecretIdState::Committed,
             );
         }
-        info.failed_candidates = 2;
+        info.failed_secret_ids = 2;
         info.total_requests = 7;
         info
     };
 
     {
         let mut map = state.attempts.ledger.lock_for_test().await;
-        map.insert(id_hash.clone(), seed("first-candidate-set"));
+        map.insert(id_hash.clone(), seed("first-secret_id-set"));
     }
     let first = server.get("/attempts").expect_success().await;
     let first_etag = first.header("etag").to_str().unwrap().to_string();
     let first_body = first.as_bytes().to_vec();
 
-    // same counters and timestamps, entirely different CandidateTags
+    // same counters and timestamps, entirely different `secret_id` values
     {
         let mut map = state.attempts.ledger.lock_for_test().await;
-        let replacement = seed("totally-different-candidate-set");
+        let replacement = seed("totally-different-secret_id-set");
         let existing = map.get_mut(&id_hash).expect("the seeded entry is present");
         assert_eq!(
-            existing.candidate_count(),
-            replacement.candidate_count(),
+            existing.consumed_slots(),
+            replacement.consumed_slots(),
             "the two tag sets must present the same counters"
         );
-        existing.candidates = replacement.candidates;
+        existing.secret_ids = replacement.secret_ids;
     }
     let second = server.get("/attempts").expect_success().await;
     let second_etag = second.header("etag").to_str().unwrap().to_string();
 
     assert_eq!(
         first_etag, second_etag,
-        "replacing every CandidateTag must not change the ETag"
+        "replacing every SecretId must not change the ETag"
     );
     assert_eq!(
         first_body,
         second.as_bytes().to_vec(),
-        "replacing every CandidateTag must not change the published bytes"
+        "replacing every SecretId must not change the published bytes"
     );
 
     // and no tag from either set appears in the payload
     let (body, snapshot) = decode_gzip(second.as_bytes());
-    for tag_prefix in ["first-candidate-set", "totally-different-candidate-set"] {
+    for tag_prefix in ["first-secret_id-set", "totally-different-secret_id-set"] {
         for index in 0..3u8 {
             let tag = sha256_hex(format!("{tag_prefix}-{index}").as_bytes());
             assert!(
                 !body.contains(&tag),
-                "a CandidateTag must never appear in the snapshot"
+                "a SecretId must never appear in the snapshot"
             );
         }
     }
@@ -652,11 +652,11 @@ async fn wipe_during_in_flight_build_publishes_nothing_pre_wipe(pause_point: u8)
     {
         let mut map = state.attempts.ledger.lock_for_test().await;
         let mut info = RateLimitInfo::new(chrono::Utc::now());
-        info.candidates.insert(
-            sha256_hex(b"pre-wipe candidate"),
-            crate::attempts::ledger::CandidateState::Committed,
+        info.secret_ids.insert(
+            sha256_hex(b"pre-wipe secret_id"),
+            crate::attempts::ledger::SecretIdState::Committed,
         );
-        info.failed_candidates = 1;
+        info.failed_secret_ids = 1;
         info.total_requests = 1;
         map.insert(id_hash.clone(), info);
     }

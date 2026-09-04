@@ -62,11 +62,11 @@ pub(crate) async fn capture<F: Future>(future: F) -> (F::Output, String) {
 
 fn assert_no_sensitive_values(logs: &str, canary: &str) {
     let id_hash = crate::recovery::identifiers::identifier_hash(SHA256_111111).unwrap();
-    let known_candidate =
+    let known_secret_id =
         crate::recovery::identifiers::generate_secret_id(SHA256_111111, SHA256_222222);
-    let miss_candidate = crate::recovery::identifiers::generate_secret_id(
+    let miss_secret_id = crate::recovery::identifiers::generate_secret_id(
         SHA256_111111,
-        &crate::tests::distinct_candidate(0),
+        &crate::tests::distinct_authentication_key(0),
     );
     for sensitive in [
         SHA256_111111,
@@ -74,8 +74,8 @@ fn assert_no_sensitive_values(logs: &str, canary: &str) {
         BASE64_ENCRYPTED_SECRET,
         SHA256_CONCAT_111111_222222,
         id_hash.as_str(),
-        known_candidate.as_str(),
-        miss_candidate.as_str(),
+        known_secret_id.as_str(),
+        miss_secret_id.as_str(),
         canary,
     ] {
         assert!(
@@ -325,17 +325,17 @@ async fn test_sensitive_operations_do_not_log_secret_material() {
             .post("/fetch")
             .json(&FetchSecret {
                 identifier: SHA256_111111.to_owned(),
-                authentication_key: crate::tests::distinct_candidate(0),
+                authentication_key: crate::tests::distinct_authentication_key(0),
             })
             .await;
         let trashed = server.post("/trash").json(&fetch).await;
-        // Replaying the known-miss candidate exercises the rejected path after
+        // Replaying the known-miss secret_id exercises the rejected path after
         // the successful store/fetch/trash flow without introducing a fixture.
         let rejected_replay = server
             .post("/fetch")
             .json(&FetchSecret {
                 identifier: SHA256_111111.to_owned(),
-                authentication_key: crate::tests::distinct_candidate(0),
+                authentication_key: crate::tests::distinct_authentication_key(0),
             })
             .await;
         (

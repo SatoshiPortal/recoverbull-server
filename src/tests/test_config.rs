@@ -2,7 +2,7 @@ use crate::config::{
     canary_file_state, estimated_peak_memory_bytes, max_identifiers_within_budget,
     unique_test_database, validate_capacity, validate_config, validate_snapshot_ttl,
     validate_token_bucket, CanaryFileState, DEFAULT_MEMORY_BUDGET_MB, MAX_DATABASE_CONCURRENCY,
-    PROCESS_MEMORY_RESERVE_BYTES, RATE_LIMIT_BYTES_PER_CANDIDATE, RATE_LIMIT_BYTES_PER_IDENTIFIER,
+    PROCESS_MEMORY_RESERVE_BYTES, RATE_LIMIT_BYTES_PER_IDENTIFIER, RATE_LIMIT_BYTES_PER_SECRET_ID,
 };
 
 /// The documented production budget, in bytes.
@@ -103,23 +103,23 @@ fn test_validate_capacity_rejects_the_former_ten_million_ceiling() {
 }
 
 /// The bound moves with `RATE_LIMIT_MAX_ATTEMPTS`, because a retained
-/// CandidateTag is a 64-character String and an entry holds up to the
+/// SecretId is a 64-character String and an entry holds up to the
 /// configured budget of them. The former fixed ceiling ignored this entirely.
 #[test]
-fn test_validate_capacity_tracks_the_candidate_budget() {
+fn test_validate_capacity_tracks_the_secret_id_budget() {
     let capacity = 200_000;
     assert!(
         validate_capacity(capacity, 16, 3, DEFAULT_BUDGET).is_ok(),
-        "200,000 identifiers at 3 candidates must fit the default budget"
+        "200,000 identifiers at 3 secret_ids must fit the default budget"
     );
     assert!(
         validate_capacity(capacity, 16, 255, DEFAULT_BUDGET).is_err(),
-        "the same capacity at the u8 candidate ceiling must not fit"
+        "the same capacity at the u8 secret_id ceiling must not fit"
     );
     assert!(
         max_identifiers_within_budget(255, DEFAULT_BUDGET)
             < max_identifiers_within_budget(3, DEFAULT_BUDGET),
-        "a larger candidate budget must lower the admissible capacity"
+        "a larger secret_id budget must lower the admissible capacity"
     );
 }
 
@@ -174,13 +174,13 @@ fn test_estimated_peak_memory_does_not_wrap() {
     );
     assert_eq!(
         estimated_peak_memory_bytes(2, 1),
-        Some(2 * (RATE_LIMIT_BYTES_PER_IDENTIFIER + RATE_LIMIT_BYTES_PER_CANDIDATE))
+        Some(2 * (RATE_LIMIT_BYTES_PER_IDENTIFIER + RATE_LIMIT_BYTES_PER_SECRET_ID))
     );
 }
 
 /// The per-entry constants stay at or above what a release build measured,
 /// so the model cannot silently drift back to an optimistic value: 100,000
-/// entries at 3 candidates measured 117 MB of peak RSS, and the model must
+/// entries at 3 secret_ids measured 117 MB of peak RSS, and the model must
 /// not predict less than that.
 #[test]
 fn test_capacity_model_is_not_optimistic_against_the_measurement() {

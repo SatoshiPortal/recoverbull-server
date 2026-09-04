@@ -5,7 +5,6 @@ pub mod test_concurrency;
 pub mod test_config;
 pub mod test_contract;
 pub mod test_db_errors;
-pub mod test_distinct_candidates;
 pub mod test_fetch;
 pub mod test_http_boundary;
 pub mod test_info;
@@ -13,6 +12,7 @@ pub mod test_logging;
 pub mod test_migrations;
 pub mod test_privacy;
 pub mod test_rate_limit;
+pub mod test_secret_id_budget;
 pub mod test_secure_delete;
 pub mod test_server;
 pub mod test_store;
@@ -26,7 +26,7 @@ static SHA256_CONCAT_111111_222222: &str =
 static NOT_PASSWORD_HASH: &str = "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb";
 static BASE64_ENCRYPTED_SECRET: &str = "4a1dl1T8cxcP2pnvxwYWDwm/I68vVd9oWMY0nTOmBSNbonEN/mfBjkPWkSNlxjWacsS2lRVzoGUQ4guZArKf415dLvbObReqWNtzmA4vaB9/feJapmgWAssVI9EbhJFf";
 
-pub(crate) fn distinct_candidate(index: usize) -> String {
+pub(crate) fn distinct_authentication_key(index: usize) -> String {
     format!("{:064x}", index + 1)
 }
 

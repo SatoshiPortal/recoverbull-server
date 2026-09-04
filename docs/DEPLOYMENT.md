@@ -40,12 +40,12 @@ limit overrides the declared budget. Still declare
 `RATE_LIMIT_MEMORY_BUDGET_MB`: it is the only bound when the service runs
 without a cgroup memory limit.
 
-At the default capacity (100,000 identifiers, 3 candidates) a release build
+At the default capacity (100,000 identifiers, 3 `secret_id` values) a release build
 measured 117 MB peak RSS, 22.1 MB JSON, and 4.01 MB gzip; an earlier audit
 recorded about 254 MiB peak on a different host with the same gzip size. Both
 are far above the 150-180 bytes per entry the code used to claim, which is why
 the fixed capacity ceiling was replaced by the budget check. Per-entry cost is
-dominated by the candidate budget, so re-measure RSS after changing
+dominated by the `secret_id` budget, so re-measure RSS after changing
 `RATE_LIMIT_MAX_ATTEMPTS` or the identifier cap before selecting a value:
 
 ```sh
@@ -97,7 +97,7 @@ sudo chmod 0600 /var/lib/recoverbull/.env
 
 Populate `.env` using the operator's secret-management procedure. It must
 contain the deployment values required by the server, including the database
-path, loopback address, canary, cooldown, and candidate budget; this document
+path, loopback address, canary, cooldown, and `secret_id` budget; this document
 does not provide example secrets or canary values. Keep the SQLite database,
 WAL, and any Litestream state below `/var/lib/recoverbull`.
 

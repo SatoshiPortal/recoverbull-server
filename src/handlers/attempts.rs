@@ -15,7 +15,7 @@ use axum::{
 /// Public lookup telemetry.
 ///
 /// Publishes *every* identifier with an active fetch/trash entry, not only
-/// the saturated ones: a single admitted candidate creates an entry, and the
+/// the saturated ones: a single admitted secret_id creates an entry, and the
 /// entry is published until it expires. The count of published entries is
 /// therefore the live size of the rate-limit map, and its ratio to the
 /// `max_attempt_identifiers` advertised by `/info` is the aggregate
@@ -57,12 +57,12 @@ pub async fn get_attempts(State(state): State<AppState>, headers: HeaderMap) -> 
         .get(header::IF_NONE_MATCH)
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| {
-            value.split(',').any(|candidate| {
-                let candidate = candidate.trim();
+            value.split(',').any(|secret_id| {
+                let secret_id = secret_id.trim();
                 // RFC 9110: If-None-Match uses the weak comparison function,
                 // so a weak validator W/"…" matches our strong ETag.
-                let candidate = candidate.strip_prefix("W/").unwrap_or(candidate);
-                candidate == "*" || candidate == etag
+                let secret_id = secret_id.strip_prefix("W/").unwrap_or(secret_id);
+                secret_id == "*" || secret_id == etag
             })
         });
 

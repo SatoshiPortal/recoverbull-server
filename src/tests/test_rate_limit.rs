@@ -49,7 +49,7 @@ fn test_production_global_wipe_interval_is_24_hours() {
 }
 
 #[tokio::test]
-async fn test_sweep_removes_only_expired_entries() {
+async fn test_whole_map_retention_removes_only_expired_entries() {
     let (_, state) = crate::tests::test_server::new_test_server().await;
 
     let now = chrono::Utc::now();
@@ -90,11 +90,11 @@ async fn test_sweep_removes_only_expired_entries() {
         );
     }
 
-    crate::attempts::maintenance::sweep_expired_identifiers(
-        &state.attempts.ledger,
-        state.attempts.policy.cooldown(),
-    )
-    .await;
+    state
+        .attempts
+        .ledger
+        .retain_active(state.attempts.policy.cooldown())
+        .await;
 
     let identifier_rate_limit = state.attempts.ledger.lock_for_test().await;
     assert!(
@@ -630,10 +630,11 @@ async fn test_a_forward_wall_clock_jump_does_not_reset_a_saturated_budget() {
     );
 }
 
-/// The expiry sweeper follows the same monotonic decision: a forward
-/// wall-clock jump must not sweep the whole map and reset every budget.
+/// Whole-map retention follows the same monotonic decision: a forward
+/// wall-clock jump must not drop every entry and reset every budget. This is
+/// the path a snapshot build and a full map both take.
 #[tokio::test]
-async fn test_a_forward_wall_clock_jump_does_not_sweep_active_entries() {
+async fn test_a_forward_wall_clock_jump_does_not_drop_active_entries() {
     let (_, state) = crate::tests::test_server::new_test_server().await;
 
     let jumped_past =
@@ -647,16 +648,16 @@ async fn test_a_forward_wall_clock_jump_does_not_sweep_active_entries() {
         map.insert(identifier_hash(SHA256_111111).unwrap(), info);
     }
 
-    crate::attempts::maintenance::sweep_expired_identifiers(
-        &state.attempts.ledger,
-        state.attempts.policy.cooldown(),
-    )
-    .await;
+    state
+        .attempts
+        .ledger
+        .retain_active(state.attempts.policy.cooldown())
+        .await;
 
     let map = state.attempts.ledger.lock_for_test().await;
     assert!(
         map.contains_key(&identifier_hash(SHA256_111111).unwrap()),
-        "an entry that is only wall-clock-old must survive the sweep"
+        "an entry that is only wall-clock-old must survive whole-map retention"
     );
 }
 

@@ -349,7 +349,7 @@ async fn test_attempts_entries_are_sorted_by_id_hash() {
 }
 
 #[tokio::test]
-async fn test_attempts_omit_entries_after_cooldown_without_waiting_for_sweeper() {
+async fn test_attempts_omit_expired_entries_at_build_time() {
     let state = crate::app::init();
     {
         let mut entries = state.attempts.ledger.lock_for_test().await;

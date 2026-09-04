@@ -73,7 +73,6 @@ async fn main() {
     tracing::info!(target: "security", secure_delete = true, counter_window_seconds = 300, "security controls enabled");
     app_state.spawn_security_reporter(std::time::Duration::from_secs(300));
 
-    app_state.spawn_attempts_sweeper();
     let mut wiper = app_state.spawn_production_wiper();
 
     let app = router::new(app_state.clone());

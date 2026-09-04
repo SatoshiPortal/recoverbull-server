@@ -139,15 +139,6 @@ impl AppState {
         crate::observability::counters::spawn_reporter(self.components.counters.clone(), period);
     }
 
-    /// Starts expiry maintenance without exposing the ledger to the process
-    /// entry point or to request handlers.
-    pub(crate) fn spawn_attempts_sweeper(&self) {
-        crate::attempts::maintenance::spawn_sweeper(
-            self.components.attempts.ledger.clone(),
-            self.components.attempts.policy.cooldown(),
-        );
-    }
-
     /// Starts the production wipe task and returns its lifecycle handle.
     pub(crate) fn spawn_production_wiper(&self) -> tokio::task::JoinHandle<()> {
         crate::attempts::maintenance::spawn_production_wiper(

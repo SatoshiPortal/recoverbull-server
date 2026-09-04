@@ -1,13 +1,19 @@
 # RecoverBull deployment
 
-This repository contains templates for one service instance:
+All files under `deploy/` are operator-adapted examples, not universal
+production configurations or a guarantee about the installed system. See
+[`deploy/README.md`](../deploy/README.md) for the operator contract. Repository
+tests cover the committed examples only; the operator owns component updates,
+security advisories, installed-configuration validation, and end-to-end tests.
+
+The examples describe one service instance:
 
 * binary: `/opt/recoverbull/bin/keychain`
 * user/group: `recoverbull:recoverbull`
 * working and data directory: `/var/lib/recoverbull`
 * dotenv: `/var/lib/recoverbull/.env` (read from the working directory)
-* Axum: `127.0.0.1:3001` → reference nginx (or the conditional Caddy
-  alternative): `127.0.0.1:3000` → Tor onion service
+* Axum: `127.0.0.1:3001` → example reverse proxy:
+  `127.0.0.1:3000` → Tor onion service
 
 The model requires strict single-instance operation. The binary does not
 enforce that requirement, and only warns when bound publicly. Stop the old
@@ -15,16 +21,78 @@ instance before starting a replacement; never overlap them. Do not restart
 daily: the in-memory wipe is internal and runs every 24 hours. An exceptional
 restart resets the budget and collection.
 
-For the SQLite backup, verification, and restore drill, follow
+For the SQLite backup, application-owned database check, and restore drill, follow
 [deploy/backup/README.md](../deploy/backup/README.md).
 
-The application grace period is 35 seconds. systemd allows 40 seconds for
-stop, and `Restart=no` avoids turning a crash loop into repeated budget resets.
-`LimitCORE=0`, `UMask=0077`, and the SQLite-compatible sandbox are intentional.
-`MemoryMax=512M` is a reference gate, not a universal guarantee: the README's
-default-capacity measurement reached about 254 MiB peak RSS on one host, so
-measure RSS
-with the configured identifier cap and snapshot size before selecting a value.
+The application grace period is 35 seconds, and it is one budget for both
+halves of stopping: Axum draining its in-flight requests, and the detached
+SQLite work those requests handed to blocking threads. The process bounds
+both itself — it builds its Tokio runtime explicitly and stops waiting for
+detached work when the period is spent — so `TimeoutStopSec=40s` is the outer
+safety net rather than the only bound. Blocking work is not cancellable, so a
+thread may still be finishing when the process exits; that is why the SQLite
+operations are transactional. `Restart=no` avoids turning a crash loop into
+repeated budget resets.
+`LimitCORE=0`, `UMask=0077`, an empty `CapabilityBoundingSet`,
+`PrivateDevices=true`, and the SQLite-compatible sandbox are intentional.
+`MemoryMax=512M` is an example gate, not a universal guarantee. Startup reads
+the limit the kernel will actually enforce on the process from the cgroup and
+sizes `RATE_LIMIT_MAX_IDENTIFIERS` against the lower of that and
+`RATE_LIMIT_MEMORY_BUDGET_MB`, using the measured per-entry cost and the
+configured `RATE_LIMIT_MAX_ATTEMPTS`. It refuses to start rather than let the
+cgroup kill a full map mid-snapshot — which, with `Restart=no`, would leave the
+service down until an operator intervenes. Lowering `MemoryMax` therefore
+tightens the capacity check automatically, and startup warns when the enforced
+limit overrides the declared budget. Still declare
+`RATE_LIMIT_MEMORY_BUDGET_MB`: it is the only bound when the service runs
+without a cgroup memory limit.
+
+At the default capacity (100,000 identifiers, 3 `secret_id` values) a release build
+measured 117 MB peak RSS, 22.1 MB JSON, and 4.01 MB gzip; an earlier audit
+recorded about 254 MiB peak on a different host with the same gzip size. Both
+are far above the 150-180 bytes per entry the code used to claim, which is why
+the fixed capacity ceiling was replaced by the budget check. Per-entry cost is
+dominated by the `secret_id` budget, so re-measure RSS after changing
+`RATE_LIMIT_MAX_ATTEMPTS` or the identifier cap before selecting a value:
+
+```sh
+# with the service running under its real configuration, after the map has
+# filled and at least one /attempts snapshot has been built
+grep VmHWM /proc/$(systemctl show -p MainPID --value recoverbull)/status
+```
+
+## Log volume and retention
+
+The application policy is one `WARN` line per genuine server `500`, one aggregate
+counter line every five minutes at `info`, and a few lifecycle lines. A `503`
+is never logged per request, so an exhausted token bucket cannot fill the
+disk. There is no in-process log quota; volume control is an operator-owned
+journald responsibility.
+
+`systemd-journald` rate-limits per service, 10,000 messages per 30 seconds by
+default, and records a "suppressed N messages" line when it does. Set an
+explicit policy in a drop-in if the default is not wanted:
+
+```ini
+# /etc/systemd/system/recoverbull.service.d/logging.conf
+[Service]
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=200
+```
+
+The drop-in is an example and is not installed by this repository. The
+operator must select limits and retention for the host, verify that they are
+active, and monitor journald's suppressed-message notices. During a sustained
+failure, journald may drop both per-request WARN lines and the five-minute
+aggregate `info` line. If that aggregate must be durable, export it to an
+independently bounded sink.
+
+Never run a live service with `RUST_LOG=trace`: Axum traces extractor
+rejections at that level with a message derived from the request body. The
+example `RUST_LOG` is `info`. nginx and Tor logs are not covered by the
+application's log guarantees. The nginx example writes critical errors to a
+restricted file governed by the operator-adapted logrotate example.
+[docs/RETENTION.md](RETENTION.md) governs retention.
 
 ## Reproducible installation
 
@@ -44,26 +112,23 @@ sudo chmod 0600 /var/lib/recoverbull/.env
 
 Populate `.env` using the operator's secret-management procedure. It must
 contain the deployment values required by the server, including the database
-path, loopback address, canary, cooldown, and candidate budget; this document
+path, loopback address, canary, cooldown, and `secret_id` budget; this document
 does not provide example secrets or canary values. Keep the SQLite database,
 WAL, and any Litestream state below `/var/lib/recoverbull`.
 
-Install the maintained application, Tor, and logging templates without changing
-their concrete paths. Nginx is the default runbook path; choose exactly one
-reverse proxy and never install/start both listeners:
+Install adapted copies of the application and Tor examples at the concrete
+paths expected by this example:
 
 ```sh
 sudo install -o root -g root -m 0644 deploy/systemd/recoverbull.service /etc/systemd/system/recoverbull.service
-sudo install -o root -g root -m 0644 deploy/nginx/recoverbull.conf /etc/nginx/conf.d/recoverbull.conf
 sudo install -o root -g root -m 0644 deploy/tor/recoverbull.torrc.example /etc/tor/conf.d/recoverbull.conf
-sudo install -o root -g root -m 0644 deploy/logrotate/recoverbull /etc/logrotate.d/recoverbull
 ```
 
-To choose Caddy instead, do not install the nginx template. Follow
-[deploy/caddy/README.md](../deploy/caddy/README.md) for the pinned custom build,
-atomic binary/config installation, service ownership, and Caddy validation; the
-repository does not provide a versioned Caddy systemd unit. Caddy is admissible
-only after those checks and its required HTTP smokes pass.
+Follow [deploy/nginx/README.md](../deploy/nginx/README.md), adapt the include
+path, cache/log ownership, service unit, and log rotation to the installed
+distribution, then record `nginx -V`. The repository smoke-tests its committed
+example; the operator owns the installed package, security updates, and any
+configuration divergence.
 
 The Tor service account must be able to create and read
 `/var/lib/tor/recoverbull/`; do not copy its private hostname keys into this
@@ -76,20 +141,24 @@ service:
 ```sh
 sudo systemd-analyze verify /etc/systemd/system/recoverbull.service
 sudo nginx -t
+python3 deploy/nginx/smoke.py /usr/sbin/nginx
 sudo -u debian-tor tor --verify-config -f /etc/tor/conf.d/recoverbull.conf
 ```
 
-For the exclusive Caddy choice, replace `nginx -t` with the `adapt --validate`
-and `validate` commands in the Caddy README. Do not start either proxy until
-its validation succeeds.
-
 If the Tor account is named differently, use that account. `systemd-analyze`
 can validate the unit without starting it; nginx and Tor validation may need
-root or their service account because the configured directories are private.
-The unit's `ProtectSystem=full` leaves the system tree protected while
-`ReadWritePaths=/var/lib/recoverbull` permits SQLite's database and WAL. Its
-address-family restriction permits loopback TCP and Unix sockets, not public
-exposure policy; the binary's public-bind behavior remains a warning by design.
+their service accounts because the configured directories are private.
+The unit's `ProtectSystem=strict` leaves the whole file tree read-only except
+`ReadWritePaths=/var/lib/recoverbull`, which permits SQLite's database and WAL.
+It drops every capability, filters system calls to `@system-service`, restricts
+namespaces, protects kernel tunables/modules/logs, and allows only loopback IP
+traffic (`IPAddressDeny=any` with `localhost`); `PrivateNetwork` is deliberately
+not set because the process must remain reachable on loopback by the proxy. It
+exposes only systemd's private minimal device set;
+operators must preserve those controls unless an installed dependency has a
+tested, documented requirement. Its address-family restriction permits
+loopback TCP and Unix sockets, not public exposure policy; the binary's
+public-bind behavior remains a warning by design.
 
 Start in dependency order and smoke-test each boundary:
 
@@ -103,8 +172,8 @@ curl --fail http://127.0.0.1:3000/info
 curl --fail --compressed http://127.0.0.1:3000/attempts
 ```
 
-For Caddy, enable/start the operator-provided Caddy service instead of nginx,
-using the start/stop procedure in `deploy/caddy/README.md`; never run both.
+Here `nginx` is the operator-provided service; substitute its actual unit name
+if different.
 
 Run store/fetch/trash with a test fixture appropriate to the environment, then
 verify the canary and inspect `systemctl status` and restricted logs before

@@ -14,9 +14,9 @@ pub(crate) struct Info {
     pub(crate) secret_max_length: usize,
     /// Current warrant-canary value or the deliberate empty value.
     pub(crate) canary: String,
-    /// Candidate cooldown in minutes.
+    /// Cooldown in minutes for the per-identifier `secret_id` budget.
     pub(crate) rate_limit_cooldown: u64,
-    /// Maximum distinct candidates per identifier.
+    /// Maximum distinct secret_ids per identifier.
     pub(crate) rate_limit_max_attempts: u8,
     /// Legacy alias for `rate_limit_max_attempts`; retained for compatibility.
     pub(crate) rate_limit_max_failed_attempts: u8,

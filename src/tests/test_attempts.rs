@@ -34,7 +34,7 @@ async fn test_attempts_publish_hashed_identifier_with_counters() {
             .post("/fetch")
             .json(&FetchSecret {
                 identifier: SHA256_111111.to_string(),
-                authentication_key: crate::tests::distinct_candidate(index),
+                authentication_key: crate::tests::distinct_authentication_key(index),
             })
             .expect_failure()
             .await;
@@ -94,7 +94,7 @@ async fn test_attempts_count_hits_and_planted_rows() {
             .post("/fetch")
             .json(&FetchSecret {
                 identifier: SHA256_111111.to_string(),
-                authentication_key: crate::tests::distinct_candidate(index),
+                authentication_key: crate::tests::distinct_authentication_key(index),
             })
             .expect_failure()
             .await;
@@ -133,7 +133,7 @@ async fn test_fetch_success_reports_status_without_resetting_attempt_budget() {
             .post("/fetch")
             .json(&FetchSecret {
                 identifier: SHA256_111111.to_string(),
-                authentication_key: crate::tests::distinct_candidate(index),
+                authentication_key: crate::tests::distinct_authentication_key(index),
             })
             .expect_failure()
             .await;
@@ -253,16 +253,13 @@ async fn test_attempts_snapshot_rebuild_is_deterministic() {
     assert_ne!(first.header("etag"), third.header("etag"));
 }
 
-/// A cancelled initiator must not cancel the single snapshot rebuild. The
-/// explicit worker gate makes the cancellation happen after build start and
-/// makes a second build observable on the unfixed implementation.
+/// A cancelled initiator must neither cancel the build it started nor cause
+/// a second one: the build task owns the mutex, so the next request waits
+/// for it and then finds its result in the cache. The worker gate makes the
+/// cancellation land after the build has started.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_cancelled_attempts_request_keeps_single_rebuild_in_flight() {
-    let (_server, mut state) = crate::tests::test_server::new_test_server().await;
-    state
-        .attempts
-        .snapshot
-        .set_ttl_for_test(std::time::Duration::ZERO);
+    let (_server, state) = crate::tests::test_server::new_test_server().await;
     state
         .attempts
         .snapshot
@@ -302,7 +299,7 @@ async fn test_cancelled_attempts_request_keeps_single_rebuild_in_flight() {
     state.attempts.snapshot.probe().release.notify_one();
     let response = tokio::time::timeout(std::time::Duration::from_secs(5), second)
         .await
-        .expect("joined snapshot request did not complete within 5 seconds")
+        .expect("waiting snapshot request did not complete within 5 seconds")
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let builds_started = state
@@ -313,7 +310,7 @@ async fn test_cancelled_attempts_request_keeps_single_rebuild_in_flight() {
         .load(Ordering::SeqCst);
     assert_eq!(
         builds_started, 1,
-        "the second request must join the rebuild started by the cancelled request"
+        "the second request must reuse the rebuild started by the cancelled request"
     );
 }
 
@@ -349,7 +346,7 @@ async fn test_attempts_entries_are_sorted_by_id_hash() {
 }
 
 #[tokio::test]
-async fn test_attempts_omit_entries_after_cooldown_without_waiting_for_sweeper() {
+async fn test_attempts_omit_expired_entries_at_build_time() {
     let state = crate::app::init();
     {
         let mut entries = state.attempts.ledger.lock_for_test().await;
@@ -359,10 +356,17 @@ async fn test_attempts_omit_entries_after_cooldown_without_waiting_for_sweeper()
             crate::recovery::identifiers::identifier_hash(SHA256_111111).unwrap(),
             RateLimitInfo {
                 window_started_at,
-                last_candidate_at: window_started_at,
+                last_secret_id_at: window_started_at,
                 last_request_at: window_started_at,
-                candidates: std::collections::HashMap::new(),
-                failed_candidates: 1,
+                // expiry decides on the monotonic clock: back-date it too
+                last_secret_id_instant: crate::tests::monotonic_age(
+                    (state.attempts.policy.cooldown() + chrono::Duration::seconds(1))
+                        .to_std()
+                        .unwrap(),
+                ),
+                secret_ids: std::collections::HashMap::new(),
+                forgotten_slots: 0,
+                failed_secret_ids: 1,
                 total_requests: 1,
             },
         );
@@ -375,7 +379,7 @@ async fn test_attempts_omit_entries_after_cooldown_without_waiting_for_sweeper()
 }
 
 #[tokio::test]
-async fn test_attempts_last_attempt_at_is_last_distinct_candidate() {
+async fn test_attempts_last_attempt_at_is_last_distinct_secret_id() {
     let state = crate::app::init();
     state
         .attempts
@@ -383,7 +387,7 @@ async fn test_attempts_last_attempt_at_is_last_distinct_candidate() {
         .set_cooldown_for_test(chrono::TimeDelta::hours(24));
     let now = chrono::Utc::now();
     let window_started_at = now - chrono::TimeDelta::hours(4);
-    let last_candidate_at = now - chrono::TimeDelta::hours(2);
+    let last_secret_id_at = now - chrono::TimeDelta::hours(2);
     let last_request_at = now - chrono::TimeDelta::hours(1);
     {
         let mut entries = state.attempts.ledger.lock_for_test().await;
@@ -391,10 +395,15 @@ async fn test_attempts_last_attempt_at_is_last_distinct_candidate() {
             crate::recovery::identifiers::identifier_hash(SHA256_111111).unwrap(),
             RateLimitInfo {
                 window_started_at,
-                last_candidate_at,
+                last_secret_id_at,
                 last_request_at,
-                candidates: std::collections::HashMap::new(),
-                failed_candidates: 1,
+                // The entry is active (24-hour cooldown), so the monotonic
+                // clock stays fresh while the *published* last_secret_id_at
+                // remains two hours old: that decoupling is the point here.
+                last_secret_id_instant: tokio::time::Instant::now(),
+                secret_ids: std::collections::HashMap::new(),
+                forgotten_slots: 0,
+                failed_secret_ids: 1,
                 total_requests: 4,
             },
         );
@@ -405,7 +414,7 @@ async fn test_attempts_last_attempt_at_is_last_distinct_candidate() {
     let (_, snapshot) = decode_gzip(response.as_bytes());
     assert_eq!(
         snapshot.entries[0].last_attempt_at,
-        crate::attempts::snapshot::truncate_to_hour(last_candidate_at)
+        crate::attempts::snapshot::truncate_to_hour(last_secret_id_at)
     );
     assert_eq!(snapshot.entries[0].total_requests, 4);
 }
@@ -452,10 +461,12 @@ async fn test_attempts_snapshot_at_full_map_scale() {
                 format!("{:064x}", i),
                 crate::attempts::ledger::RateLimitInfo {
                     window_started_at: now,
-                    last_candidate_at: now,
+                    last_secret_id_at: now,
                     last_request_at: now,
-                    candidates: std::collections::HashMap::new(),
-                    failed_candidates: 0,
+                    last_secret_id_instant: tokio::time::Instant::now(),
+                    secret_ids: std::collections::HashMap::new(),
+                    forgotten_slots: 0,
+                    failed_secret_ids: 0,
                     total_requests: 1,
                 },
             );
@@ -487,4 +498,241 @@ async fn test_attempts_snapshot_at_full_map_scale() {
     let cached_serve = started.elapsed();
     assert_eq!(second.header("etag"), response.header("etag"));
     assert!(cached_serve < std::time::Duration::from_secs(1));
+}
+
+/// The published snapshot is a function of the counters and timestamps only:
+/// changing every retained SecretId, while leaving the counters alone,
+/// must not change a single published byte. The snapshot build projects the
+/// ledger instead of cloning it, so a SecretId cannot reach the payload
+/// and cannot be inferred from its size either.
+#[tokio::test]
+async fn test_snapshot_is_independent_of_secret_ids() {
+    let mut state = crate::app::init();
+    // force a rebuild on every request
+    state
+        .attempts
+        .snapshot
+        .set_ttl_for_test(std::time::Duration::ZERO);
+    state
+        .attempts
+        .policy
+        .set_cooldown_for_test(chrono::TimeDelta::hours(24));
+    state.storage.initialize().unwrap();
+    let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone())).unwrap();
+
+    let id_hash = crate::recovery::identifiers::identifier_hash(SHA256_111111).unwrap();
+    let now = chrono::Utc::now();
+    let seed = |secret_id_prefix: &'static str| {
+        let mut info = RateLimitInfo::new(now);
+        for index in 0..3u8 {
+            info.secret_ids.insert(
+                sha256_hex(format!("{secret_id_prefix}-{index}").as_bytes()),
+                crate::attempts::ledger::SecretIdState::Committed,
+            );
+        }
+        info.failed_secret_ids = 2;
+        info.total_requests = 7;
+        info
+    };
+
+    {
+        let mut map = state.attempts.ledger.lock_for_test().await;
+        map.insert(id_hash.clone(), seed("first-secret_id-set"));
+    }
+    let first = server.get("/attempts").expect_success().await;
+    let first_etag = first.header("etag").to_str().unwrap().to_string();
+    let first_body = first.as_bytes().to_vec();
+
+    // same counters and timestamps, entirely different `secret_id` values
+    {
+        let mut map = state.attempts.ledger.lock_for_test().await;
+        let replacement = seed("totally-different-secret_id-set");
+        let existing = map.get_mut(&id_hash).expect("the seeded entry is present");
+        assert_eq!(
+            existing.consumed_slots(),
+            replacement.consumed_slots(),
+            "the two secret_id sets must present the same counters"
+        );
+        existing.secret_ids = replacement.secret_ids;
+    }
+    let second = server.get("/attempts").expect_success().await;
+    let second_etag = second.header("etag").to_str().unwrap().to_string();
+
+    assert_eq!(
+        first_etag, second_etag,
+        "replacing every SecretId must not change the ETag"
+    );
+    assert_eq!(
+        first_body,
+        second.as_bytes().to_vec(),
+        "replacing every SecretId must not change the published bytes"
+    );
+
+    // and no secret_id from either set appears in the payload
+    let (body, snapshot) = decode_gzip(second.as_bytes());
+    for secret_id_prefix in ["first-secret_id-set", "totally-different-secret_id-set"] {
+        for index in 0..3u8 {
+            let secret_id = sha256_hex(format!("{secret_id_prefix}-{index}").as_bytes());
+            assert!(
+                !body.contains(&secret_id),
+                "a SecretId must never appear in the snapshot"
+            );
+        }
+    }
+    assert_eq!(snapshot.entries.len(), 1);
+    assert_eq!(snapshot.entries[0].total_attempts, 3);
+    assert_eq!(snapshot.entries[0].total_requests, 7);
+}
+
+/// A snapshot build that dies without publishing must release the build
+/// mutex, so a later request rebuilds. The mutex guard makes this structural
+/// (it releases on unwind); the earlier design kept the dead task's channel
+/// receiver in a shared slot, which made every later request a permanent
+/// `500`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_attempts_recovers_after_a_snapshot_build_dies() {
+    let (server, state) = crate::tests::test_server::new_test_server().await;
+
+    state
+        .attempts
+        .snapshot
+        .probe()
+        .panic_before_send
+        .store(true, Ordering::SeqCst);
+    let failed = server.get("/attempts").await;
+    assert_eq!(
+        failed.status_code(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a build that dies before sending must surface as 500"
+    );
+
+    // The failure is counted in the unconditional five-minute window: a
+    // client reads `/attempts` to confirm that nothing is wrong, so a broken
+    // build must not be as quiet as a quiet channel.
+    let counters = state.counters.flush();
+    assert_eq!(counters.attempts_snapshot_failed, 1);
+
+    state
+        .attempts
+        .snapshot
+        .probe()
+        .panic_before_send
+        .store(false, Ordering::SeqCst);
+    let recovered = server.get("/attempts").await;
+    assert_eq!(
+        recovered.status_code(),
+        StatusCode::OK,
+        "the build mutex must have been released, so a later request rebuilds"
+    );
+    assert_eq!(
+        state
+            .attempts
+            .snapshot
+            .probe()
+            .started
+            .load(Ordering::SeqCst),
+        2,
+        "the recovery must be a genuinely new build, not a cached result"
+    );
+    assert_eq!(
+        state.counters.flush().attempts_snapshot_failed,
+        0,
+        "a successful rebuild is not a failure"
+    );
+}
+
+/// Drives the ATT-002 interleaving: a build copies the ledger, the real
+/// daily wipe runs while that copy is in flight, and the build then resumes.
+/// Neither the response of the in-flight request nor the cache it fills may
+/// contain a pre-wipe entry. `pause_point` selects where the wipe lands
+/// relative to the collection-marker read.
+async fn wipe_during_in_flight_build_publishes_nothing_pre_wipe(pause_point: u8) {
+    let (server, state) = crate::tests::test_server::new_test_server().await;
+    let id_hash = crate::recovery::identifiers::identifier_hash(SHA256_111111).unwrap();
+    {
+        let mut map = state.attempts.ledger.lock_for_test().await;
+        let mut info = RateLimitInfo::new(chrono::Utc::now());
+        info.secret_ids.insert(
+            sha256_hex(b"pre-wipe secret_id"),
+            crate::attempts::ledger::SecretIdState::Committed,
+        );
+        info.failed_secret_ids = 1;
+        info.total_requests = 1;
+        map.insert(id_hash.clone(), info);
+    }
+
+    let probe = state.attempts.snapshot.probe();
+    probe.pause_point.store(pause_point, Ordering::SeqCst);
+    let request_state = state.clone();
+    let request = tokio::spawn(async move {
+        crate::handlers::attempts::get_attempts(
+            axum::extract::State(request_state),
+            axum::http::HeaderMap::new(),
+        )
+        .await
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        probe.paused_notify.notified(),
+    )
+    .await
+    .expect("the build did not reach its pause point within 5 seconds");
+
+    // The real wipe, while the build holds a pre-wipe copy of the ledger.
+    crate::attempts::maintenance::wipe_identifier_rate_limit(
+        &state.attempts.ledger,
+        &state.attempts.snapshot,
+    )
+    .await;
+    assert!(state.attempts.ledger.lock_for_test().await.is_empty());
+    assert!(!state.attempts.snapshot.is_cached_for_test().await);
+
+    probe.pause_point.store(0, Ordering::SeqCst);
+    probe.resume.notify_one();
+    let response = tokio::time::timeout(std::time::Duration::from_secs(5), request)
+        .await
+        .expect("the in-flight request did not complete within 5 seconds")
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let (_, snapshot) = decode_gzip(&body);
+    assert!(
+        snapshot.entries.is_empty(),
+        "a build that raced the wipe must not publish pre-wipe entries: {} entries",
+        snapshot.entries.len()
+    );
+
+    // And the cache filled by that build must not resurrect them either.
+    let cached = server.get("/attempts").expect_success().await;
+    let (_, cached) = decode_gzip(cached.as_bytes());
+    assert!(
+        cached.entries.is_empty(),
+        "the cache must not hold a pre-wipe snapshot after the wipe: {} entries",
+        cached.entries.len()
+    );
+}
+
+/// The 24-hour wipe is a retention boundary: no pre-wipe telemetry may be
+/// published after it. A build that copied the ledger before the wipe and
+/// finished after it used to republish the purged entries into the cache,
+/// even attaching them to the new `collection_started_at`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_wipe_during_in_flight_build_after_ledger_copy_publishes_nothing_pre_wipe() {
+    wipe_during_in_flight_build_publishes_nothing_pre_wipe(
+        crate::attempts::snapshot::PAUSE_AFTER_LEDGER_COPY,
+    )
+    .await;
+}
+
+/// Same boundary, with the wipe landing after the build has already read the
+/// collection marker: the stale entries and the stale marker are both
+/// pre-wipe, and neither may be published.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_wipe_during_in_flight_build_after_collection_read_publishes_nothing_pre_wipe() {
+    wipe_during_in_flight_build_publishes_nothing_pre_wipe(
+        crate::attempts::snapshot::PAUSE_AFTER_COLLECTION_READ,
+    )
+    .await;
 }

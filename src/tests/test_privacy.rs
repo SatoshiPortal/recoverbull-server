@@ -191,7 +191,7 @@ async fn test_error_responses_leak_no_secret_material() {
             .post("/fetch")
             .json(&FetchSecret {
                 identifier: SHA256_111111.to_string(),
-                authentication_key: crate::tests::distinct_candidate(index),
+                authentication_key: crate::tests::distinct_authentication_key(index),
             })
             .expect_failure()
             .await;
@@ -272,6 +272,7 @@ async fn test_500_does_not_leak_internals() {
     assert!(!body.contains("sqlite"), "no engine detail: {body}");
     assert!(!body.contains("database"), "no database detail: {body}");
 
-    // restore for the next test
-    state.storage.initialize().unwrap();
+    // No restore: every test owns its database, and `initialize()` now fails
+    // closed on the missing table (see `test_migrations`), which is the
+    // right startup behaviour rather than a way to recreate it.
 }

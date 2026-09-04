@@ -1,8 +1,7 @@
 //! `/attempts` admission throttling and retention tasks.
 
 use super::{ledger::AttemptsLedgerState, snapshot::AttemptsSnapshotState};
-use crate::rate_limit::TokenBucket;
-use chrono::TimeDelta;
+use crate::rate_limit::{BucketDecision, TokenBucket};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -21,8 +20,9 @@ impl AttemptsMaintenanceState {
         }
     }
 
-    /// Attempts to consume one telemetry request token.
-    pub(crate) async fn try_consume_request(&self) -> bool {
+    /// Attempts to consume one telemetry request token, returning the
+    /// bucket's own backoff estimate on refusal.
+    pub(crate) async fn try_consume_request(&self) -> BucketDecision {
         self.request_bucket.lock().await.try_consume()
     }
 
@@ -33,20 +33,20 @@ impl AttemptsMaintenanceState {
     }
 }
 
-const SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(600);
-
 /// Production interval for the global in-memory telemetry wipe.
 pub(crate) const PRODUCTION_GLOBAL_WIPE_INTERVAL: std::time::Duration =
     std::time::Duration::from_secs(24 * 60 * 60);
 
-/// Clears expired ledger entries without retaining locks across logging.
-pub(crate) async fn sweep_expired_identifiers(ledger: &AttemptsLedgerState, cooldown: TimeDelta) {
-    ledger.retain_active(chrono::Utc::now(), cooldown).await;
-}
-
 /// Clears identifiers, resets collection time, and invalidates the cache.
 /// The owner preserves `cache -> map -> timestamp`; deadlines are explicit so
-/// sweep and wipe work cannot hold locks while logging.
+/// wipe work cannot hold locks while logging.
+///
+/// This is the only scheduled retention task. Expiry itself needs no timer:
+/// it is applied wherever an expired entry could matter — to the target
+/// entry on admission, to the whole map when it is full and before any
+/// rejection, and to the whole map before every snapshot build. A
+/// ten-minute sweeper additionally existed and could only free memory that
+/// the validated capacity already bounds.
 pub(crate) async fn wipe_identifier_rate_limit(
     ledger: &AttemptsLedgerState,
     snapshot: &AttemptsSnapshotState,
@@ -83,17 +83,6 @@ pub(crate) fn spawn_global_wiper(
             wipe_identifier_rate_limit(&ledger, &snapshot).await;
         }
     })
-}
-
-/// Spawns the detached ten-minute expiry sweeper.
-pub(crate) fn spawn_sweeper(ledger: AttemptsLedgerState, cooldown: TimeDelta) {
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(SWEEP_INTERVAL);
-        loop {
-            interval.tick().await;
-            sweep_expired_identifiers(&ledger, cooldown).await;
-        }
-    });
 }
 
 /// Spawns the production daily wipe task.

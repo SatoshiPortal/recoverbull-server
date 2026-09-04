@@ -254,3 +254,67 @@ async fn test_missing_or_wrong_content_type_returns_415() {
         .await;
     assert_eq!(response.status_code(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
 }
+
+// ---------------------------------------------------------------------------
+// Request timeout: an expired request is a service-pressure response
+// ---------------------------------------------------------------------------
+
+/// The router's request timeout is part of the documented contract: clients
+/// classify by status only, `503` means "back off and retry using
+/// `Retry-After`". A request the server could not finish in time is exactly
+/// that, so the timeout response must be a `503` carrying `Retry-After` and
+/// the JSON error envelope, observed by diagnostics with its final status,
+/// and tagged with a server-generated `x-request-id`. It used to be the
+/// framework's bare `408` with an empty body, which the contract never
+/// mentions and a client is not told to retry.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_request_timeout_is_a_503_with_retry_after_and_error_body() {
+    let app_state = crate::app::init();
+    app_state.storage.initialize().unwrap();
+    // Hold the snapshot build so the /attempts request cannot finish.
+    let probe = app_state.attempts.snapshot.probe();
+    probe.hold.store(true, std::sync::atomic::Ordering::SeqCst);
+    let server = axum_test::TestServer::new(crate::router::new_for_tests_with_timeout(
+        app_state.clone(),
+        std::time::Duration::from_millis(100),
+    ))
+    .unwrap();
+
+    let (response, logs) =
+        crate::tests::test_logging::capture(async { server.get("/attempts").await }).await;
+
+    // release the held build so the detached task can finish
+    probe
+        .released
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    probe.release.notify_one();
+
+    assert_eq!(
+        response.status_code(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "an expired request is service pressure, not a client error"
+    );
+    let retry_after: u64 = response
+        .maybe_header("retry-after")
+        .expect("a 503 must carry Retry-After")
+        .to_str()
+        .unwrap()
+        .parse()
+        .expect("Retry-After must be an integer number of seconds");
+    assert!(retry_after >= 1, "Retry-After must be a positive backoff");
+    let body = response.json::<serde_json::Value>();
+    assert!(
+        body["error"].is_string(),
+        "the timeout must use the JSON error envelope: {body}"
+    );
+    assert!(
+        response.maybe_header("x-request-id").is_some(),
+        "diagnostics must still tag the response"
+    );
+    // A `503` is pressure: counted in the five-minute window, never logged.
+    assert!(
+        logs.is_empty(),
+        "a timeout is pressure and must not be logged: {logs}"
+    );
+    assert_eq!(app_state.counters.flush().request_timeout, 1);
+}

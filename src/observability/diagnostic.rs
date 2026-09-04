@@ -1,91 +1,35 @@
-//! Request diagnostics with privacy-preserving IDs and separate log quotas.
+//! The single request diagnostic this server keeps, plus its request ID.
 
-use sha2::{Digest, Sha256};
 use std::{
+    collections::hash_map::RandomState,
+    hash::{BuildHasher, Hasher},
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc, Mutex,
+        LazyLock,
     },
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use crate::observability::{ObservabilityState, SecurityCounters};
-
+/// Per-process key for request IDs, drawn from the operating system once.
+///
+/// A bare counter would be an activity oracle: any client could subtract two
+/// IDs it received and learn how many requests the server handled in
+/// between, which no endpoint publishes today. Hashing the counter under a
+/// process-local random key keeps IDs unique and comparable inside one log
+/// without exposing that delta.
+static REQUEST_ID_KEY: LazyLock<RandomState> = LazyLock::new(RandomState::new);
 static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-#[derive(Clone, Copy)]
-enum QuotaClass {
-    ServerError,
-    Detail,
-}
-
-struct Bucket {
-    tokens: f64,
-    last: Instant,
-}
-
-/// Separate token buckets limiting server-error and detail diagnostics.
-pub(crate) struct LogQuota {
-    server_error: Mutex<Bucket>,
-    detail: Mutex<Bucket>,
-}
-
-impl LogQuota {
-    fn new() -> Self {
-        let now = Instant::now();
-        Self {
-            server_error: Mutex::new(Bucket {
-                tokens: 10.0,
-                last: now,
-            }),
-            detail: Mutex::new(Bucket {
-                tokens: 10.0,
-                last: now,
-            }),
-        }
-    }
-
-    fn allow(&self, class: QuotaClass) -> bool {
-        let bucket = match class {
-            QuotaClass::ServerError => &self.server_error,
-            QuotaClass::Detail => &self.detail,
-        };
-        let Ok(mut bucket) = bucket.lock() else {
-            return false;
-        };
-
-        let now = Instant::now();
-        bucket.tokens = (bucket.tokens + now.duration_since(bucket.last).as_secs_f64()).min(10.0);
-        bucket.last = now;
-        if bucket.tokens >= 1.0 {
-            bucket.tokens -= 1.0;
-            true
-        } else {
-            false
-        }
-    }
-}
-
-pub(crate) fn new_quota() -> Arc<LogQuota> {
-    Arc::new(LogQuota::new())
-}
-
-/// Generates a process-local opaque request identifier for diagnostics.
+/// Returns an opaque, process-local request identifier.
 pub(crate) fn request_id() -> String {
     let sequence = REQUEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let pid = std::process::id();
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let mut hasher = Sha256::new();
-    hasher.update(pid.to_le_bytes());
-    hasher.update(sequence.to_le_bytes());
-    hasher.update(nanos.to_le_bytes());
-    hex::encode(hasher.finalize())
+    let mut hasher = REQUEST_ID_KEY.build_hasher();
+    hasher.write_u64(sequence);
+    format!("{:016x}", hasher.finish())
 }
 
-/// Maps only known paths to the diagnostic route allowlist.
+/// Maps only known paths to the diagnostic route allowlist. A path is never
+/// logged as text: an unknown one collapses to `other`, so a client cannot
+/// place its own bytes in a log line through the request target.
 pub(crate) fn route_kind(path: &str) -> &'static str {
     match path {
         "/store" => "store",
@@ -97,125 +41,37 @@ pub(crate) fn route_kind(path: &str) -> &'static str {
     }
 }
 
-/// Maps known HTTP methods while collapsing others to `other`.
-pub(crate) fn method_kind(method: &str) -> &'static str {
-    match method {
-        "GET" => "GET",
-        "POST" => "POST",
-        "PUT" => "PUT",
-        "DELETE" => "DELETE",
-        "PATCH" => "PATCH",
-        "HEAD" => "HEAD",
-        "OPTIONS" => "OPTIONS",
-        _ => "other",
-    }
-}
+/// The pressure status this server returns for every kind of overload. It is
+/// the one `5xx` a client can trigger at will, so it is counted in the
+/// five-minute window and never logged.
+const PRESSURE_STATUS: u16 = 503;
 
-/// Reduces elapsed time to a non-sensitive fixed bucket.
-pub(crate) fn duration_bucket(duration: Duration) -> &'static str {
-    match duration {
-        d if d < Duration::from_millis(500) => "lt500ms",
-        d if d < Duration::from_secs(1) => "500ms_1s",
-        d if d < Duration::from_secs(5) => "1s_5s",
-        _ => "gte5s",
-    }
-}
-
-/// Maps status codes to the bounded diagnostic category set.
-pub(crate) fn status_category(status: u16) -> &'static str {
-    match status {
-        408 | 429 | 503 => "overload",
-        200..=299 => "success",
-        400..=499 => "client_error",
-        500..=599 => "server_error",
-        _ => "server_error",
-    }
-}
-
-struct DiagnosticEvent<'a> {
-    request_id: &'a str,
-    route: &'static str,
-    method: &'static str,
-    status: u16,
-    category: &'static str,
-    duration: &'static str,
-}
-
-fn emit(
-    quota: &LogQuota,
-    counters: &SecurityCounters,
-    class: QuotaClass,
-    event: DiagnosticEvent<'_>,
-) {
-    // Only the allowlisted route/method/category dimensions reach logs; quota
-    // decisions are made before emission and are reflected in counters.
-    let level_enabled = match class {
-        QuotaClass::ServerError => {
-            tracing::enabled!(target: "request_diagnostics", tracing::Level::WARN)
-        }
-        QuotaClass::Detail => {
-            tracing::enabled!(target: "request_diagnostics", tracing::Level::DEBUG)
-        }
-    };
-    if !level_enabled {
+/// Logs one WARN line for a server error, and nothing for anything else.
+///
+/// The policy is two sentences: **a server error leaves one line, and a
+/// `503` leaves none because it is pressure, counted in the unconditional
+/// five-minute window instead.** In practice that means a genuine `500`, from
+/// a database failure or a failed snapshot build — neither of which a client
+/// can provoke at volume.
+///
+/// It replaces a per-request event system with two token-bucket quota
+/// classes and a status-to-category table, about 500 lines that produced the
+/// one defect they were meant to bound: `304` was misfiled into the WARN
+/// class, so ordinary conditional polling raised false alarms and starved
+/// the budget a genuine `500` needed. The `503` exception is what the quota
+/// really bought — without it an exhausted bucket writes one line per
+/// rejected request — and stating it as a rule costs one comparison instead
+/// of two buckets. Volume control for what remains belongs to the log daemon
+/// (see `docs/DEPLOYMENT.md`), which already rate-limits per service.
+pub(crate) fn record(request_id: &str, route: &'static str, status: u16) {
+    if status < 500 || status == PRESSURE_STATUS {
         return;
     }
-
-    if quota.allow(class) {
-        counters.diagnostic_logs_emitted();
-        match class {
-            QuotaClass::ServerError => tracing::warn!(
-                target: "request_diagnostics",
-                request_id = event.request_id,
-                route = event.route,
-                method = event.method,
-                status = event.status,
-                category = event.category,
-                duration_bucket = event.duration,
-                "request completed"
-            ),
-            QuotaClass::Detail => tracing::debug!(
-                target: "request_diagnostics",
-                request_id = event.request_id,
-                route = event.route,
-                method = event.method,
-                status = event.status,
-                category = event.category,
-                duration_bucket = event.duration,
-                "request completed"
-            ),
-        }
-    } else {
-        counters.diagnostic_logs_suppressed();
-    }
-}
-
-/// Emits one quota-controlled diagnostic event from transport-neutral values.
-pub(crate) fn record(
-    state: &ObservabilityState,
-    request_id: &str,
-    route: &'static str,
-    method: &'static str,
-    status: u16,
-    duration: Duration,
-) {
-    let category = status_category(status);
-    let class = if category == "server_error" {
-        QuotaClass::ServerError
-    } else {
-        QuotaClass::Detail
-    };
-    emit(
-        &state.log_quota,
-        &state.counters,
-        class,
-        DiagnosticEvent {
-            request_id,
-            route,
-            method,
-            status,
-            category,
-            duration: duration_bucket(duration),
-        },
+    tracing::warn!(
+        target: "request_diagnostics",
+        request_id,
+        route,
+        status,
+        "request failed"
     );
 }

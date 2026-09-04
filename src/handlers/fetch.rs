@@ -10,7 +10,10 @@ use crate::http::contract::{FetchSecret, LookupSuccessResponse, ResponseFailedAt
 use crate::http::error::retry_after_response;
 use crate::recovery::service::{LookupCommand, LookupKind, LookupResult};
 
-const GLOBAL_OVERLOAD_RETRY_AFTER_SECS: u64 = 1;
+/// Advisory backoff for pressure that has no deadline to derive (a full
+/// identifier map, a pending duplicate, a busy database): "try again
+/// shortly". Bucket refusals carry their own estimate.
+const ADVISORY_RETRY_AFTER_SECS: u64 = 1;
 
 /// Performs a non-destructive authenticated lookup.
 pub async fn fetch_secret(
@@ -61,24 +64,24 @@ fn map_lookup(result: LookupResult, kind: LookupKind) -> Response {
             )),
         )
             .into_response(),
-        LookupResult::GlobalOverload => retry_after_response(
+        LookupResult::GlobalOverload { retry_after_secs } => retry_after_response(
             StatusCode::SERVICE_UNAVAILABLE,
-            GLOBAL_OVERLOAD_RETRY_AFTER_SECS,
+            retry_after_secs,
             "Too many lookup requests, retry later",
         ),
         LookupResult::Capacity => retry_after_response(
             StatusCode::SERVICE_UNAVAILABLE,
-            GLOBAL_OVERLOAD_RETRY_AFTER_SECS,
+            ADVISORY_RETRY_AFTER_SECS,
             "Rate-limit capacity exhausted, retry later",
         ),
         LookupResult::Pending => retry_after_response(
             StatusCode::SERVICE_UNAVAILABLE,
-            GLOBAL_OVERLOAD_RETRY_AFTER_SECS,
-            "Candidate lookup pending, retry later",
+            ADVISORY_RETRY_AFTER_SECS,
+            "Lookup for this secret_id is pending, retry later",
         ),
         LookupResult::DatabaseBusy => retry_after_response(
             StatusCode::SERVICE_UNAVAILABLE,
-            GLOBAL_OVERLOAD_RETRY_AFTER_SECS,
+            ADVISORY_RETRY_AFTER_SECS,
             "Database busy, retry later",
         ),
         LookupResult::RateLimited {

@@ -1,13 +1,17 @@
 use crate::config::{
-    canary_file_state, unique_test_database, validate_capacity, validate_config,
-    validate_snapshot_ttl, validate_token_bucket, CanaryFileState, MAX_DATABASE_CONCURRENCY,
-    MAX_RATE_LIMIT_IDENTIFIERS,
+    canary_file_state, estimated_peak_memory_bytes, max_identifiers_within_budget,
+    unique_test_database, validate_capacity, validate_config, validate_snapshot_ttl,
+    validate_token_bucket, CanaryFileState, DEFAULT_MEMORY_BUDGET_MB, MAX_DATABASE_CONCURRENCY,
+    PROCESS_MEMORY_RESERVE_BYTES, RATE_LIMIT_BYTES_PER_IDENTIFIER, RATE_LIMIT_BYTES_PER_SECRET_ID,
 };
+
+/// The documented production budget, in bytes.
+const DEFAULT_BUDGET: usize = DEFAULT_MEMORY_BUDGET_MB * 1024 * 1024;
 
 #[test]
 fn test_validate_config_accepts_valid_values() {
     assert!(validate_config(1440, 128, 3).is_ok());
-    assert!(validate_config(1, 1, 1).is_ok());
+    assert!(validate_config(1, 128, 1).is_ok());
 }
 
 #[test]
@@ -21,10 +25,10 @@ fn test_validate_config_rejects_non_positive_cooldown() {
 
 #[test]
 fn test_validate_config_rejects_absurdly_large_cooldown() {
-    // chrono::TimeDelta::minutes panics on out-of-range values
+    // chrono::TimeDelta::minutes panics on out-of-range values; the daily
+    // wipe bounds the accepted range far below that anyway
     assert!(validate_config(525_601, 128, 3).is_err());
     assert!(validate_config(i64::MAX, 128, 3).is_err());
-    assert!(validate_config(525_600, 128, 3).is_ok());
 }
 
 #[test]
@@ -61,26 +65,133 @@ fn test_database_guard_removes_database_and_sqlite_sidecars_after_last_clone() {
 
 #[test]
 fn test_validate_capacity_accepts_valid_values() {
-    assert!(validate_capacity(100_000, 16).is_ok());
-    assert!(validate_capacity(1, 1).is_ok());
-    assert!(validate_capacity(MAX_RATE_LIMIT_IDENTIFIERS, MAX_DATABASE_CONCURRENCY).is_ok());
+    // the documented production configuration
+    assert!(validate_capacity(100_000, 16, 3, DEFAULT_BUDGET).is_ok());
+    assert!(validate_capacity(1, 1, 1, DEFAULT_BUDGET).is_ok());
+    assert!(validate_capacity(1, MAX_DATABASE_CONCURRENCY, 255, DEFAULT_BUDGET).is_ok());
 }
 
 #[test]
 fn test_validate_capacity_rejects_zero() {
     // a zero capacity disables the protection entirely
-    assert!(validate_capacity(0, 16).is_err());
-    assert!(validate_capacity(100_000, 0).is_err());
+    assert!(validate_capacity(0, 16, 3, DEFAULT_BUDGET).is_err());
+    assert!(validate_capacity(100_000, 0, 3, DEFAULT_BUDGET).is_err());
 }
 
 #[test]
 fn test_validate_capacity_rejects_absurdly_large_values() {
     // beyond the bounds, the memory/concurrency protections are silently
     // disabled: the server must refuse to start instead
-    assert!(validate_capacity(MAX_RATE_LIMIT_IDENTIFIERS + 1, 16).is_err());
-    assert!(validate_capacity(usize::MAX, 16).is_err());
-    assert!(validate_capacity(100_000, MAX_DATABASE_CONCURRENCY + 1).is_err());
-    assert!(validate_capacity(100_000, usize::MAX).is_err());
+    assert!(validate_capacity(usize::MAX, 16, 3, DEFAULT_BUDGET).is_err());
+    assert!(validate_capacity(100_000, MAX_DATABASE_CONCURRENCY + 1, 3, DEFAULT_BUDGET).is_err());
+    assert!(validate_capacity(100_000, usize::MAX, 3, DEFAULT_BUDGET).is_err());
+}
+
+/// The capacity that used to be the hard ceiling is rejected under the
+/// documented budget. It was justified by a per-entry cost an order of
+/// magnitude too low, so it admitted the very memory-exhaustion kill the
+/// ceiling claimed to prevent: about 15 GB of peak against `MemoryMax=512M`.
+#[test]
+fn test_validate_capacity_rejects_the_former_ten_million_ceiling() {
+    let former_ceiling = 10_000_000;
+    assert!(validate_capacity(former_ceiling, 16, 3, DEFAULT_BUDGET).is_err());
+    let peak = estimated_peak_memory_bytes(former_ceiling, 3).expect("the estimate fits usize");
+    assert!(
+        peak > 14 * 1024 * 1024 * 1024,
+        "the former ceiling must be shown to cost more than 14 GiB, got {peak} bytes"
+    );
+}
+
+/// The bound moves with `RATE_LIMIT_MAX_ATTEMPTS`, because a retained
+/// SecretId is a 64-character String and an entry holds up to the
+/// configured budget of them. The former fixed ceiling ignored this entirely.
+#[test]
+fn test_validate_capacity_tracks_the_secret_id_budget() {
+    let capacity = 200_000;
+    assert!(
+        validate_capacity(capacity, 16, 3, DEFAULT_BUDGET).is_ok(),
+        "200,000 identifiers at 3 secret_ids must fit the default budget"
+    );
+    assert!(
+        validate_capacity(capacity, 16, 255, DEFAULT_BUDGET).is_err(),
+        "the same capacity at the u8 secret_id ceiling must not fit"
+    );
+    assert!(
+        max_identifiers_within_budget(255, DEFAULT_BUDGET)
+            < max_identifiers_within_budget(3, DEFAULT_BUDGET),
+        "a larger secret_id budget must lower the admissible capacity"
+    );
+}
+
+/// A capacity may be raised, but only by declaring the budget that pays for
+/// it: the guard rail states a startup error instead of deferring to the OOM
+/// killer.
+#[test]
+fn test_validate_capacity_follows_an_explicitly_raised_budget() {
+    let capacity = 2_000_000;
+    assert!(validate_capacity(capacity, 16, 3, DEFAULT_BUDGET).is_err());
+    let needed = estimated_peak_memory_bytes(capacity, 3).expect("the estimate fits usize");
+    let declared = needed + PROCESS_MEMORY_RESERVE_BYTES;
+    assert!(
+        validate_capacity(capacity, 16, 3, declared).is_ok(),
+        "a budget covering the estimate plus the reserve must be accepted"
+    );
+}
+
+/// The boundary is exact on both sides, so the accepted maximum is really
+/// the largest capacity that fits.
+#[test]
+fn test_validate_capacity_boundary_is_exact() {
+    let max = max_identifiers_within_budget(3, DEFAULT_BUDGET);
+    assert!(
+        validate_capacity(max, 16, 3, DEFAULT_BUDGET).is_ok(),
+        "the reported maximum ({max}) must be accepted"
+    );
+    assert!(
+        validate_capacity(max + 1, 16, 3, DEFAULT_BUDGET).is_err(),
+        "one identifier past the reported maximum must be refused"
+    );
+}
+
+/// A budget that does not even cover the process reserve is a
+/// misconfiguration, not a very small map.
+#[test]
+fn test_validate_capacity_rejects_a_budget_under_the_process_reserve() {
+    assert!(validate_capacity(1, 16, 3, PROCESS_MEMORY_RESERVE_BYTES).is_err());
+    assert!(validate_capacity(1, 16, 3, 0).is_err());
+    assert!(validate_capacity(1, 16, 3, PROCESS_MEMORY_RESERVE_BYTES + 1024 * 1024).is_ok());
+}
+
+/// The estimate saturates instead of wrapping: an overflowing product must
+/// never be mistaken for a capacity that fits.
+#[test]
+fn test_estimated_peak_memory_does_not_wrap() {
+    assert_eq!(estimated_peak_memory_bytes(usize::MAX, 255), None);
+    assert!(validate_capacity(usize::MAX, 16, 255, usize::MAX).is_err());
+    assert_eq!(
+        estimated_peak_memory_bytes(1, 0),
+        Some(RATE_LIMIT_BYTES_PER_IDENTIFIER)
+    );
+    assert_eq!(
+        estimated_peak_memory_bytes(2, 1),
+        Some(2 * (RATE_LIMIT_BYTES_PER_IDENTIFIER + RATE_LIMIT_BYTES_PER_SECRET_ID))
+    );
+}
+
+/// The per-entry constants stay at or above what a release build measured,
+/// so the model cannot silently drift back to an optimistic value: 100,000
+/// entries at 3 secret_ids measured 117 MB of peak RSS, and the model must
+/// not predict less than that.
+#[test]
+fn test_capacity_model_is_not_optimistic_against_the_measurement() {
+    let measured_peak_bytes = 117_051_392usize;
+    let modelled = estimated_peak_memory_bytes(100_000, 3).expect("the estimate fits usize");
+    assert!(
+        modelled >= measured_peak_bytes,
+        "the model ({modelled} bytes) must not predict less than the measured peak ({measured_peak_bytes} bytes)"
+    );
+    // and the documented production configuration must still fit the budget
+    assert!(validate_capacity(100_000, 16, 3, DEFAULT_BUDGET).is_ok());
 }
 
 #[test]
@@ -113,18 +224,33 @@ fn test_canary_file_state_distinguishes_removal_from_unavailable() {
 #[test]
 fn test_validate_token_bucket_accepts_valid_values() {
     assert!(validate_token_bucket("STORE", 10.0, 2.0).is_ok());
-    // a zero refill rate is a valid, deliberately strict bucket
-    assert!(validate_token_bucket("STORE", 1.0, 0.0).is_ok());
+    assert!(validate_token_bucket("STORE", 1.0, 0.1).is_ok());
+}
+
+/// Every configured bucket must refill. A zero rate is not a strict limit but
+/// a quota for the life of the process: once the burst is spent the bucket
+/// never produces another token, so on the lookup bucket every recovery
+/// receives `503` until someone restarts the service, and no `Retry-After`
+/// can describe a token that will never arrive.
+#[test]
+fn test_validate_token_bucket_rejects_a_zero_refill() {
+    for name in ["STORE", "LOOKUP", "ATTEMPTS"] {
+        assert!(
+            validate_token_bucket(name, 10.0, 0.0).is_err(),
+            "{name} must refuse a zero refill"
+        );
+    }
+    assert!(validate_token_bucket("STORE", 10.0, -0.0).is_err());
 }
 
 #[test]
 fn test_validate_token_bucket_rejects_sub_token_bursts() {
-    assert!(validate_token_bucket("STORE", 0.5, 0.0).is_err());
+    assert!(validate_token_bucket("STORE", 0.5, 2.0).is_err());
 }
 
 #[test]
 fn test_validate_token_bucket_rejects_f64_max() {
-    assert!(validate_token_bucket("STORE", f64::MAX, 0.0).is_err());
+    assert!(validate_token_bucket("STORE", f64::MAX, 2.0).is_err());
 }
 
 #[test]
@@ -158,16 +284,70 @@ fn test_validate_token_bucket_rejects_infinity() {
 
 #[test]
 fn test_validate_snapshot_ttl_accepts_valid_values() {
-    assert!(validate_snapshot_ttl(1).is_ok());
-    assert!(validate_snapshot_ttl(60).is_ok());
-    assert!(validate_snapshot_ttl(u64::MAX).is_ok());
+    assert!(validate_snapshot_ttl(1, 1_440).is_ok());
+    assert!(validate_snapshot_ttl(60, 1_440).is_ok());
+    assert!(validate_snapshot_ttl(86_399, 1_440).is_ok());
 }
 
 #[test]
 fn test_validate_snapshot_ttl_rejects_zero() {
     // a zero TTL forces a fresh snapshot computation on every request,
     // defeating the point of caching
-    assert!(validate_snapshot_ttl(0).is_err());
+    assert!(validate_snapshot_ttl(0, 1_440).is_err());
+}
+
+/// The cache is invalidated only by the TTL and the daily wipe, never by a
+/// new attempt. With a TTL at or above the cooldown, an attempt admitted just
+/// after a rebuild can expire before the next rebuild and never appear in
+/// `/attempts`: the configuration is accepted and the detection is silently
+/// neutralized. `u64::MAX` used to be accepted.
+#[test]
+fn test_validate_snapshot_ttl_must_be_shorter_than_the_cooldown() {
+    assert!(validate_snapshot_ttl(59, 1).is_ok());
+    assert!(
+        validate_snapshot_ttl(60, 1).is_err(),
+        "equal is not shorter"
+    );
+    assert!(validate_snapshot_ttl(86_400, 1_440).is_err());
+    assert!(validate_snapshot_ttl(u64::MAX, 1_440).is_err());
+    assert!(validate_snapshot_ttl(60, 0).is_err());
+    assert!(validate_snapshot_ttl(60, -1).is_err());
+}
+
+/// The cooldown ceiling is the wipe interval itself, not a separately typed
+/// number that could drift from it.
+#[test]
+fn test_max_cooldown_is_the_global_wipe_interval() {
+    assert_eq!(
+        u64::try_from(crate::config::MAX_RATE_LIMIT_COOLDOWN_MINUTES).unwrap() * 60,
+        crate::attempts::maintenance::PRODUCTION_GLOBAL_WIPE_INTERVAL.as_secs()
+    );
+}
+
+/// The envelope constant behind `MAX_SECRET_LENGTH` is pinned to the real
+/// compact serialization of a `/store` body, and the derived bound is the
+/// largest Base64 length that fits the body limit.
+#[test]
+fn test_store_envelope_constant_matches_the_serialized_body() {
+    use crate::config::{MAX_REQUEST_BODY_BYTES, MAX_SECRET_LENGTH, STORE_JSON_ENVELOPE_BYTES};
+
+    let body = |secret: String| {
+        serde_json::to_vec(&crate::http::contract::StoreSecret {
+            identifier: "a".repeat(64),
+            authentication_key: "b".repeat(64),
+            encrypted_secret: secret,
+        })
+        .unwrap()
+        .len()
+    };
+    assert_eq!(body(String::new()), STORE_JSON_ENVELOPE_BYTES);
+    assert_eq!(MAX_SECRET_LENGTH, 832);
+    assert!(
+        MAX_SECRET_LENGTH.is_multiple_of(4),
+        "Base64 lengths are multiples of four"
+    );
+    assert!(body("c".repeat(MAX_SECRET_LENGTH)) <= MAX_REQUEST_BODY_BYTES);
+    assert!(body("c".repeat(MAX_SECRET_LENGTH + 4)) > MAX_REQUEST_BODY_BYTES);
 }
 
 fn unique_temp_path(tag: &str) -> std::path::PathBuf {
@@ -180,4 +360,121 @@ fn unique_temp_path(tag: &str) -> std::path::PathBuf {
             .unwrap()
             .as_nanos()
     ))
+}
+
+/// cgroup limit files: `max` (v2) and the v1 sentinel both mean "no limit",
+/// and anything unparsable must degrade to "no limit" rather than to a bogus
+/// ceiling that would refuse a legitimate capacity.
+#[test]
+fn test_parse_memory_limit_recognizes_unlimited_forms() {
+    use crate::config::parse_memory_limit;
+
+    assert_eq!(parse_memory_limit("536870912\n"), Some(536_870_912));
+    assert_eq!(parse_memory_limit("  268435456  "), Some(268_435_456));
+
+    assert_eq!(parse_memory_limit("max\n"), None, "cgroup v2 spells it max");
+    assert_eq!(
+        parse_memory_limit("9223372036854771712\n"),
+        None,
+        "cgroup v1 writes a sentinel near i64::MAX"
+    );
+    assert_eq!(parse_memory_limit(""), None);
+    assert_eq!(parse_memory_limit("not-a-number"), None);
+    assert_eq!(
+        parse_memory_limit("0"),
+        None,
+        "a zero limit is not a budget"
+    );
+}
+
+/// The enforced limit wins whenever it is lower than the declared budget.
+/// Declaring 512 MiB while the cgroup enforces 256 MiB must not authorize a
+/// capacity sized for 512 MiB: that is the memory-exhaustion kill this check
+/// exists to prevent, and a declared value drifts out of sync with the unit
+/// file exactly when an operator lowers `MemoryMax`.
+#[test]
+fn test_effective_budget_takes_the_enforced_limit_when_lower() {
+    use crate::config::effective_memory_budget_bytes;
+
+    let declared = DEFAULT_BUDGET;
+    let lower = 256 * 1024 * 1024;
+    let higher = 2048 * 1024 * 1024;
+
+    assert_eq!(
+        effective_memory_budget_bytes(declared, Some(lower)),
+        lower,
+        "a lower enforced limit must override the declared budget"
+    );
+    assert_eq!(
+        effective_memory_budget_bytes(declared, Some(higher)),
+        declared,
+        "a higher enforced limit must not raise the declared budget"
+    );
+    assert_eq!(
+        effective_memory_budget_bytes(declared, None),
+        declared,
+        "no discoverable limit falls back to the declared budget"
+    );
+}
+
+/// End to end: the documented default capacity fits a 512 MiB budget, and the
+/// same capacity is refused once the enforced limit is the binding constraint.
+#[test]
+fn test_capacity_is_refused_against_a_lower_enforced_limit() {
+    use crate::config::effective_memory_budget_bytes;
+
+    let enforced = 128 * 1024 * 1024;
+    let budget = effective_memory_budget_bytes(DEFAULT_BUDGET, Some(enforced));
+    assert_eq!(budget, enforced);
+    assert!(
+        validate_capacity(100_000, 16, 3, DEFAULT_BUDGET).is_ok(),
+        "the default capacity fits the declared budget"
+    );
+    assert!(
+        validate_capacity(100_000, 16, 3, budget).is_err(),
+        "the same capacity must be refused once the enforced limit binds"
+    );
+}
+
+/// Detection is best-effort and must never panic or invent a limit, whatever
+/// the host looks like: this machine may run under cgroup v2, v1, or neither.
+#[test]
+fn test_detected_memory_limit_is_best_effort() {
+    if let Some(limit) = crate::config::detected_memory_limit_bytes() {
+        assert!(limit > 0, "a reported limit must be positive");
+    }
+}
+
+/// The whole ledger is wiped every 24 hours, so a cooldown longer than that
+/// can never be applied as configured: the budget it announces through
+/// `/info` and `resets_at` disappears at the next wipe. Such a value is a
+/// misconfiguration, not a longer budget, and startup must refuse it.
+#[test]
+fn test_validate_config_rejects_a_cooldown_longer_than_the_wipe_interval() {
+    assert!(
+        validate_config(1_440, 128, 3).is_ok(),
+        "one day is the maximum"
+    );
+    assert!(validate_config(1_441, 128, 3).is_err());
+    assert!(validate_config(525_600, 128, 3).is_err());
+    assert!(validate_config(i64::MAX, 128, 3).is_err());
+}
+
+/// `SECRET_MAX_LENGTH` is bounded on both sides by facts outside the
+/// variable: a Profile 1 encrypted secret is 128 Base64 characters, so a
+/// smaller value refuses every conforming backup; and the 1024-byte body
+/// limit leaves room for at most 832 Base64 characters in the compact
+/// `/store` JSON, so a larger value is advertised by `/info` but unreachable
+/// through `/store`, which answers `413` instead.
+#[test]
+fn test_validate_config_bounds_secret_max_length_to_the_profile_and_the_body_limit() {
+    assert!(validate_config(1_440, 128, 3).is_ok(), "Profile 1");
+    assert!(
+        validate_config(1_440, 832, 3).is_ok(),
+        "largest transportable"
+    );
+    assert!(validate_config(1_440, 127, 3).is_err());
+    assert!(validate_config(1_440, 1, 3).is_err());
+    assert!(validate_config(1_440, 833, 3).is_err());
+    assert!(validate_config(1_440, usize::MAX, 3).is_err());
 }

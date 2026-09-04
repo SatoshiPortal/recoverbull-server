@@ -2,45 +2,88 @@
 
 ## Authority and evidence
 
-The documentation hierarchy is explicit. The [RecoverBull whitepaper repository](https://github.com/SatoshiPortal/recoverbull-whitepaper) is authoritative for the protocol, its threats, and its intent; its normative `SPECIFICATION.md` is pending there. The README is authoritative for the client interface and the operator runbook. This document is authoritative for implementation invariants and the security-review guide. The code and tests are authoritative for implemented behavior and executable proof. If protocol documents conflict, the whitepaper prevails. Documentation, including `cargo doc`, does not become proof merely because it compiles.
+The documentation hierarchy is explicit. The [RecoverBull whitepaper repository](https://github.com/SatoshiPortal/recoverbull-whitepaper) is authoritative for the protocol, its threats, and its intent; its normative `SPECIFICATION.md` is published there (RecoverBull Reference Profile 1). The README is authoritative for the client interface and the operator runbook. This document is authoritative for implementation invariants and the security-review guide. The code and tests are authoritative for implemented behavior and executable proof. If protocol documents conflict, the whitepaper prevails. Documentation, including `cargo doc`, does not become proof merely because it compiles.
 
 ## Reviewer reading map
 
-Read the final implementation in this order:
+Start with `.env.example`, then read the implementation in the order below.
+Configuration is mandatory with no code defaults for the security-critical
+values, so most of `cargo test` fails on a bare `SERVER_ADDRESS must be set`
+panic when no `.env` is present (it is gitignored). Run `cp .env.example .env` first; the file mirrors the `env:`
+block of the `test` job in `.github/workflows/ci.yml`.
 
-1. `src/main.rs` — process lifecycle and shutdown; `src/app.rs` — `AppState` ownership and construction; `src/config.rs` — validated configuration and canary state.
+1. `src/main.rs` — process lifecycle and shutdown; `src/app.rs` — `AppState` ownership and construction; `src/config.rs` — validated configuration, the capacity/memory budget model, and canary state.
 2. `src/router.rs` — route, Axum middleware adapter, body-limit, timeout, and response-floor boundaries; then `src/http/contract.rs`, `src/http/error.rs`, and `src/handlers/store.rs`, `src/handlers/fetch.rs`, `src/handlers/info.rs`, and `src/handlers/attempts.rs` for the HTTP boundary and handlers.
-3. `src/recovery/identifiers.rs` — identifier and candidate derivation; `src/recovery/service.rs` — recovery orchestration.
+3. `src/recovery/identifiers.rs` — identifier and `secret_id` derivation; `src/recovery/service.rs` — recovery orchestration.
 4. `src/attempts/ledger.rs` — admission and finalization FSM; `src/attempts/snapshot.rs` — deterministic public snapshot; `src/attempts/maintenance.rs` — expiry and global wipe.
 5. `src/storage/sqlite.rs` — Diesel/SQLite transactions and connection checks; `src/observability/diagnostic.rs` and `src/observability/counters.rs` — privacy-safe diagnostics and aggregate counters.
-6. Read tests by category: `src/tests/test_contract.rs`, `test_concurrency.rs`, `test_privacy.rs`, `test_http_boundary.rs`, `test_config.rs`, `test_rate_limit.rs`, `test_distinct_candidates.rs`, `test_attempts.rs`, `test_secure_delete.rs`, `test_db_errors.rs`, `test_logging.rs`, `test_fetch.rs`, `test_store.rs`, `test_trash.rs`, `test_info.rs`, `test_timing.rs`, `test_migrations.rs`, `test_adversarial.rs`, `test_audit_claims.rs`, and `test_server.rs`.
+6. Read tests by category: `src/tests/test_contract.rs`, `test_concurrency.rs`, `test_privacy.rs`, `test_http_boundary.rs`, `test_config.rs`, `test_rate_limit.rs`, `test_secret_id_budget.rs`, `test_attempts.rs`, `test_secure_delete.rs`, `test_db_errors.rs`, `test_logging.rs`, `test_fetch.rs`, `test_store.rs`, `test_trash.rs`, `test_info.rs`, `test_timing.rs`, `test_migrations.rs`, `test_adversarial.rs`, `test_audit_claims.rs`, and `test_server.rs`.
+
+## Vocabulary
+
+The derived value presented to `/fetch` or `/trash` is named `secret_id`
+throughout this server:
+`SHA256(lowerhex(identifier) || lowerhex(authentication_key))`. The budget
+counts distinct `secret_id` values, and the ledger stores them under that name.
+The public JSON field names (`total_attempts`, `failed_attempts`,
+`last_attempt_at`) are a compatibility contract and do not change.
 
 ## Ownership and dependency map
 
 - HTTP ownership is limited to Axum: `router.rs`, `http/*`, and `handlers/*` translate requests and responses; `router.rs` owns the request-diagnostics adapter. Domain modules, including `observability/diagnostic.rs` and `attempts/snapshot.rs`, do not depend on Axum or bytes.
 - Storage ownership is limited to Diesel/SQLite: `storage/sqlite.rs` owns connections, migrations' runtime interaction, WAL/secure-delete checks, and transactions. HTTP and recovery do not issue Diesel queries directly.
 - Recovery orchestration is `recovery/{identifiers,service}.rs`; it owns protocol coordination without Axum or Diesel dependencies.
-- Attempts are owned by `attempts/{ledger,snapshot,maintenance}.rs`: the ledger owns the candidate FSM, the snapshot owns cache serialization, and maintenance owns expiry and wipe.
+- Attempts are owned by `attempts/{ledger,snapshot,maintenance}.rs`: the ledger owns the `secret_id` FSM, the snapshot owns cache serialization, and maintenance owns expiry and wipe.
 - Observability is owned by `observability/{diagnostic,counters}.rs`; it receives static categories and aggregate values, not secrets or request metadata.
 - `AppState` in `app.rs` privately owns the shared service, attempts, information, and observability components; production code receives only narrow capability methods, while component seams are explicit and test-only.
 - `src/schema.rs` is the Diesel-generated root imposed by `diesel.toml`; do not relocate it while preserving the configured schema path.
 
 ## Request diagnostics privacy
 
-The five-minute `info` counter summary includes diagnostic log emission and
-suppression totals. Per-request diagnostics are disabled by default and may be
-enabled temporarily with `RUST_LOG=info,request_diagnostics=debug`; debug mode must
-not remain enabled during normal operation. Each quota class allows a burst of
-10 events and refills at 1 event per second. Request IDs are generated by the
-server and returned as `X-Request-ID`; client-supplied values are discarded.
+Request logging is one rule, and the rule is the whole policy:
 
-Request events contain only the generated request ID, static route and method
-enums, numeric status, static status category, and static duration bucket.
-Categories are `success`, `client_error`, `overload`, and `server_error`;
-duration buckets are `lt500ms`, `500ms_1s`, `1s_5s`, and `gte5s`.
-They never contain raw URIs or query strings, headers, bodies, remote IPs,
-database paths, identifiers, hashes, tags, keys, ciphertexts, canary values,
-or raw errors. Lifecycle messages remain rare and aggregate-only.
+> **A server error produces one `WARN` line. A `503` produces none, because
+> it is pressure and is counted instead. Nothing else is logged per request.**
+
+In practice the logged case is a genuine `500`, which comes from a database
+failure or a failed snapshot build — neither reachable at volume by a client.
+`WARN` is visible under the default `RUST_LOG=info`, so a real fault reaches
+the operator without reconfiguration. The line carries only the generated
+request ID, the static route enum (`store`, `fetch`, `trash`, `info`,
+`attempts`, `other`) and the numeric status. It never carries a raw URI or
+query string, a header, a body, a remote IP, a database path, an identifier,
+a hash, a `secret_id`, a key, a ciphertext, a canary value or a raw error.
+An unknown path collapses to `other`, so a client cannot place its own bytes
+in a log line through the request target.
+
+The `503` exception is the load-bearing part. It is the status every kind of
+overload returns, so without the exception an exhausted token bucket writes
+one line per rejected request — a disk-fill vector and a way to crowd out a
+genuine `500`. Every `503` is therefore counted in the five-minute window
+(`lookup_rate_limited`, `attempts_rate_limited`, `store_rejected`,
+`database_busy`, `lookup_map_capacity`, `request_timeout`), which is emitted
+unconditionally at `info` and cannot be starved.
+
+This replaced a per-request event system with two token-bucket quota classes,
+a status-to-category table and duration buckets: about 500 lines that
+produced the one defect they were meant to bound. `304` was misfiled into the
+WARN class, so ordinary conditional polling raised false server-error alarms
+and spent the budget a genuine `500` needed. One rule has no table to misfile
+and no budget to starve. Volume control for what remains belongs to the log
+daemon, which already rate-limits per service; set
+`RateLimitIntervalSec`/`RateLimitBurst` in the unit drop-in if the default is
+not wanted (see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)).
+
+Request IDs are generated by the server and returned as `X-Request-ID`. The
+value is a per-process keyed hash of a counter, not the counter: a bare
+counter would let any client subtract two IDs it received and learn how many
+requests the server handled in between, which no endpoint publishes.
+
+Note for reviewers: Axum's own extractor rejections are traced at `TRACE`
+with a `body` field. They are invisible under the default filter; do not
+enable `RUST_LOG=trace` on a live service.
+
+Lifecycle messages remain rare and aggregate-only.
 
 This document consolidates what security reviewers need to know about this
 server so that each review does not start from zero: the threat model, the
@@ -48,17 +91,65 @@ risks that are **accepted by design** (do not re-report them), the
 **invariants** the code must keep (each guarded by tests), the traps already
 stepped into, and a checklist for future reviews.
 
-Application log guarantees do not cover nginx or Caddy, journald, or Tor logs unless the
+Application log guarantees do not cover nginx, journald, or Tor logs unless the
 README runbook is applied: those logs may contain request metadata and require
 strict levels, private permissions, and short retention. Five-minute global
 counters retain coarse activity metadata and require the same access controls.
 
-For deployment guardrails (single-instance, the exclusive nginx/Caddy choice,
-and Tor onion), see the
+For deployment guardrails (single-instance, a validated reverse proxy, and Tor
+onion), see the
 README and [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) — they are part of the
-security model, not optional hardening. Tor and single-instance operation are
-required by the model but are not enforced by the binary; a public bind only
-produces a warning.
+security model, not optional hardening. Files under `deploy/` are examples and
+their installed adaptation, updates, and end-to-end validation belong to the
+operator. Tor and single-instance operation are required by the model but are
+not enforced by the binary; a public bind only produces a warning.
+
+## Clocks: which one decides what
+
+Two clocks exist in this process, and confusing them was a real defect. The
+distinction is worth stating once, because every future change touching expiry
+or timestamps depends on it.
+
+**`CLOCK_REALTIME` (wall clock)** — `chrono::Utc::now()`. It is the calendar
+time a human reads, and it is **settable**: `clock_settime`, an administrator,
+a VM resume, or an NTP daemon correcting a large drift can move it *backwards
+or forwards by an arbitrary amount, instantly*. That is a step, not a drift.
+
+**`CLOCK_MONOTONIC` (monotonic clock)** — `tokio::time::Instant`, which wraps
+`std::time::Instant`. It counts elapsed time since an arbitrary origin (boot).
+It **cannot be stepped**: NTP may only *slew* it, speeding it up or slowing it
+down within a bounded rate, so it never jumps. Its value is meaningless
+outside this process — you cannot display it, serialize it, or compare it
+across restarts. On Linux it also does **not** advance while the system is
+suspended (that would be `CLOCK_BOOTTIME`).
+
+The rule this codebase follows:
+
+> **Every decision about elapsed time uses the monotonic clock. Every value
+> published to a client uses the wall clock.**
+
+| Value | Clock | Why |
+|---|---|---|
+| `RateLimitInfo::last_secret_id_instant` | monotonic | The single input to the expiry decision (`attempts::ledger::is_expired`). |
+| Global-wipe timer | monotonic | `tokio::time::interval_at`; same clock family as the decisions it triggers. |
+| Snapshot TTL (`AttemptsSnapshotCache::created_at`) | monotonic | Cache freshness is an elapsed-time decision. |
+| Canary re-read freshness (`InfoState::cached_canary`) | monotonic | File-cache freshness is an elapsed-time decision and is never serialized. |
+| Token buckets, request timeout, response floor, and shutdown deadline | monotonic | Refill, timeout, minimum delay, and grace periods all measure elapsed time. |
+| `window_started_at` | wall clock | It is the **generation token** compared in `finalize`/`refund`; a detached worker must not be able to mutate a replacement window. It is also published. |
+| `last_secret_id_at`, `resets_at`, `previous_attempt_at`, `requested_at` | wall clock | Published to clients, which need an absolute value they can display and schedule against. |
+| `secret.created_at` | wall clock | Persisted and returned in the lookup response. |
+
+Two consequences follow, both accepted and documented below as risks #14-15.
+A forward wall-clock step leaves the budget correct while the published
+`resets_at` becomes temporarily wrong — chosen deliberately, because a wrong
+retry hint costs a client one early request whereas a wrong expiry decision
+costs the victim its entire brute-force budget. And because the monotonic
+clock pauses during system suspend, entries do not expire while the process is
+suspended, which again keeps budgets rather than resetting them.
+
+**If you add a timeout, a cooldown, a TTL, or a refill: use the monotonic
+clock.** If you add a field a client will read: use the wall clock, and do not
+let any decision depend on it.
 
 ## Threat model (summary)
 
@@ -66,7 +157,7 @@ The server stores `encrypted_secret` values keyed by
 `secret_id = SHA-256(identifier_hex + authentication_key_hex)`. It never sees
 the password, the encryption key, or the cleartext secret. Because the user
 when password/PIN entropy is low, the **only** server-side
-control against password brute-force is the per-identifier distinct-candidate budget
+control against password brute-force is the per-identifier `secret_id` budget
 (3 attempts per cooldown in the documented `.env` and CI; the variable is
 mandatory — there is no code default). Everything else
 — anonymity, no accounts, Tor-only transport, daily in-memory wipe — exists
@@ -90,11 +181,11 @@ backup must include both the database and WAL, or use SQLite's backup API.
 Operators are responsible for retention of those copies.
 
 1. **Targeted lockout (audit F2).** An attacker holding the Backup File can
-   submit three distinct candidates and consume the victim's candidate budget,
+   submit three distinct `secret_id` values and consume the victim's budget,
    delaying or preventing recovery. The bucket is always `sha256(identifier)`
    and is checked before membership or credentials are verified: the server
    cannot distinguish owner from attacker. This remains an accepted risk.
-   The distinct-candidate limiter improves availability and signal for replay
+   The distinct-`secret_id` limiter improves availability and signal for replay
    traffic; it is not a vulnerability correction. Mitigation is *detection*
    (`attempt_status`, `/attempts`, unexpected `429`), not prevention.
    **Do not "fix" this by resetting the counter on a successful lookup**:
@@ -103,14 +194,33 @@ Operators are responsible for retention of those copies.
    Roadmap: escalating backoff, client proof-of-work, multi-server storage.
 2. **A successful lookup never proves ownership.** Anyone can plant a row
    for a guessed key through `/store` and then "successfully" fetch it.
-   Distinct candidate counters therefore include database hits and never reset
+   Distinct-`secret_id` counters therefore include database hits and never reset
    on success. A committed replay is free only before saturation, increments
-   `total_requests`, and does not extend cooldown.
+   `total_requests`, and does not extend cooldown. A successful `/trash` is
+   the exception: the `secret_id` that performed the deletion keeps its
+   consumed slot but is no longer recognizable, so its replay cannot reveal
+   which PIN performed the deletion (see the transition table).
 3. **Telemetry is readable by identifier holders.** `/attempts` publishes
    `SHA-256(identifier)` only. Entries are indistinguishable: real usage,
    another device, and attacker probes produce the same entry shape. This
    relies on clients generating identifiers with 256 bits of entropy — a
    low-entropy identifier would make its hash brute-forceable.
+   Proactive polling is not a Profile 1 recovery prerequisite, and it is the
+   client's responsibility: the server publishes the snapshot and cannot
+   notify anyone. It is part of the intended Bull Mobile detection rollout,
+   but Bull Mobile does not currently perform it, so deploying the server
+   before the corresponding wallet release leaves a detection gap: rate
+   limiting still applies, but there is no early warning before recovery. The wallet release
+   should poll regularly in the foreground and use best-effort background
+   scheduling where the platform permits it, with jitter, `ETag`, snapshot
+   freshness, Tor, and the shared proxy cache. The global request does not
+   disclose which identifier the client checks because matching remains local;
+   its cadence nevertheless exposes additional wallet-online timing at the
+   transport boundary, and the public snapshot exposes coarse activity to
+   anyone already holding an identifier. A private per-identifier endpoint or
+   push notification would be worse because it would reveal the target or
+   require stable device/account state. Until the wallet rollout completes,
+   only `attempt_status` on a lookup and an eventual `429` remain observable.
 4. **Timestamp precision follows a knowledge gradient.** Exact timestamps go
    to identifier holders (direct responses), hour-truncated to everyone
    (public snapshot). An exact `requested_at` in a `429` can be the victim's
@@ -125,9 +235,30 @@ Operators are responsible for retention of those copies.
    ETag can delay clients' snapshot reads. `attempt_status` on a successful
    fetch is the fallback signal, unaffected by that flood.
 7. **Map filling.** New identifiers get `503` when the map is full
-   (fail-closed); active entries are never evicted by new identifiers. The
-   attack and the alarm are the same event: probing creates the victim's
-   warning entry.
+   (fail-closed); active entries are never evicted by new identifiers, so a
+   victim already holding an entry keeps its budget and its signal
+   (`test_full_map_does_not_evict_protected_identifier`). The denial is
+   structural: the bucket is `sha256(identifier)` and is checked before any
+   proof of knowledge, so the server cannot tell an owner from an attacker.
+   **The earlier justification — "the attack and the alarm are the same
+   event: probing creates the victim's warning entry" — is wrong for a
+   flood**, and was corrected here after being disproved end to end against
+   a running server. An attacker filling the map with identifiers *of its
+   own* never touches the victim's identifier: a victim with no prior entry
+   receives `503` and gets **no entry of its own to notice**
+   (`test_map_filling_denies_a_victim_without_creating_its_warning_entry`).
+   The only signal in that case is the aggregate one — the ratio of
+   `/attempts` entries to the `max_attempt_identifiers` published by
+   `/info`, which saturates at 100% — so clients must treat that ratio as a
+   first-order alarm and not wait to recognize their own `id_hash`.
+   Attacker cost at the default capacity, measured: 100,000 admitted
+   `/fetch` requests, about 50 MB of traffic, and — because the map is wiped
+   every 24 hours — **1.16 requests per second sustained** to keep it full,
+   which is 4.3x under the default 5/s lookup-bucket refill; filling from
+   empty at that ceiling takes about 5.6 hours. This is cheap, and it is
+   accepted only because the alternative (evicting active entries) would
+   sacrifice a locked-out victim. Roadmap: client proof-of-work,
+   multi-server storage.
  8. **Offline PIN brute-force with a database leak.** A leak of
     `encrypted_secret` plus the Backup File's `salt` reduces security to the
     user's password/PIN entropy. Cloud storage plus the database permits
@@ -140,17 +271,19 @@ Operators are responsible for retention of those copies.
  10. **Global buckets can deny service to everyone.** Behind an onion service
      per-IP limiting is useless, so buckets are global; an attacker can
      exhaust them (`503` for all). Bounded by the selected reverse proxy and
-     Tor defenses at the deployment layer. Caddy adapts its plugin's internal
-     global-bucket `429` to this standard `503`; it does not adapt an Axum
-     lockout `429`. Caddy's lack of a native connection-count cap is accepted
-     only with its 10-second header timeout, Tor defenses, and an
-     operator-managed FD/process budget.
+     Tor defenses at the deployment layer. The nginx example returns its
+     internal global-bucket rejection as the standard JSON `503` with
+     `Retry-After`; it does not intercept an Axum lockout `429` or upstream
+     `503`. Its connection cap and 10-second header timeout still require Tor
+     defenses and an operator-managed FD/process budget. Request bodies are
+     streamed into Axum so its 30-second total bound applies; nginx's
+     `client_body_timeout` alone would bound only inactivity between reads.
 11. **Temporary behavioral state.** The server retains up to the configured
-    maximum of derived CandidateTags (`secret_id/key_id`) per bucket in memory.
-    A CandidateTag is never raw authentication or password material, and is
+    maximum of derived `secret_id`/`key_id` values per bucket in memory.
+    A `secret_id` is never raw authentication or password material, and is
     never logged or snapshotted; the complete map is wiped every 24 hours from
     map startup, with the attempt budget reset at the boundary. The cooldown
-    sweep removes shorter-lived entries earlier. This is a privacy trade-off:
+    expiry removes shorter-lived entries earlier. This is a privacy trade-off:
      non-exposed temporary state is larger than the former identifier-only
      state.
 12. **Operational trade-offs.** Strict single-instance operation is required:
@@ -171,10 +304,127 @@ Operators are responsible for retention of those copies.
      mutexes, but can increase concurrent connections during a flood. Token
      buckets plus the selected reverse proxy and Tor connection, request, and
      DoS defenses bound that amplification.
+14. **The capacity memory model is a conservative estimate, not a guarantee.**
+    `validate_capacity` refuses an over-budget `RATE_LIMIT_MAX_IDENTIFIERS` at
+    startup, sizing against the **lower** of `RATE_LIMIT_MEMORY_BUDGET_MB` and
+    the memory limit the kernel actually enforces on the process (cgroup v2
+    `memory.max` walked up the hierarchy, or v1
+    `memory.limit_in_bytes`). Detection is best-effort: with no cgroup, an
+    unreadable file, or an unlimited value, only the declared budget applies,
+    so a deployment without a cgroup limit is validated against a declaration
+    alone. The per-entry constants were measured on one host, one allocator
+    (glibc) and one dependency set, rounded up; a different allocator, target,
+    or future `hashbrown`/`chrono` layout can raise the real cost, so the check
+    can pass on a host where the cgroup still kills the process. The 64 MiB
+    process reserve is a flat allowance covering the base process, SQLite
+    connections and page cache, and worker stacks, and it is not itself
+    enforced. Operators must still re-measure peak RSS (`VmHWM`, see
+    [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)) after changing
+    `RATE_LIMIT_MAX_ATTEMPTS`, which dominates per-entry cost. The check
+    removes a guard rail that was calibrated an order of magnitude wrong; it
+    does not remove the need to measure.
+15. **Expiry and published timestamps use different clocks, by design.** The
+    expiry decision is monotonic so a settable `CLOCK_REALTIME` cannot reset
+    per-identifier budgets, while `resets_at`, `window_started_at`, and
+    `previous_attempt_at` stay wall-clock because clients need absolute values
+    they can display and because `window_started_at` is the generation token
+    for detached finalization. After a clock step the two disagree: the budget
+    is correctly preserved, but a client computing its retry time from the
+    published `resets_at` can be misled until the entry expires. The
+    conservative direction was chosen deliberately — a wrong retry hint costs
+    a client one early request, whereas a wrong expiry decision costs the
+    victim its entire brute-force budget. Relatedly, monotonic time does not
+    advance while the process is stopped or suspended, so entries do not
+    expire during suspension; that also keeps budgets rather than resetting
+    them, and matches the existing behaviour of the 24-hour wipe timer.
+16. **A `Pending` duplicate during an in-flight `/trash` is a narrow
+    membership signal.** While a trash is in flight, an identical `secret_id`
+    receives `503` (pending duplicate) whereas a different one proceeds to a
+    lookup. This distinguishes the in-flight `secret_id` for the duration
+    of one database operation only, and vanishes once the trash finalizes and
+    forgets its `secret_id`. Closing it would require serializing or uniformizing all
+    lookups of one identifier, at a real availability and griefing cost; the
+    stable post-deletion oracle is closed instead (transition table above).
+17. **Public `/attempts` timestamp precision is the snapshot TTL, not the
+    hour.** Every published timestamp is hour-truncated, but the snapshot is
+    rebuilt every `ATTEMPTS_SNAPSHOT_TTL_SECONDS` (60 s by default) and lists
+    every active entry with an exact `total_requests`. A persistent public
+    poller that diffs consecutive snapshots therefore learns when an entry
+    first appeared, and each request against it, to within one TTL. The hour
+    truncation only blunts a single snapshot read; it does not hide activity
+    from a continuous observer. This is accepted: detection latency is the
+    point of the endpoint, so a delay long enough to defeat diffing would
+    defeat the feature. Operators who want coarser public timing raise the TTL,
+    trading detection latency for it. A Backup File holder already gets exact
+    times through `429`/`attempt_status`, and the server operator sees exact
+    times regardless.
+18. **A pre-planted `/store` row silently wins.** `/store` is idempotent and
+    answers `201` whether or not the `secret_id` already exists (the F1 oracle
+    fix, which must stay). The residual is that the first writer of a
+    `secret_id` owns the row forever: an attacker who learns an identifier and
+    can enumerate the PIN space can pre-plant rows, and the victim's later
+    `/store` under the same identifier and PIN is acknowledged with `201`
+    while writing nothing, so recovery returns the attacker's bytes and the
+    HMAC fails. The normal Profile 1 flow does not expose this — the whitepaper
+    stores on the Key Server before uploading the Backup File, so a fresh
+    identifier never leaks first — so it requires identifier reuse (a PIN
+    change or re-backup keeping `id`/`salt`, or an upload-before-store retry).
+    The server cannot close it without reopening the F1 oracle; the mitigation
+    is a client/specification rule: **generate a fresh `identifier` (and
+    `salt`) for every `/store`, and verify a store with one `/fetch` and a
+    ciphertext comparison before declaring the backup complete.**
+19. **A lost `/trash` `202` turns the owner's retry into a consumed guess.**
+    Because the deleting `secret_id` is forgotten (invariant below), if the
+    `202` is lost in transit the owner's natural retry with the correct PIN is
+    a new `secret_id`: it consumes a slot, misses, and increments
+    `failed_attempts`, indistinguishable from a wrong guess. This is the cost
+    of closing the post-deletion PIN oracle. Client rule: treat a `401` after
+    a `/trash` whose response was lost as "possibly already deleted", and do
+    not retry a `/trash` more than once.
+
+## Deployment: per-circuit rate limiting (AUD-09)
+
+Behind a Tor onion service every client reaches the proxy from `127.0.0.1`, so
+a proxy that keys its rate and connection limits on the source address gives
+the entire world one shared bucket: one attacker at a few requests per second
+denies `/attempts`, `/fetch`, and `/trash` to every client, and legitimate
+polling at scale trips the same limit. The reference deployment closes this by
+carrying Tor's per-rendezvous-circuit identifier to nginx as a HAProxy
+PROXY-protocol header (`HiddenServiceExportCircuitID haproxy`, Tor ≥ 0.4.4) and
+letting nginx rewrite `$binary_remote_addr` to it (`listen … proxy_protocol`,
+`real_ip_header proxy_protocol`, `set_real_ip_from 127.0.0.1`). The limits then
+count per circuit, and opening many circuits is what
+`HiddenServicePoWDefensesEnabled` prices. The nginx example, its CI smoke
+(`assert_per_circuit_isolation`), and the torrc example carry this; an operator
+whose Tor build predates 0.4.4, or who omits the export, falls back to the
+shared-bucket behaviour and must treat the global `/attempts` rate and the
+connection cap as accepted denial-of-service ceilings.
+
+Two consequences of this change, both confirmed against the running binary
+under podman:
+
+- **The two files are coupled and must be upgraded Tor-first.** `listen …
+  proxy_protocol` makes the PROXY header mandatory: nginx rejects any
+  connection that arrives without one. So enabling `proxy_protocol` on nginx
+  before `HiddenServiceExportCircuitID` is active on Tor refuses **every**
+  request — a full outage, not a degradation. The safe order is to enable the
+  Tor export first (old nginx ignores the header harmlessly), then switch nginx
+  to `proxy_protocol`; roll back nginx first. A validated end-to-end smoke
+  before admitting traffic (README runbook) catches a mismatch.
+- **The PROXY header is trusted from loopback, so co-located processes can
+  forge a circuit id.** `set_real_ip_from 127.0.0.1` trusts the header from any
+  source that can reach `127.0.0.1:3000`, which on a shared host is any local
+  process, not only Tor. A local process could therefore rotate forged circuit
+  ids to evade the per-circuit limit, or attribute traffic to a victim's
+  circuit. This needs local access to the box, which is already a strong
+  position, so it is accepted; operators wanting to close it should give Tor a
+  private hop to nginx — a dedicated loopback address or, better, a unix socket
+  reachable only by the Tor service account (`listen unix:/run/recoverbull.sock
+  proxy_protocol;` with `HiddenServicePort 80 unix:/run/recoverbull.sock`).
 
 ## Invariants (each guarded by tests)
 
-The table below is the minimal primary-guard index for the security invariants; it is not an exhaustive index of every test. Supplemental tests are classified here by module so an auditor can locate evidence without listing all 175 tests individually.
+The table below is the minimal primary-guard index for the security invariants; it is not an exhaustive index of every test. Supplemental tests are classified here by module so an auditor can locate evidence without listing all 220 tests individually.
 
 ### Additional evidence by test module
 
@@ -187,11 +437,11 @@ The table below is the minimal primary-guard index for the security invariants; 
 | `test_config` | fail-closed configuration validation |
 | `test_contract` | HTTP status/body contracts |
 | `test_db_errors` | database failure classification and refunds |
-| `test_distinct_candidates` | candidate capacity and shared fetch/trash budget |
+| `test_secret_id_budget` | `secret_id` capacity and shared fetch/trash budget |
 | `test_fetch` | fetch response mapping |
 | `test_http_boundary` | routing, extraction, limits, and headers |
 | `test_info` | live canary and operational metadata |
-| `test_logging` | request IDs, quotas, and sensitive-value exclusion |
+| `test_logging` | request IDs, server-error logging, and sensitive-value exclusion |
 | `test_migrations` | schema setup and SQLite capability checks |
 | `test_privacy` | snapshot and response privacy properties |
 | `test_rate_limit` | bucket accounting, expiry, and wipe |
@@ -201,22 +451,24 @@ The table below is the minimal primary-guard index for the security invariants; 
 | `test_timing` | sensitive POST response floor |
 | `test_trash` | atomic destructive lookup behavior |
 
-### Candidate admission and transition table
+### `secret_id` admission and transition table
 
-Admission is ordered and shared by `/fetch` and `/trash`: expiry and capacity are checked first, `total_requests` is then updated for an existing entry, saturation is checked before membership, and only then is candidate membership inspected. A full map rejects a new identifier fail-closed. Saturation rejects every candidate, including known candidates, before database work. A `Pending` duplicate returns `503` without another reservation; a `Committed` replay is free before saturation. A new candidate creates `Pending` and reserves one slot.
+Admission is ordered and shared by `/fetch` and `/trash`: expiry and capacity are checked first, `total_requests` is then updated for an existing entry, saturation is checked before membership, and only then is `secret_id` membership inspected. A full map rejects a new identifier fail-closed. Saturation rejects every `secret_id`, including known ones, before database work. A `Pending` duplicate returns `503` without another reservation; a `Committed` replay is free before saturation. A new `secret_id` creates `Pending` and reserves one slot. The budget is `consumed_slots`: the recognizable `secret_id` values plus `forgotten_slots`. A slot, once consumed, is never handed back by a deletion, but the `secret_id` that deleted the row is forgotten so that it cannot be replayed for free afterwards.
 
 | Current state / admission | Result | Final state and accounting |
 |---|---|---|
 | Expired entry | Start a new window | Old entry is removed before admission. |
 | Map at capacity, new identifier | `503` | No entry and no per-identifier counter. |
-| `candidate_count >= max` | `429` | No membership or database lookup; `Retry-After` applies. |
+| consumed slots at `max` | `429` | No membership or database lookup; `Retry-After` applies. |
 | `Pending` duplicate | `503` | Existing reservation remains; no second reservation. |
 | `Committed` replay | Continue lookup | Remains `Committed`; `total_requests` increments, with no new attempt or cooldown extension. |
-| New candidate | Continue lookup | `Pending` owns one reserved slot. |
-| Admitted hit or miss | Finalize | `Committed`; a miss increments `failed_attempts` once and a hit does not reset the budget. |
-| Error or refund before commit | Refund/remove | `Pending` is removed and refunded once. |
+| New `secret_id` | Continue lookup | `Pending` owns one reserved slot. |
+| Admitted fetch hit or miss | Finalize | `Committed`; a miss increments `failed_attempts` once and a hit does not reset the budget. |
+| Admitted trash hit (row deleted) | Finalize | Value forgotten, `forgotten_slots` + 1: the slot stays consumed and the `secret_id` is no longer recognizable. |
+| `Committed` replay whose trash deletes the row | Forget | Same as above, in the same generation only; the budget does not change. |
+| Error or refund before commit | Refund/remove | `Pending` is removed and refunded once; an entry holding forgotten slots survives. |
 
-External statuses are `400` invalid data, `401` invalid credentials, `429` targeted lockout, `503` pressure/unavailability, and `500` internal failure. `429` and `503` carry `Retry-After`; clients classify by status, not error text. `total_attempts` counts distinct admitted candidates, `failed_attempts` finalized misses, and `total_requests` requests attached to an active entry.
+External statuses are `400` invalid data, `401` invalid credentials, `429` targeted lockout, `503` pressure/unavailability, and `500` internal failure. `429` and `503` carry `Retry-After`; clients classify by status, not error text. `total_attempts` counts consumed slots (distinct admitted `secret_id` values, a deleting one counting again if re-presented), `failed_attempts` finalized misses, and `total_requests` requests attached to an active entry.
 
 ### Cancellation ownership
 
@@ -224,9 +476,9 @@ External statuses are `400` invalid data, `401` invalid credentials, `429` targe
 
 ### Blocking bounds and lock order
 
-SQLite admission waits at most one second for its semaphore; failure returns `503` without consuming an attempt. The permit remains owned through the blocking operation and is released on return. The canary reader uses one dedicated permit. Snapshot generation clones the map under lock, then sorts, serializes, and gzips outside it. No HTTP or network operation runs under a domain lock.
+SQLite admission waits at most one second for its semaphore; failure returns `503` without consuming an attempt. The permit remains owned through the blocking operation and is released on return. The canary read is a single small file read, at most once per re-read interval, so it needs neither a permit nor a blocking worker. Snapshot generation projects the map to plain counter data under lock, then sorts, serializes, and gzips outside it; it never copies a `secret_id` set, which keeps the ledger lock that gates `/fetch` and `/trash` admission short. No HTTP or network operation runs under a domain lock.
 
-The global wipe's simultaneous lock order is exactly `snapshot cache -> ledger map -> collection timestamp`. Normal snapshot generation does not hold these three simultaneously: it clones ledger data under its lock and processes it afterward.
+The global wipe's simultaneous lock order is exactly `snapshot cache -> ledger map -> collection timestamp`, and it advances the collection epoch while holding the cache lock. Normal snapshot generation does not hold these three simultaneously: it captures the epoch, projects ledger data under its lock, processes it afterward, and publishes under the cache lock only if the epoch is unchanged.
 
 Breaking any of these reintroduces a fixed vulnerability. If you change the
 code, keep the invariant — and run the guarding test.
@@ -235,30 +487,49 @@ code, keep the invariant — and run the guarding test.
 |---|---|---|---|
 | `/store` is idempotent: fresh and duplicate return the same `201`, never overwrite | `RecoveryService::store`, `SqliteOperation::store` | F1: duplicate `403` was an unthrottled `authentication_key` oracle | `test_audit_f1_store_gives_no_existence_signal`, `test_duplicate_store_is_indistinguishable_and_does_not_overwrite`, `test_concurrent_identical_store_is_idempotent` |
 | Rate-limit check-and-increment is atomic under one lock | `attempts::ledger::admit` | Concurrent requests otherwise overshoot the budget | `test_rate_limit_holds_under_concurrency` |
-| Every distinct candidate consumes budget, hits and misses included; committed replays are free only before saturation and never extend cooldown | `attempts::ledger::admit` | Planted rows must not bypass the budget, while identical replays improve availability | `test_replaying_one_valid_candidate_does_not_consume_more_attempts`, `test_replaying_one_invalid_candidate_does_not_consume_more_attempts`, `test_replaying_one_candidate_does_not_slide_resets_at`, `test_audit_f1_planted_rows_cannot_reset_fetch_rate_limit` |
-| `candidate_count >= max` returns `429` before membership/DB for known, Pending, and Committed candidates | `attempts::ledger::admit` | Saturation must not become an authentication oracle | `test_known_candidate_is_rejected_when_distinct_candidate_capacity_is_full`, `test_distinct_planted_candidates_consume_capacity`, `test_pending_distinct_candidates_consume_the_attempt_budget` |
-| Pending reserves a slot immediately; duplicate Pending returns `503` without a second reservation; `/fetch` and `/trash` share the set | `AttemptsLedgerState::admit`, `RecoveryService::lookup` | Concurrent work must not oversubscribe or manufacture a duplicate candidate | `test_pending_duplicate_trash_is_rejected_without_a_second_reservation`, `test_fetch_and_trash_share_one_candidate_attempt` |
+| Every distinct `secret_id` consumes budget, hits and misses included; committed replays are free only before saturation and never extend cooldown | `attempts::ledger::admit` | Planted rows must not bypass the budget, while identical replays improve availability | `test_replaying_one_valid_secret_id_does_not_consume_more_slots`, `test_replaying_one_invalid_secret_id_does_not_consume_more_slots`, `test_replaying_one_secret_id_does_not_slide_resets_at`, `test_audit_f1_planted_rows_cannot_reset_fetch_rate_limit` |
+| Reaching `max` consumed slots returns `429` before membership/DB for known, Pending, and Committed values | `attempts::ledger::admit` | Saturation must not become an authentication oracle | `test_known_secret_id_is_rejected_when_the_budget_is_full`, `test_distinct_planted_secret_ids_consume_capacity`, `test_pending_distinct_secret_ids_consume_the_budget` |
+| Pending reserves a slot immediately; duplicate Pending returns `503` without a second reservation; `/fetch` and `/trash` share one `secret_id` set | `AttemptsLedgerState::admit`, `RecoveryService::lookup` | Concurrent work must not oversubscribe or manufacture a duplicate `secret_id` | `test_pending_duplicate_trash_is_rejected_without_a_second_reservation`, `test_fetch_and_trash_share_one_secret_id_slot` |
 | Detached finalization is generation-safe; DB error/cancellation before DB removes Pending; a miss increments failed once; trash races do not create false failures | `attempts::ledger::finalize`, `recovery::service` | Late completion and cancellation must not corrupt a replacement window or telemetry | `test_old_trash_completion_cannot_update_a_replaced_rate_limit_window`, `test_database_error_returns_500_without_consuming_attempts`, `test_committed_trash_race_returns_accepted_and_unauthorized_without_failure`, `test_concurrent_trash_hit_does_not_count_the_losing_miss_as_a_guess` |
 | A Pending reservation is removed exactly once on cancellation before SQLite or on internal error; after transfer to SQLite, the detached task owns finalization | `ReservationGuard`, `RecoveryService::{run_lookup,store}`, `SqliteOperation` | Budget integrity under cancellation and lost HTTP responses | `test_cancelled_request_does_not_consume_an_attempt`, `test_cancelled_trash_after_sqlite_start_keeps_attempt_reserved`, `test_concurrent_cancellation_refunds_every_reservation`, `test_deferred_refund_runs_when_drop_finds_the_lock_contended`, `test_database_error_returns_500_without_consuming_attempts` |
-| Pending cleanup and detached finalization are candidate- and generation-specific; candidate removal plus empty-entry removal is atomic under one map lock | `attempts::ledger::finalize` | A stale completion must never mutate or delete a reservation in a replacement window or a newer request | `test_old_trash_completion_cannot_update_a_replaced_rate_limit_window`, `test_pending_duplicate_trash_is_rejected_without_a_second_reservation` |
+| Pending cleanup and detached finalization are `secret_id`- and generation-specific; removal plus empty-entry removal is atomic under one map lock | `attempts::ledger::finalize` | A stale completion must never mutate or delete a reservation in a replacement window or a newer request | `test_old_trash_completion_cannot_update_a_replaced_rate_limit_window`, `test_pending_duplicate_trash_is_rejected_without_a_second_reservation` |
 | `id_hash` = SHA-256 over raw identifier bytes; `secret_id` = SHA-256 over the two hex *strings* | `recovery::identifiers` | Clients must match their entry; mixing algorithms silently breaks detection | `test_attempts_id_hash_matches_shared_client_vector`, `test_secret_id_and_id_hash_are_distinct_algorithms` |
 | Logs and error responses carry counts and static strings only — never identifiers, keys, or bodies | `observability::{diagnostic,counters}`, `http::{contract,error}` | Anonymity | `test_error_responses_leak_no_secret_material`, `test_snapshot_never_contains_secret_material`, `test_500_does_not_leak_internals` |
 | Hex inputs are lowercased before validation and hashing | `recovery::identifiers` | Case variants would split budgets and records | `test_audit_f12_hex_case_is_canonicalized` |
 | Cheap validation before expensive: length before base64 decode, 1 kB body limit | `RecoveryService::store`, `router` | DoS via decode/parse cost | `test_store_checks_length_before_base64`, `test_store_rejects_oversized_json_before_deserialization` |
-| Snapshot is deterministic (sorted entries, gzip `mtime=0`), hour-truncated, single-flight, initial telemetry contract version 1; counts distinct candidates and all requests but exposes no CandidateTags | `attempts::snapshot` | Stable ETag; precision gradient; bounded build cost and privacy | `test_attempts_snapshot_rebuild_is_deterministic`, `test_attempts_publish_hashed_identifier_with_counters`, `test_attempts_snapshot_at_full_map_scale`, `test_concurrent_attempts_polls_agree_on_etag`, `test_snapshot_never_contains_secret_material` |
-| Global wipe clears identifiers and CandidateTags every 24 hours, resets the budget timestamp, and invalidates pre-wipe snapshots; the first wipe is delayed until the period elapses | `attempts::maintenance` | No pre-wipe telemetry survives the boundary and `/info` agrees with `/attempts` | `test_global_wipe_clears_candidates_resets_timestamp_and_snapshot`, `test_global_wiper_first_deadline_is_delayed_by_period`, `test_production_global_wipe_interval_is_24_hours` |
+| Snapshot is deterministic (sorted entries, gzip `mtime=0`), hour-truncated, single-flight, initial telemetry contract version 1; counts distinct `secret_id` values and all requests but exposes no `secret_id` values | `attempts::snapshot` | Stable ETag; precision gradient; bounded build cost and privacy | `test_attempts_snapshot_rebuild_is_deterministic`, `test_attempts_publish_hashed_identifier_with_counters`, `test_attempts_snapshot_at_full_map_scale`, `test_concurrent_attempts_polls_agree_on_etag`, `test_snapshot_never_contains_secret_material` |
+| Global wipe clears identifiers and every retained `secret_id` every 24 hours, resets the budget timestamp, and invalidates pre-wipe snapshots; the first wipe is delayed until the period elapses | `attempts::maintenance` | No pre-wipe telemetry survives the boundary and `/info` agrees with `/attempts` | `test_global_wipe_clears_secret_ids_resets_timestamp_and_snapshot`, `test_global_wiper_first_deadline_is_delayed_by_period`, `test_production_global_wipe_interval_is_24_hours` |
 | Configuration is validated fail-closed at startup (ranges, NaN/∞/≤0 rejected) | `config::{validate_config,validate_capacity}` | A zero or absurd value would silently disable a protection | `test_validate_config_accepts_valid_values`, `test_validate_config_rejects_zero_max_attempts`, `test_validate_capacity_rejects_zero`, `test_validate_token_bucket_rejects_nan` |
 | Token bursts are finite, contain at least one representable token, and subtracting one changes the `f64` | `config::validate_token_bucket` | Numerically ineffective capacities would silently disable a bucket | `test_validate_token_bucket_rejects_f64_max`, `test_validate_token_bucket_rejects_infinity`, `test_validate_token_bucket_rejects_sub_token_bursts` |
 | SQLite is bundled at least 3.51.3; startup verifies runtime version and WAL, while every connection verifies WAL and secure deletion | `storage::sqlite` | Reproducible WAL-reset fix and deletion invariant without a per-connection version query | `test_application_connection_enables_secure_delete`, `test_application_connection_uses_patched_sqlite_and_wal`, `test_memory_database_fails_closed_when_wal_is_unavailable` |
 | Errors are classified by HTTP status only: `429` = targeted lockout, `503` = global pressure, both with `Retry-After` | `http::{contract,error}`, `router` | Clients must not match on error text | `test_503_responses_have_no_machine_code`, `test_global_buckets_use_503_without_targeted_metadata`, `test_targeted_429_has_targeted_metadata` |
 | POST requests matching `/store`, `/fetch`, and `/trash` have a uniform minimum server-side response time, including extractor rejections; `/info`, `/attempts`, 404s, 405s, other routes, and already-slow processing are excluded | `router` | Reduce fast success/failure timing differences without holding database resources or pretending to equalize network time | `production_router_applies_the_500_millisecond_floor`, `sensitive_post_success_and_failures_have_the_configured_floor`, `default_body_limit_rejection_is_also_delayed` |
-| Dotenv CANARY is read for every `/info` without cache metadata; process-env CANARY is authoritative, missing CANARY is empty, and unavailable files use startup fallback | `config::canary_file_state`, `InfoState::current_canary` | Operators can signal edits immediately without stale cache state | `test_info_rereads_same_length_canary_when_file_metadata_is_restored`, `test_info_rereads_canary_from_file_with_startup_fallback`, `test_info_env_canary_is_authoritative_over_file` |
+| Expiry is applied wherever an expired entry could matter and needs no timer: to the target entry on admission, to the whole map when it is full and before any rejection, and to the whole map before every snapshot build | `attempts::ledger::{admit,retain_active}`, `attempts::snapshot::build` | An expired entry must never be published nor cause a legitimate identifier to be refused; a periodic sweeper could only free memory that the validated capacity already bounds, and was one scheduled task with no property of its own | `test_whole_map_retention_removes_only_expired_entries`, `test_attempts_omit_expired_entries_at_build_time`, `test_fetch_expires_sub_threshold_entry_after_cooldown`, `test_full_map_does_not_evict_protected_identifier` |
+| A `secret_id` that deleted the row through `/trash` is forgotten but its slot stays consumed: presenting it again afterwards is indistinguishable, in status and counters, from presenting any other `secret_id` | `attempts::ledger::{forget_secret_id,forget_committed,RateLimitInfo::forgotten_slots}`, `LookupOutcome::Deleted` | Keeping the deleting `secret_id` recognizable made its replay free while a different PIN consumed a slot, which told a Backup File holder which PIN had performed the deletion within the cooldown window | `test_deleted_secret_id_is_indistinguishable_from_a_new_one_after_trash`, `test_trash_of_a_fetched_secret_id_forgets_it_without_refunding_the_slot`, `test_forgotten_slots_count_toward_saturation_and_survive_refunds`, `test_old_replay_forget_cannot_touch_a_replaced_window`, `test_trash_does_not_reset_the_counter` |
+| The snapshot is a projection of ledger counters, never a copy of ledger state: replacing every retained `secret_id` leaves the published bytes and the ETag identical | `AttemptsLedgerState::snapshot_entries`, `AttemptsLedgerEntry` | A `secret_id` must be unable to reach the payload, and the snapshot's peak cost must not scale with the `secret_id` budget (measured: the snapshot's marginal cost fell from 37,530 to 199 bytes per entry at `RATE_LIMIT_MAX_ATTEMPTS=255`) | `test_snapshot_is_independent_of_secret_ids`, `test_snapshot_never_contains_secret_material`, `test_attempts_snapshot_at_full_map_scale` |
+| The 35-second grace period bounds the whole process, not only the HTTP server: the runtime is built explicitly and stops waiting for detached blocking work when the period is spent | `main::{main,serve,run_with_graceful_shutdown}` | Dropping a runtime waits without limit for a `spawn_blocking` task that has started, and SQLite work is deliberately handed to such tasks, so Axum could drain well inside the period while one stuck thread kept the process alive — breaking the single-instance assumption for anything that waits on the PID | `shutdown_timeout_bounds_a_stuck_blocking_task`, `the_grace_period_is_shared_between_draining_and_detached_work`, `shutdown_times_out_after_signal_with_bounded_grace_period`, `ready_server_completes_without_waiting_for_grace_period` |
+| Every configured token bucket refills: a zero rate is refused at startup | `config::validate_token_bucket` | A zero rate is a quota for the life of the process, not a rate limit — once the burst is spent the lookup bucket refuses every recovery with `503` until a restart, and no `Retry-After` can describe a token that never arrives | `test_validate_token_bucket_rejects_a_zero_refill` |
+| A global-bucket `503` carries a `Retry-After` derived from the bucket's own state at the moment of refusal: the missing fraction of a token over the configured refill rate, rounded up, at least one second | `rate_limit::{BucketDecision,TokenBucket::try_consume_at}` | A fixed `1` was only right for the default rates; with a slower refill it told clients to retry before a token could exist, turning the backoff into extra load during overload | `test_token_bucket_refill_is_deterministic_on_an_injected_clock`, `test_token_bucket_backoff_rounds_up_and_floors_at_one_second`, `test_global_bucket_retry_after_follows_the_configured_refill` |
+| The non-loopback deployment warning is decided on the address the listener actually bound, not on the `SERVER_ADDRESS` text | `main::is_loopback_bind`, `main::warn_unless_loopback` | A textual prefix check accepted `localhost.attacker.example` and flagged the loopback `127.0.0.2`; the warning remains advisory, as the runbook states | `loopback_is_decided_on_the_bound_address`, `bound_localhost_is_judged_by_its_resolved_address` |
+| Configuration bounds follow from other invariants: `RATE_LIMIT_COOLDOWN` is at most the 24-hour wipe interval, `SECRET_MAX_LENGTH` lies between the Profile 1 secret length (128) and the largest Base64 value the 1024-byte body limit can carry (832), and `ATTEMPTS_SNAPSHOT_TTL_SECONDS` is shorter than the cooldown | `config::{validate_config,validate_snapshot_ttl}`, `MAX_RATE_LIMIT_COOLDOWN_MINUTES`, `MAX_SECRET_LENGTH` | A longer cooldown announces a budget the wipe discards; a secret length outside the range refuses every conforming backup or advertises a length `/store` answers `413` to; a TTL at or above the cooldown lets an attempt expire between two rebuilds and never be published | `test_validate_config_rejects_a_cooldown_longer_than_the_wipe_interval`, `test_max_cooldown_is_the_global_wipe_interval`, `test_validate_config_bounds_secret_max_length_to_the_profile_and_the_body_limit`, `test_store_envelope_constant_matches_the_serialized_body`, `test_validate_snapshot_ttl_must_be_shorter_than_the_cooldown` |
+| The `secret` schema is validated as an unconditional startup postcondition, against the live table and not Diesel's ledger | `storage::sqlite::validate_secret_schema` | A ledger that already records `0001` makes Diesel skip the migration, so a missing or incompatible table (partial restore, manual edit) used to pass startup and fail every request with `500` | `recorded_migration_without_secret_table_is_rejected`, `recorded_migration_with_incompatible_secret_table_is_rejected`, `recorded_migration_with_exact_secret_table_is_accepted`, `initialize_fails_closed_when_the_secret_table_is_missing` |
+| Backup and restore validate SQLite integrity plus the exact `secret` and Diesel-ledger shapes; the public Python `verify` command is absent, and a restore drill invokes the application's own initialization on the restored copy | `deploy/backup/sqlite_backup.py`, `main::database_check_command`, `storage::sqlite::initialize_database` | A Python check that only required a table named `__diesel_schema_migrations` declared an intact but unbootable backup valid; the application must be the final compatibility authority | `deploy/backup/test_sqlite_backup.py`, CI `backup` job |
+| The request timeout is an application response: an expired request receives `503` with `Retry-After` and the JSON error envelope, recorded by diagnostics as `overload` | `router::request_timeout_middleware` | Clients classify by status only and are told to retry `503`; the framework's bare `408` with an empty body is outside the documented status set and would not trigger the backoff the contract expects | `test_request_timeout_is_a_503_with_retry_after_and_error_body` |
+| A snapshot built from a pre-wipe copy of the ledger is never published after the wipe: the wipe advances a collection epoch under the cache lock, and a build publishes only if the epoch it captured before copying is unchanged | `attempts::snapshot::{wipe_epoch,build_and_publish}` | The 24-hour wipe is a retention boundary; a build that copied the ledger before the wipe and finished after it used to refill the cache with purged entries, attached to the new `collection_started_at` | `test_wipe_during_in_flight_build_after_ledger_copy_publishes_nothing_pre_wipe`, `test_wipe_during_in_flight_build_after_collection_read_publishes_nothing_pre_wipe`, `test_global_wipe_clears_secret_ids_resets_timestamp_and_snapshot` |
+| At most one snapshot build runs at a time, and a request that stops waiting neither aborts it nor starts a second one: the build task owns the mutex guard | `attempts::snapshot::snapshot_for_request` | The burst that arrives when the cache expires would otherwise serialize a multi-megabyte payload once per request; and a build that dies must not lock `/attempts` out, which a shared slot holding a dead task's channel receiver did permanently | `test_cancelled_attempts_request_keeps_single_rebuild_in_flight`, `test_attempts_recovers_after_a_snapshot_build_dies`, `test_attempts_snapshot_at_full_map_scale` |
+| Cooldown expiry decides on the monotonic clock; wall-clock values remain the published timestamps and the finalization generation token | `attempts::ledger::is_expired`, `RateLimitInfo::last_secret_id_instant` | A forward `CLOCK_REALTIME` step larger than the cooldown would otherwise expire every entry at once and reset every per-identifier budget — the server's only control against password brute-force | `test_a_forward_wall_clock_jump_does_not_reset_a_saturated_budget`, `test_a_forward_wall_clock_jump_does_not_drop_active_entries`, `test_whole_map_retention_removes_only_expired_entries`, `test_fetch_expires_sub_threshold_entry_after_cooldown` |
+| Identifier-map capacity is validated against the lower of the declared budget and the enforced cgroup limit, accounting for the `secret_id` budget, and refuses at startup rather than deferring to the OOM killer | `config::{validate_capacity,estimated_peak_memory_bytes}` | The former fixed 10,000,000-entry ceiling rested on a per-entry cost an order of magnitude too low, so it admitted exactly the silent memory-exhaustion kill it claimed to prevent (~14.4 GiB of peak against `MemoryMax=512M`) | `test_validate_capacity_rejects_the_former_ten_million_ceiling`, `test_validate_capacity_tracks_the_secret_id_budget`, `test_validate_capacity_boundary_is_exact`, `test_capacity_model_is_not_optimistic_against_the_measurement`, `test_estimated_peak_memory_does_not_wrap`, `test_effective_budget_takes_the_enforced_limit_when_lower`, `test_capacity_is_refused_against_a_lower_enforced_limit`, `test_parse_memory_limit_recognizes_unlimited_forms` |
+| A server error produces one `WARN` line; a `503` is pressure and produces none; nothing else is logged per request, and the line carries only the request ID, a static route enum and the status. There is deliberately no application quota: the operator must install and verify the documented journald rate and retention policy | `observability::diagnostic::record`, `docs/DEPLOYMENT.md` | `WARN` is live under the default filter, so a client-triggerable status routed into it becomes a disk-fill vector and crowds out a genuine `500` — the previous two-class quota misfiled `304` and did exactly that. Journald may suppress the aggregate line too, so durable counters require an independently bounded sink | `test_only_a_genuine_server_error_is_logged`, `test_conditional_polling_is_never_logged`, `test_global_lookup_rejections_are_counted_not_logged`, `test_database_error_logs_are_diagnostic_without_sensitive_details`, `test_user_controlled_path_and_header_never_reach_the_logs` |
+| The dotenv CANARY is re-read at most once every ten minutes and single-flight; `/info` resolves the value and remaining freshness in one cache transaction; process-env CANARY is authoritative, a missing CANARY is empty, and an unavailable file uses the startup fallback | `config::canary_file_state`, `InfoState::current_canary` | The signal must never be masked by a fallback, its staleness must be bounded by one interval rather than stacked with a cache, and an expiry-time request burst must not turn the only unbucketed public route into concurrent filesystem work | `test_info_rereads_canary_from_file_with_startup_fallback`, `test_info_rereads_same_length_canary_when_file_metadata_is_restored`, `test_info_serves_a_cached_canary_and_advertises_its_freshness`, `test_info_env_canary_is_authoritative_over_file`, `test_info_advertises_no_freshness_for_an_env_canary`, `test_concurrent_info_refresh_reads_the_canary_once` |
+| The CI-tested nginx example streams request bodies into Axum's total timeout, gives `GET /attempts` one Host/query-independent cache key, keeps other methods outside the edge bucket, holds one cache-fill lock for the whole request bound, and maps nginx-generated pressure to JSON `503` with `Retry-After` without intercepting upstream statuses | `deploy/nginx/{recoverbull.conf,smoke.py}`, `.github/workflows/ci.yml` | nginx otherwise buffers the whole body while applying only an inactivity timeout, so drip-fed requests can occupy the global connection cap without entering Axum's 30-second bound. Request-controlled cache-key variants or the five-second cache-lock defaults can also multiply expensive upstream builds; applying the GET bucket to other methods changes Axum's contract. This proves the committed example only, not the operator's installed adaptation | `test_example_nginx_preserves_attempts_proxy_contract`, `deploy/nginx/smoke.py`, CI `nginx` job |
+| SQLite files created in the repository and all of their WAL/shared-memory/rollback sidecars are ignored | `.gitignore` | A crash can leave committed database state in a sidecar; ignoring only the main `*.sqlite3` file makes that state eligible for an accidental commit | `test_repository_ignores_sqlite_sidecars` |
+| The systemd example starts the unprivileged service with no capability in its bounding set and a private minimal device namespace | `deploy/systemd/recoverbull.service` | A compromised process has no legitimate need to acquire capabilities or access host device nodes | `test_systemd_example_drops_capabilities_and_privatises_devices` |
 
 ## Final path and verification checklist
 
 - [ ] `src/main.rs`, `src/app.rs`, `src/config.rs`, `src/router.rs`, `src/http/`, `src/handlers/`, `src/recovery/`, `src/attempts/`, `src/storage/sqlite.rs`, and `src/observability/` exist at the paths in the reading map.
 - [ ] `src/schema.rs` remains the Diesel schema path imposed by `diesel.toml`.
-- [ ] The final test listing contains every test named in the invariant table: verify with `cargo test --locked -- --list` (the local post-reorganization listing contains 175 tests; no listing is checked in).
+- [ ] The final test listing contains every Rust test named in the invariant table: verify with `cargo test --locked -- --list` (the local listing contains 220 tests; no listing is checked in). The backup invariant additionally names its standalone CI oracle.
 - [ ] CI compiles rustdocs with `cargo doc --no-deps --document-private-items --locked`; this proves only that rustdoc compiles, not that an invariant is correct or tested.
 - [ ] For a documentation-only change, the local static checks are `git diff --check`, path existence checks, and exact-name checks against the final `cargo test --locked -- --list` output; do not substitute `cargo doc` for executable invariant evidence.
 
@@ -270,6 +541,10 @@ code, keep the invariant — and run the guarding test.
   reason unrelated to what it guards (this exact trap broke the F1
   characterization test). Install a dedicated bucket instead — pattern:
   `test_audit_f9_store_writes_are_token_bucketed`.
+- **The test environment's cooldown is one minute.** `validate_snapshot_ttl`
+  requires the snapshot TTL to be shorter than the cooldown, so the CI env
+  and `.env.example` set `ATTEMPTS_SNAPSHOT_TTL_SECONDS=30`; the code default
+  of 60 would be refused at `config::init()` and fail every test.
 - **Keep the suite parallel-safe.** Per-test database isolation is handled
   by the test harness; CI runs `cargo test --locked`. Do not reintroduce
   `--test-threads=1`.
@@ -293,12 +568,39 @@ code, keep the invariant — and run the guarding test.
   adversarial review and delta review of the final state — no confirmed
   residual vulnerability; full suite 122/122 and `cargo audit` clean as of
   that date.
-- **Distinct-candidate limiter review** (2026-08-20): the rate-limit bucket
-  remains `sha256(identifier)`, while `secret_id/key_id` CandidateTags are
+- **Independent security reviews and simplification pass** (2026-09-03/04,
+  starting at `main@08e55c3`, two agents working in parallel; the reports are
+  kept outside the repository): remediated the capacity model, monotonic
+  expiry, snapshot projection and failure counter, pre-wipe publication race,
+  timeout response, startup/backup schema checks, configuration bounds,
+  loopback decision, bucket-derived `Retry-After`, post-`/trash` counter
+  oracle, and client detection documentation. The follow-up decisions removed
+  the in-process log quota and duration/category machinery, removed the
+  periodic expiry task, simplified snapshot single-flight to one task-owned
+  mutex, cached canary reads for ten minutes with explicit `/info` freshness,
+  rejected zero refills, and bounded the whole process shutdown. The initial
+  proxy work was later aligned with the production nginx topology: the unused
+  alternative and its dependency graph were deleted, while nginx gained a
+  static invariant test and executable CI smoke.
+  `SYS-001` remains a client-delivery responsibility. `F-K` (`created_at`
+  precision) remains a protocol decision and was not changed.
+- **Post-review regression pass** (2026-09-04): made dotenv-canary refresh
+  single-flight and returned its value/freshness atomically; removed the
+  misleading public Python backup-verification command, validated Diesel's
+  ledger exactly, and made the restore drill run the application's own
+  initialization; documented `deploy/` as operator-adapted examples and kept
+  the one-WARN-per-`500`, no-per-request-`503` policy with explicit journald
+  responsibility. The final full-tree audit found no critical or high issue;
+  it corrected nginx's buffered slow-body gap, excluded SQLite sidecars from
+  version control, and tightened the systemd capability and device sandbox.
+  Local release validation passed 220/220 Rust tests and the standalone
+  backup/restore oracle.
+- **Distinct-`secret_id` limiter review** (2026-08-20): the rate-limit bucket
+  remains `sha256(identifier)`, while the derived `secret_id`/`key_id` values are
   retained only in bounded memory. Pending reservations, saturation-before-
   membership, replay telemetry, shared `/fetch`/`/trash` state, and detached
-  generation-safe finalization are covered by the distinct-candidate tests.
-  The three-distinct-candidate targeted lockout remains accepted; this is an
+  generation-safe finalization are covered by the distinct-`secret_id` tests.
+  The three-distinct-`secret_id` targeted lockout remains accepted; this is an
   availability and signal improvement, not a corrected vulnerability.
 
 ## Reviewer checklist

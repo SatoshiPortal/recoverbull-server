@@ -1,5 +1,5 @@
-# Reference policy only; adapt these periods and document the selected
-# retention according to docs/RETENTION.md and local operational requirements.
+# Operator-adapted nginx example; see deploy/README.md. Operators must adapt
+# these periods and document them under docs/RETENTION.md.
 /var/log/nginx/recoverbull-error.log {
     weekly
     rotate 4

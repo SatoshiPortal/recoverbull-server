@@ -139,7 +139,7 @@ async fn test_audit_f2_attacker_failures_deny_legitimate_owner() {
             .post("/fetch")
             .json(&FetchSecret {
                 identifier: SHA256_111111.to_string(),
-                authentication_key: crate::tests::distinct_candidate(index),
+                authentication_key: crate::tests::distinct_authentication_key(index),
             })
             .await;
         assert_eq!(response.status_code(), StatusCode::UNAUTHORIZED);
@@ -280,4 +280,111 @@ async fn test_audit_f12_hex_case_is_canonicalized() {
         })
         .await;
     assert_eq!(response.status_code(), StatusCode::OK);
+}
+
+/// The public `/attempts` representation does not depend on Host or query
+/// parameters. The CI-tested nginx example must therefore collapse every
+/// attacker-controlled variant into one cache entry. Its executable smoke
+/// proves the resulting one-upstream-call property; this source-level guard
+/// prevents the example config from silently dropping the key controls.
+#[test]
+fn test_example_nginx_preserves_attempts_proxy_contract() {
+    let nginx = include_str!("../../deploy/nginx/recoverbull.conf");
+    let attempts_location = nginx
+        .split_once("location = /attempts {")
+        .expect("nginx must define the exact /attempts location")
+        .1;
+    for control in [
+        "proxy_cache_key $request_method$uri;",
+        "proxy_cache_convert_head off;",
+        "proxy_cache_lock on;",
+        "proxy_cache_lock_timeout 35s;",
+        "proxy_cache_lock_age 35s;",
+        "limit_req zone=recoverbull_attempts burst=20 nodelay;",
+    ] {
+        assert!(
+            attempts_location.contains(control),
+            "nginx /attempts location is missing {control}"
+        );
+    }
+    for contract in [
+        "map $request_method $recoverbull_attempts_limit_key",
+        "GET     $binary_remote_addr;",
+        "default \"\";",
+        "proxy_request_buffering off;",
+        "error_page 503 = @recoverbull_shared_pressure;",
+        "add_header Retry-After 1 always;",
+        // AUD-09: the rate/connection limits must count per Tor circuit, not
+        // once for all onion clients that share the 127.0.0.1 forwarder.
+        "listen 127.0.0.1:3000 proxy_protocol;",
+        "set_real_ip_from 127.0.0.1;",
+        "real_ip_header proxy_protocol;",
+    ] {
+        assert!(nginx.contains(contract), "nginx is missing {contract}");
+    }
+
+    // The Tor example must export the per-circuit identifier the nginx real_ip
+    // directive consumes, or the per-circuit keying above is inert.
+    let torrc = include_str!("../../deploy/tor/recoverbull.torrc.example");
+    assert!(
+        torrc.contains("HiddenServiceExportCircuitID haproxy"),
+        "torrc example must export the per-circuit id as a PROXY header"
+    );
+
+    let nginx_smoke = include_str!("../../deploy/nginx/smoke.py");
+    assert!(
+        nginx_smoke.contains("Backend.count(\"GET\", \"/attempts\") - before == 1")
+            && nginx_smoke.contains("json.loads(body)")
+            && nginx_smoke.contains("status == 304")
+            && nginx_smoke.contains("Backend.slow_body_started.wait(timeout=5)")
+            && nginx_smoke.contains("assert_per_circuit_isolation")
+            && nginx_smoke.contains("PROXY TCP6"),
+        "nginx smoke must prove body streaming, cache single-flight, edge JSON, conditional reuse, \
+         and per-circuit rate-limit isolation"
+    );
+}
+
+/// Local databases may leave WAL, shared-memory, or rollback-journal files
+/// after an interrupted run. Those files are database state and must not be
+/// made eligible for an accidental `git add`, even though the main database
+/// name is already ignored.
+#[test]
+fn test_repository_ignores_sqlite_sidecars() {
+    let gitignore = include_str!("../../.gitignore");
+    for pattern in ["*.sqlite3-wal", "*.sqlite3-shm", "*.sqlite3-journal"] {
+        assert!(
+            gitignore.lines().any(|line| line == pattern),
+            ".gitignore is missing {pattern}"
+        );
+    }
+}
+
+/// The application needs no Linux capability and no host device node. Keep
+/// both properties explicit in the operator-adapted systemd example.
+#[test]
+fn test_systemd_example_drops_capabilities_and_privatises_devices() {
+    let systemd = include_str!("../../deploy/systemd/recoverbull.service");
+    for control in [
+        "CapabilityBoundingSet=",
+        "PrivateDevices=true",
+        // AUD-10 hardening. PrivateNetwork is intentionally absent: the process
+        // must stay reachable on loopback by the reverse proxy.
+        "ProtectSystem=strict",
+        "RestrictNamespaces=true",
+        "ProtectKernelModules=true",
+        "ProtectKernelTunables=true",
+        "MemoryDenyWriteExecute=true",
+        "SystemCallArchitectures=native",
+        "SystemCallFilter=@system-service",
+        "IPAddressDeny=any",
+    ] {
+        assert!(
+            systemd.lines().any(|line| line == control),
+            "systemd example is missing {control}"
+        );
+    }
+    assert!(
+        !systemd.lines().any(|line| line == "PrivateNetwork=true"),
+        "PrivateNetwork must not be set: it would cut the loopback path to the proxy"
+    );
 }

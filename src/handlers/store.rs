@@ -9,7 +9,9 @@ use crate::app::AppState;
 use crate::http::{contract::StoreSecret, error::retry_after_response};
 use crate::recovery::service::{StoreCommand, StoreResult};
 
-const GLOBAL_OVERLOAD_RETRY_AFTER_SECS: u64 = 1;
+/// Advisory backoff for pressure that has no deadline to derive (a busy
+/// database): "try again shortly". Bucket refusals carry their own estimate.
+const DATABASE_BUSY_RETRY_AFTER_SECS: u64 = 1;
 
 /// Accepts and stores an encrypted secret through the recovery service.
 pub async fn store_secret(
@@ -31,14 +33,14 @@ pub async fn store_secret(
             Json(crate::http::error::error_body(error)),
         )
             .into_response(),
-        StoreResult::GlobalOverload => retry_after_response(
+        StoreResult::GlobalOverload { retry_after_secs } => retry_after_response(
             StatusCode::SERVICE_UNAVAILABLE,
-            GLOBAL_OVERLOAD_RETRY_AFTER_SECS,
+            retry_after_secs,
             "Too many store requests, retry later",
         ),
         StoreResult::DatabaseBusy => retry_after_response(
             StatusCode::SERVICE_UNAVAILABLE,
-            GLOBAL_OVERLOAD_RETRY_AFTER_SECS,
+            DATABASE_BUSY_RETRY_AFTER_SECS,
             "Database busy, retry later",
         ),
         StoreResult::DatabaseError => (

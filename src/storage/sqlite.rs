@@ -97,23 +97,7 @@ impl SqliteStorage {
     }
 
     pub(crate) fn initialize(&self) -> Result<(), ConnectionSetupError> {
-        let mut connection = establish_connection_without_wal_check(self.database_url.clone())?;
-        verify_sqlite_runtime(&mut connection)?;
-        run_migrations(&mut connection).map_err(|_| ConnectionSetupError::Migration)?;
-        sql_query("PRAGMA journal_mode = WAL;")
-            .execute(&mut connection)
-            .map_err(|_| ConnectionSetupError::Wal)?;
-        let journal_mode = sql_query("SELECT journal_mode AS value FROM pragma_journal_mode")
-            .load::<PragmaText>(&mut connection)
-            .map_err(|_| ConnectionSetupError::Wal)?
-            .into_iter()
-            .next()
-            .ok_or(ConnectionSetupError::Wal)?;
-        if journal_mode.value != "wal" {
-            return Err(ConnectionSetupError::Wal);
-        }
-        tracing::info!(target: "security", "database initialized");
-        Ok(())
+        initialize_database(self.database_url.clone())
     }
 
     #[cfg(test)]
@@ -133,6 +117,53 @@ impl SqliteStorage {
     pub(crate) fn database_semaphore_for_test(&self) -> Arc<Semaphore> {
         self.database_semaphore.clone()
     }
+}
+
+/// Validates an already-initialized database for the restore drill.
+///
+/// A restore drill points `keychain check-database` at a RESTORED copy, which
+/// already carries the schema of the live database it was backed up from. An
+/// empty or truncated file has no `secret` table; letting the shared
+/// initialization create one would report a brand-new or damaged file as a
+/// valid backup (AUD-05). This path therefore refuses an uninitialized file
+/// before any migration runs, so the check can only ever validate a real
+/// database and never manufacture one. It still runs the full startup
+/// initialization afterwards (idempotent migrations, schema postcondition, WAL
+/// setup) on the restored copy, as the drill documents.
+pub(crate) fn check_database(database_url: String) -> Result<(), ConnectionSetupError> {
+    let mut probe = establish_connection_without_wal_check(database_url.clone())?;
+    let initialized =
+        table_exists(&mut probe, "secret").map_err(|_| ConnectionSetupError::Migration)?;
+    drop(probe);
+    if !initialized {
+        return Err(ConnectionSetupError::Uninitialized);
+    }
+    initialize_database(database_url)
+}
+
+/// Applies the exact database initialization used by server startup.
+///
+/// The restore drill invokes this through `keychain check-database` on the
+/// restored copy, so an independent Python schema approximation cannot be
+/// the final authority on whether this application can open and migrate it.
+pub(crate) fn initialize_database(database_url: String) -> Result<(), ConnectionSetupError> {
+    let mut connection = establish_connection_without_wal_check(database_url)?;
+    verify_sqlite_runtime(&mut connection)?;
+    run_migrations(&mut connection).map_err(|_| ConnectionSetupError::Migration)?;
+    sql_query("PRAGMA journal_mode = WAL;")
+        .execute(&mut connection)
+        .map_err(|_| ConnectionSetupError::Wal)?;
+    let journal_mode = sql_query("SELECT journal_mode AS value FROM pragma_journal_mode")
+        .load::<PragmaText>(&mut connection)
+        .map_err(|_| ConnectionSetupError::Wal)?
+        .into_iter()
+        .next()
+        .ok_or(ConnectionSetupError::Wal)?;
+    if journal_mode.value != "wal" {
+        return Err(ConnectionSetupError::Wal);
+    }
+    tracing::info!(target: "security", "database initialized");
+    Ok(())
 }
 
 impl SqliteOperation {
@@ -200,6 +231,10 @@ pub enum ConnectionSetupError {
     SecureDeleteVerification,
     Wal,
     Migration,
+    /// The `check-database` restore-drill target has no `secret` table, so it
+    /// is not an initialized database. Only the check path returns this: normal
+    /// startup deliberately creates the schema on a fresh `DATABASE_URL`.
+    Uninitialized,
 }
 
 #[derive(QueryableByName)]
@@ -216,29 +251,36 @@ struct SecretColumn {
     default_value: Option<String>,
 }
 
-/// Runs embedded migrations, adopting an exact pre-Diesel `secret` table when
-/// necessary. Adoption creates only Diesel's ledger and never creates or
-/// changes `secret`; it can be removed once every database has been adopted.
-pub fn run_migrations(
+/// The `secret` columns migration `0001` creates, in `pragma_table_info`
+/// order: `(name, type, notnull, pk, dflt_value)`.
+const EXPECTED_SECRET_COLUMNS: [(&str, &str, i32, i32, Option<&str>); 3] = [
+    ("id", "TEXT", 1, 1, None),
+    ("created_at", "TEXT", 1, 0, None),
+    ("encrypted_secret", "TEXT", 1, 0, None),
+];
+
+/// Checks that the live `secret` table has exactly the columns of migration
+/// `0001`. This is the storage postcondition every query in this module
+/// relies on, and it is checked against the table itself rather than against
+/// Diesel's ledger: the ledger records that a migration ran, not that the
+/// schema it produced is still there.
+fn validate_secret_schema(
     connection: &mut SqliteConnection,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let secret_exists = table_exists(connection, "secret")?;
-    let ledger_exists = table_exists(connection, "__diesel_schema_migrations")?;
-
-    if secret_exists && !ledger_exists {
-        let columns = sql_query(
-            "SELECT name, type AS column_type, \"notnull\" AS not_null, \
-             pk AS primary_key, dflt_value AS default_value \
-             FROM pragma_table_info('secret') ORDER BY cid",
-        )
-        .load::<SecretColumn>(connection)?;
-        let expected = [
-            ("id", "TEXT", 1, 1, None),
-            ("created_at", "TEXT", 1, 0, None),
-            ("encrypted_secret", "TEXT", 1, 0, None),
-        ];
-        let exact = columns.len() == expected.len()
-            && columns.iter().zip(expected).all(|(column, expected)| {
+    if !table_exists(connection, "secret")? {
+        return Err("secret table is missing".into());
+    }
+    let columns = sql_query(
+        "SELECT name, type AS column_type, \"notnull\" AS not_null, \
+         pk AS primary_key, dflt_value AS default_value \
+         FROM pragma_table_info('secret') ORDER BY cid",
+    )
+    .load::<SecretColumn>(connection)?;
+    let exact = columns.len() == EXPECTED_SECRET_COLUMNS.len()
+        && columns
+            .iter()
+            .zip(EXPECTED_SECRET_COLUMNS)
+            .all(|(column, expected)| {
                 (
                     column.name.as_str(),
                     column.column_type.as_str(),
@@ -247,9 +289,29 @@ pub fn run_migrations(
                     column.default_value.as_deref(),
                 ) == expected
             });
-        if !exact {
-            return Err("legacy secret table has an incompatible schema".into());
-        }
+    if !exact {
+        return Err("secret table has an incompatible schema".into());
+    }
+    Ok(())
+}
+
+/// Runs embedded migrations, adopting an exact pre-Diesel `secret` table when
+/// necessary, then verifies the resulting schema unconditionally.
+///
+/// Adoption creates only Diesel's ledger and never creates or changes
+/// `secret`; it can be removed once every database has been adopted. The
+/// final validation is what makes a pre-existing ledger safe to trust: a
+/// database whose ledger already records `0001` makes Diesel skip the
+/// migration, so without it a missing or incompatible `secret` table (a
+/// partial restore, a manual edit) would pass startup and fail every request.
+pub fn run_migrations(
+    connection: &mut SqliteConnection,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let secret_exists = table_exists(connection, "secret")?;
+    let ledger_exists = table_exists(connection, "__diesel_schema_migrations")?;
+
+    if secret_exists && !ledger_exists {
+        validate_secret_schema(connection).map_err(|error| format!("legacy {error}"))?;
 
         connection.transaction(|connection| {
             sql_query(
@@ -267,7 +329,7 @@ pub fn run_migrations(
     }
 
     connection.run_pending_migrations(MIGRATIONS)?;
-    Ok(())
+    validate_secret_schema(connection)
 }
 
 fn table_exists(

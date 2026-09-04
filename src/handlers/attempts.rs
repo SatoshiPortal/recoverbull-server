@@ -12,14 +12,16 @@ use axum::{
     Json,
 };
 
-/// Small fixed advisory backoff for the global attempts-telemetry bucket:
-/// there is no cooldown deadline to derive here, only "try again shortly".
-const GLOBAL_OVERLOAD_RETRY_AFTER_SECS: u64 = 1;
-
 /// Public lookup telemetry.
 ///
-/// Publishes the identifiers currently rate-limited for fetch/trash lookups,
-/// hashed with SHA-256 over the raw identifier bytes so that:
+/// Publishes *every* identifier with an active fetch/trash entry, not only
+/// the saturated ones: a single admitted secret_id creates an entry, and the
+/// entry is published until it expires. The count of published entries is
+/// therefore the live size of the rate-limit map, and its ratio to the
+/// `max_attempt_identifiers` advertised by `/info` is the aggregate
+/// map-pressure signal (see the map-filling accepted risk in SECURITY.md).
+///
+/// Identifiers are hashed with SHA-256 over the raw identifier bytes so that:
 /// - a client can recognize its own identifier (it knows the raw value),
 /// - nobody else can recover a raw identifier from the list (pre-image
 ///   resistance), which keeps the list useless for griefing or lockout.
@@ -33,10 +35,12 @@ const GLOBAL_OVERLOAD_RETRY_AFTER_SECS: u64 = 1;
 /// is no uncompressed variant, which keeps one representation, one ETag and
 /// one cache entry.
 pub async fn get_attempts(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if !state.attempts_request_admitted().await {
+    if let crate::rate_limit::BucketDecision::Rejected { retry_after_secs } =
+        state.attempts_request_admission().await
+    {
         return retry_after_response(
             StatusCode::SERVICE_UNAVAILABLE,
-            GLOBAL_OVERLOAD_RETRY_AFTER_SECS,
+            retry_after_secs,
             "Too many attempts telemetry requests, retry later",
         );
     }
@@ -53,12 +57,12 @@ pub async fn get_attempts(State(state): State<AppState>, headers: HeaderMap) -> 
         .get(header::IF_NONE_MATCH)
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| {
-            value.split(',').any(|candidate| {
-                let candidate = candidate.trim();
+            value.split(',').any(|secret_id| {
+                let secret_id = secret_id.trim();
                 // RFC 9110: If-None-Match uses the weak comparison function,
                 // so a weak validator W/"…" matches our strong ETag.
-                let candidate = candidate.strip_prefix("W/").unwrap_or(candidate);
-                candidate == "*" || candidate == etag
+                let secret_id = secret_id.strip_prefix("W/").unwrap_or(secret_id);
+                secret_id == "*" || secret_id == etag
             })
         });
 

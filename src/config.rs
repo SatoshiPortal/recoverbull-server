@@ -70,11 +70,46 @@ pub(crate) fn unique_test_database() -> (String, Arc<TestDatabaseGuard>) {
     (url, Arc::new(TestDatabaseGuard { path }))
 }
 
+/// Longest cooldown the ledger can honor, in minutes. The whole in-memory
+/// ledger is wiped every 24 hours
+/// (`attempts::maintenance::PRODUCTION_GLOBAL_WIPE_INTERVAL`), so a longer
+/// value announces a budget through `/info` and `resets_at` that the next
+/// wipe silently discards: the operator believes a weak PIN gets three
+/// secret_ids per week and it gets three per day.
+pub const MAX_RATE_LIMIT_COOLDOWN_MINUTES: i64 = 24 * 60;
+
+/// Length of a RecoverBull Profile 1 encrypted secret in Base64 characters:
+/// a 16-byte IV, a 48-byte AES-CBC ciphertext (32 bytes plus one PKCS#7
+/// block) and a 32-byte HMAC-SHA256 make 96 bytes, which Base64 encodes as
+/// 128 characters. A smaller `SECRET_MAX_LENGTH` refuses every conforming
+/// backup.
+pub const PROFILE_1_ENCRYPTED_SECRET_LENGTH: usize = 128;
+
+/// Bound on any request body the router accepts, applied before
+/// deserialization. Legitimate JSON requests are below 320 bytes.
+pub const MAX_REQUEST_BODY_BYTES: usize = 1024;
+
+/// Bytes of a compact `/store` JSON body outside the `encrypted_secret`
+/// value: the three keys, two 64-character hex strings, quotes and
+/// punctuation. Pinned against a real serialization by
+/// `test_store_envelope_constant_matches_the_serialized_body`.
+pub const STORE_JSON_ENVELOPE_BYTES: usize = 191;
+
+/// Largest `SECRET_MAX_LENGTH` a compact `/store` body can carry under the
+/// body limit. A valid Base64 string has a length that is a multiple of
+/// four, so the remaining room is rounded down. A larger value would be
+/// advertised by `/info` yet unreachable through `/store`, which answers
+/// `413` before the business validation runs.
+pub const MAX_SECRET_LENGTH: usize = (MAX_REQUEST_BODY_BYTES - STORE_JSON_ENVELOPE_BYTES) / 4 * 4;
+
 /// Validates the security-critical configuration values.
 ///
 /// A non-positive rate-limit cooldown would silently disable rate-limiting
-/// entirely (the cooldown check would always be elapsed), and a zero
-/// max_attempts or secret_max_length makes the service unusable.
+/// entirely (the cooldown check would always be elapsed), a cooldown longer
+/// than the daily wipe announces a budget the wipe discards, a zero
+/// max_attempts makes the service unusable, and a secret length outside
+/// `[PROFILE_1_ENCRYPTED_SECRET_LENGTH, MAX_SECRET_LENGTH]` either refuses
+/// every conforming backup or advertises a length `/store` cannot accept.
 /// The server must refuse to start rather than run degraded.
 pub fn validate_config(
     rate_limit_cooldown: i64,
@@ -87,16 +122,23 @@ pub fn validate_config(
             rate_limit_cooldown
         ));
     }
-    // chrono::TimeDelta panics on out-of-range values; keep the cooldown
-    // within a sane range (at most one year in minutes).
-    if rate_limit_cooldown > 525_600 {
+    if rate_limit_cooldown > MAX_RATE_LIMIT_COOLDOWN_MINUTES {
         return Err(format!(
-            "RATE_LIMIT_COOLDOWN must be at most 525600 minutes (1 year), got {}",
-            rate_limit_cooldown
+            "RATE_LIMIT_COOLDOWN must be at most {} minutes (the whole ledger is wiped every \
+             24 hours, so a longer cooldown cannot be honored), got {}",
+            MAX_RATE_LIMIT_COOLDOWN_MINUTES, rate_limit_cooldown
         ));
     }
-    if secret_max_length == 0 {
-        return Err("SECRET_MAX_LENGTH must be greater than 0".to_string());
+    if !(PROFILE_1_ENCRYPTED_SECRET_LENGTH..=MAX_SECRET_LENGTH).contains(&secret_max_length) {
+        return Err(format!(
+            "SECRET_MAX_LENGTH must be between {} (a Profile 1 encrypted secret) and {} (the \
+             largest Base64 value a compact /store body can carry under the {}-byte body \
+             limit), got {}",
+            PROFILE_1_ENCRYPTED_SECRET_LENGTH,
+            MAX_SECRET_LENGTH,
+            MAX_REQUEST_BODY_BYTES,
+            secret_max_length
+        ));
     }
     if rate_limit_max_attempts == 0 {
         return Err("RATE_LIMIT_MAX_ATTEMPTS must be at least 1".to_string());
@@ -104,12 +146,123 @@ pub fn validate_config(
     Ok(())
 }
 
-/// Upper bound for the in-memory rate-limit map. Each entry costs roughly
-/// 150-180 bytes; the planned worst case is the 100,000 default (~20 MB).
-/// 10 million entries (~2 GB) is already absurd for this service — beyond
-/// that, the operator is better served by a startup error than by a silent
-/// memory-exhaustion kill.
-pub const MAX_RATE_LIMIT_IDENTIFIERS: usize = 10_000_000;
+/// Peak process bytes one rate-limit entry costs, excluding the part that
+/// scales with the secret_id budget.
+///
+/// Measured, not estimated: a release build filling the ledger and then
+/// building one `/attempts` snapshot costs 1121-1254 peak bytes per entry
+/// between 10,000 and 100,000 entries at `RATE_LIMIT_MAX_ATTEMPTS=3`
+/// (100,000 entries reached 117 MB peak RSS, with a 4.01 MB gzip body — the
+/// same gzip size the audit recorded in the README). The constant is rounded
+/// up so the model stays conservative.
+///
+/// It covers the map slot, the 64-byte `id_hash` allocation, the snapshot
+/// projection, the JSON serialization buffer and its growth, and the gzip
+/// encoder. See `docs/DEPLOYMENT.md` for the measurement procedure.
+pub const RATE_LIMIT_BYTES_PER_IDENTIFIER: usize = 1_100;
+
+/// Peak process bytes each retained SecretId adds to an entry.
+///
+/// A SecretId is a 64-character `String` in a per-entry `HashMap`, so an
+/// entry's cost grows with `RATE_LIMIT_MAX_ATTEMPTS`: measured at 147 bytes
+/// per secret_id between 10 and 255 secret_ids, rounded up here. Ignoring
+/// this term is what made the previous fixed ceiling meaningless — at the
+/// u8 maximum budget an entry costs about 38 kB, not a few hundred bytes.
+pub const RATE_LIMIT_BYTES_PER_SECRET_ID: usize = 150;
+
+/// Process memory the capacity model deliberately leaves unclaimed: the base
+/// process, SQLite connections and page cache, Tokio worker stacks, and the
+/// serving path. The budget an operator declares is the whole-process limit
+/// (their cgroup `MemoryMax`), so the identifier map may only use what
+/// remains after this reserve.
+pub const PROCESS_MEMORY_RESERVE_BYTES: usize = 64 * 1024 * 1024;
+
+/// Default whole-process memory budget, aligned with `MemoryMax=512M` in
+/// `deploy/systemd/recoverbull.service`.
+pub const DEFAULT_MEMORY_BUDGET_MB: usize = 512;
+
+/// cgroup v1 writes this sentinel instead of a word for "no limit"; v2 writes
+/// the literal `max`. Anything at or above it is not a real limit.
+const CGROUP_V1_UNLIMITED: usize = 0x7FFF_FFFF_FFFF_F000;
+
+/// Parses one cgroup memory-limit file, returning `None` when it declares no
+/// limit. `max` is the cgroup v2 spelling; v1 uses a sentinel close to
+/// `i64::MAX`. Unparsable content is treated as "no limit" so an unexpected
+/// kernel format degrades to the operator's declared budget rather than to a
+/// bogus ceiling.
+pub fn parse_memory_limit(raw: &str) -> Option<usize> {
+    let raw = raw.trim();
+    if raw.is_empty() || raw == "max" {
+        return None;
+    }
+    match raw.parse::<usize>() {
+        Ok(limit) if limit > 0 && limit < CGROUP_V1_UNLIMITED => Some(limit),
+        _ => None,
+    }
+}
+
+/// Returns the smallest memory limit the kernel will actually enforce on this
+/// process, or `None` when none is discoverable.
+///
+/// A limit set on any ancestor applies too, so the v2 hierarchy is walked from
+/// this process's own cgroup up to the root and the minimum is kept. Every
+/// read is best-effort: an unreadable or absent file simply contributes no
+/// constraint.
+pub fn detected_memory_limit_bytes() -> Option<usize> {
+    let own = std::fs::read_to_string("/proc/self/cgroup").ok()?;
+    let mut limit: Option<usize> = None;
+    let mut consider = |path: std::path::PathBuf| {
+        if let Some(found) = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|raw| parse_memory_limit(&raw))
+        {
+            limit = Some(limit.map_or(found, |current: usize| current.min(found)));
+        }
+    };
+
+    for line in own.lines() {
+        let mut fields = line.splitn(3, ':');
+        let (Some(_id), Some(controllers), Some(cgroup_path)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        let relative = cgroup_path.trim_start_matches('/');
+        if controllers.is_empty() {
+            // cgroup v2: one unified hierarchy, and an ancestor's limit binds.
+            let mut current = std::path::PathBuf::from("/sys/fs/cgroup");
+            consider(current.join("memory.max"));
+            for component in relative.split('/').filter(|part| !part.is_empty()) {
+                current.push(component);
+                consider(current.join("memory.max"));
+            }
+        } else if controllers.split(',').any(|name| name == "memory") {
+            // cgroup v1: the memory controller has its own mount point.
+            consider(
+                std::path::Path::new("/sys/fs/cgroup/memory")
+                    .join(relative)
+                    .join("memory.limit_in_bytes"),
+            );
+        }
+    }
+    limit
+}
+
+/// Combines the operator's declared budget with the enforced limit.
+///
+/// The smaller wins. Declaring 512 MiB while the cgroup enforces 256 MiB must
+/// not authorize a capacity sized for 512 MiB — that is exactly the
+/// memory-exhaustion kill the check exists to prevent, and a declared value
+/// cannot be trusted to stay synchronized with the unit file.
+pub fn effective_memory_budget_bytes(
+    declared_bytes: usize,
+    detected_bytes: Option<usize>,
+) -> usize {
+    match detected_bytes {
+        Some(detected) => declared_bytes.min(detected),
+        None => declared_bytes,
+    }
+}
 
 /// Upper bound for concurrent SQLite blocking operations. SQLite serializes
 /// writers anyway and tokio's blocking pool defaults to 512 threads, so
@@ -117,17 +270,54 @@ pub const MAX_RATE_LIMIT_IDENTIFIERS: usize = 10_000_000;
 /// misconfiguration.
 pub const MAX_DATABASE_CONCURRENCY: usize = 1024;
 
-/// Validates the resource-capacity configuration values. Zero disables the
-/// protection entirely; absurdly large values disable it silently. The
-/// server must refuse to start rather than run unbounded.
+/// Estimated peak bytes for a capacity and secret_id budget, or `None` when
+/// the product overflows `usize` (which is itself over any real budget).
+pub fn estimated_peak_memory_bytes(
+    rate_limit_max_identifiers: usize,
+    rate_limit_max_attempts: u8,
+) -> Option<usize> {
+    RATE_LIMIT_BYTES_PER_SECRET_ID
+        .checked_mul(usize::from(rate_limit_max_attempts))?
+        .checked_add(RATE_LIMIT_BYTES_PER_IDENTIFIER)?
+        .checked_mul(rate_limit_max_identifiers)
+}
+
+/// Largest capacity whose estimated peak fits the declared budget.
+pub fn max_identifiers_within_budget(
+    rate_limit_max_attempts: u8,
+    memory_budget_bytes: usize,
+) -> usize {
+    let per_entry = RATE_LIMIT_BYTES_PER_IDENTIFIER.saturating_add(
+        RATE_LIMIT_BYTES_PER_SECRET_ID.saturating_mul(usize::from(rate_limit_max_attempts)),
+    );
+    memory_budget_bytes
+        .saturating_sub(PROCESS_MEMORY_RESERVE_BYTES)
+        .checked_div(per_entry)
+        .unwrap_or(0)
+}
+
+/// Validates the resource-capacity configuration against an explicit memory
+/// budget.
+///
+/// Zero disables a protection entirely. An oversized capacity used to be
+/// rejected against a fixed 10,000,000-entry ceiling justified by a
+/// per-entry cost that was low by an order of magnitude, so the ceiling
+/// admitted configurations that produce exactly the silent
+/// memory-exhaustion kill it claimed to prevent — 10,000,000 entries cost
+/// about 15 GB at the documented secret_id budget, not the ~2 GB claimed,
+/// against a 512 MB `MemoryMax`. The bound is therefore derived from the
+/// operator's declared budget and the measured per-entry cost, and it
+/// accounts for `RATE_LIMIT_MAX_ATTEMPTS`, which the fixed ceiling ignored.
 pub fn validate_capacity(
     rate_limit_max_identifiers: usize,
     database_max_concurrency: usize,
+    rate_limit_max_attempts: u8,
+    memory_budget_bytes: usize,
 ) -> Result<(), String> {
-    if rate_limit_max_identifiers == 0 || rate_limit_max_identifiers > MAX_RATE_LIMIT_IDENTIFIERS {
+    if rate_limit_max_identifiers == 0 {
         return Err(format!(
-            "RATE_LIMIT_MAX_IDENTIFIERS must be between 1 and {}, got {}",
-            MAX_RATE_LIMIT_IDENTIFIERS, rate_limit_max_identifiers
+            "RATE_LIMIT_MAX_IDENTIFIERS must be at least 1, got {}",
+            rate_limit_max_identifiers
         ));
     }
     if database_max_concurrency == 0 || database_max_concurrency > MAX_DATABASE_CONCURRENCY {
@@ -136,6 +326,38 @@ pub fn validate_capacity(
             MAX_DATABASE_CONCURRENCY, database_max_concurrency
         ));
     }
+    let reserve_mb = PROCESS_MEMORY_RESERVE_BYTES / (1024 * 1024);
+    let available = memory_budget_bytes
+        .checked_sub(PROCESS_MEMORY_RESERVE_BYTES)
+        .filter(|available| *available > 0)
+        .ok_or_else(|| {
+            format!(
+                "RATE_LIMIT_MEMORY_BUDGET_MB must exceed the {} MiB process reserve, got {} MiB",
+                reserve_mb,
+                memory_budget_bytes / (1024 * 1024)
+            )
+        })?;
+    estimated_peak_memory_bytes(rate_limit_max_identifiers, rate_limit_max_attempts)
+        .filter(|required| *required <= available)
+        .ok_or_else(|| {
+            format!(
+                "RATE_LIMIT_MAX_IDENTIFIERS={} with RATE_LIMIT_MAX_ATTEMPTS={} needs about {} MiB \
+                 at snapshot peak, over the {} MiB available from an effective memory budget of \
+                 {} MiB (the lower of RATE_LIMIT_MEMORY_BUDGET_MB and the enforced cgroup limit) \
+                 after the {} MiB process reserve; lower the capacity to at most {}, lower the \
+                 secret_id budget, or raise both the cgroup limit and the declared budget",
+                rate_limit_max_identifiers,
+                rate_limit_max_attempts,
+                estimated_peak_memory_bytes(rate_limit_max_identifiers, rate_limit_max_attempts)
+                    .map_or("more than usize::MAX".to_string(), |bytes| (bytes
+                        / (1024 * 1024))
+                        .to_string()),
+                available / (1024 * 1024),
+                memory_budget_bytes / (1024 * 1024),
+                reserve_mb,
+                max_identifiers_within_budget(rate_limit_max_attempts, memory_budget_bytes),
+            )
+        })?;
     Ok(())
 }
 
@@ -143,27 +365,57 @@ pub fn validate_capacity(
 ///
 /// The burst must be finite and at least one token. It must also survive the
 /// first subtraction in f64 without rounding back to the original capacity.
-/// The refill rate must be finite and non-negative (zero disables refilling but
-/// is otherwise a valid, deliberately strict bucket).
+///
+/// The refill rate must be finite and **strictly positive**: every bucket
+/// refills. A zero rate used to be accepted as a "deliberately strict"
+/// bucket, but it is not a rate limit at all — it is a quota for the life of
+/// the process. Once the initial burst is spent, the bucket never produces
+/// another token, so on the lookup bucket every recovery receives `503`
+/// until an operator restarts the service, and no `Retry-After` value can
+/// describe a token that will never arrive. Making the service depend on a
+/// restart is not a limit an operator can reason about, so startup refuses
+/// it. Tests that need an exhaustible bucket construct one directly and
+/// bypass this validation.
 pub fn validate_token_bucket(name: &str, burst: f64, refill: f64) -> Result<(), String> {
     if !burst.is_finite() || burst < 1.0 || burst - 1.0 == burst {
         return Err(format!(
             "{name}_RATE_LIMIT_BURST must be finite, represent at least one token, and change after consuming one token, got {burst}"
         ));
     }
-    if !refill.is_finite() || refill < 0.0 {
+    if !refill.is_finite() || refill <= 0.0 {
         return Err(format!(
-            "{name}_RATE_LIMIT_REFILL_PER_SECOND must be finite and >= 0, got {refill}"
+            "{name}_RATE_LIMIT_REFILL_PER_SECOND must be finite and greater than 0 (a zero rate \
+             is a quota that only a restart resets, not a rate limit), got {refill}"
         ));
     }
     Ok(())
 }
 
-/// Validates the `/attempts` snapshot TTL: zero would force a fresh snapshot
-/// computation on every request, defeating the point of caching.
-pub fn validate_snapshot_ttl(seconds: u64) -> Result<(), String> {
+/// Validates the `/attempts` snapshot TTL against the cooldown it must be
+/// shorter than.
+///
+/// Zero would force a fresh snapshot computation on every request, defeating
+/// the point of caching. A TTL at or above the cooldown neutralizes the
+/// detection the snapshot exists for: the cache is only invalidated by the
+/// TTL or the daily wipe, so an attempt admitted just after a rebuild could
+/// expire from the ledger before the next rebuild and never appear in
+/// `/attempts` at all. `rate_limit_cooldown_minutes` is expected to have
+/// passed `validate_config` already.
+pub fn validate_snapshot_ttl(seconds: u64, rate_limit_cooldown_minutes: i64) -> Result<(), String> {
     if seconds == 0 {
         return Err("ATTEMPTS_SNAPSHOT_TTL_SECONDS must be greater than 0".to_string());
+    }
+    let cooldown_seconds = u64::try_from(rate_limit_cooldown_minutes)
+        .ok()
+        .and_then(|minutes| minutes.checked_mul(60))
+        .ok_or_else(|| "RATE_LIMIT_COOLDOWN must be a positive number of minutes".to_string())?;
+    if seconds >= cooldown_seconds {
+        return Err(format!(
+            "ATTEMPTS_SNAPSHOT_TTL_SECONDS must be shorter than RATE_LIMIT_COOLDOWN ({} minutes = \
+             {} seconds), got {}: an attempt could otherwise expire between two snapshot \
+             rebuilds and never be published",
+            rate_limit_cooldown_minutes, cooldown_seconds, seconds
+        ));
     }
     Ok(())
 }
@@ -349,7 +601,37 @@ pub fn init() -> ValidatedConfig {
 
     let rate_limit_max_identifiers = optional_env("RATE_LIMIT_MAX_IDENTIFIERS", 100_000usize);
     let database_max_concurrency = optional_env("DATABASE_MAX_CONCURRENCY", 16usize);
-    if let Err(e) = validate_capacity(rate_limit_max_identifiers, database_max_concurrency) {
+    // The capacity bound is derived from a declared whole-process budget, so
+    // an over-budget capacity fails at startup instead of being killed by the
+    // cgroup once the map fills and a snapshot is built.
+    let memory_budget_mb: usize =
+        optional_env("RATE_LIMIT_MEMORY_BUDGET_MB", DEFAULT_MEMORY_BUDGET_MB);
+    let declared_budget_bytes = memory_budget_mb.saturating_mul(1024 * 1024);
+    // The declared budget is a statement of intent; the cgroup limit is what
+    // the kernel will enforce. Trusting the declaration alone would leave the
+    // check useless for an operator who lowered MemoryMax without lowering
+    // the budget.
+    let detected_limit_bytes = detected_memory_limit_bytes();
+    let memory_budget_bytes =
+        effective_memory_budget_bytes(declared_budget_bytes, detected_limit_bytes);
+    #[cfg(not(test))]
+    if let Some(detected) = detected_limit_bytes {
+        if detected < declared_budget_bytes {
+            eprintln!(
+                "Warning: the enforced cgroup memory limit ({} MiB) is below \
+                 RATE_LIMIT_MEMORY_BUDGET_MB ({} MiB); sizing capacity against the \
+                 enforced limit",
+                detected / (1024 * 1024),
+                memory_budget_mb
+            );
+        }
+    }
+    if let Err(e) = validate_capacity(
+        rate_limit_max_identifiers,
+        database_max_concurrency,
+        rate_limit_max_attempts,
+        memory_budget_bytes,
+    ) {
         println!("Error: {}", e);
         std::process::exit(1);
     }
@@ -370,7 +652,7 @@ pub fn init() -> ValidatedConfig {
     }
 
     let attempts_snapshot_ttl_seconds = optional_env("ATTEMPTS_SNAPSHOT_TTL_SECONDS", 60u64);
-    if let Err(e) = validate_snapshot_ttl(attempts_snapshot_ttl_seconds) {
+    if let Err(e) = validate_snapshot_ttl(attempts_snapshot_ttl_seconds, rate_limit_cooldown) {
         println!("Error: {e}");
         std::process::exit(1);
     }

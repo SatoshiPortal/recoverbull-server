@@ -19,5 +19,5 @@ Before deleting a copy, verify that it is outside the recovery window and that
 the database/WAL pair or replica checkpoint is coherent. Treat a failed restore
 or purge verification as an operational alarm, not as permission to continue.
 
-Use the maintained [SQLite backup and restore procedure](../deploy/backup/README.md)
-for coherent backups, verification, rotation, and restore drills.
+Adapt the tested [SQLite backup and restore example](../deploy/backup/README.md)
+for coherent backups, rotation, application checks, and restore drills.

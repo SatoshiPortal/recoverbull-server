@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create and verify SQLite backups without copying WAL sidecar files."""
+"""Create and restore SQLite backups without copying WAL sidecar files."""
 
 import argparse
 import math
@@ -13,6 +13,23 @@ from urllib.parse import quote
 
 
 REQUIRED_TABLES = ("secret", "__diesel_schema_migrations")
+
+# The `secret` columns created by migrations/0001_schema/up.sql, as
+# PRAGMA table_info reports them: (name, type, notnull, dflt_value, pk).
+EXPECTED_SECRET_COLUMNS = (
+    ("id", "TEXT", 1, None, 1),
+    ("created_at", "TEXT", 1, None, 0),
+    ("encrypted_secret", "TEXT", 1, None, 0),
+)
+
+# Diesel creates and reads this ledger before it can run embedded migrations.
+# Checking only that a table with this name exists produces a false positive:
+# the backup can pass Python validation and still fail application startup.
+EXPECTED_MIGRATION_COLUMNS = (
+    ("version", "VARCHAR(50)", 1, None, 1),
+    ("run_on", "TIMESTAMP", 1, "CURRENT_TIMESTAMP", 0),
+)
+EXPECTED_MIGRATION_VERSIONS = ("0001",)
 
 
 def _readonly(path: Path) -> sqlite3.Connection:
@@ -56,6 +73,32 @@ def _integrity_and_schema(connection: sqlite3.Connection) -> None:
     missing = [name for name in REQUIRED_TABLES if name not in names]
     if missing:
         raise RuntimeError("backup is missing required schema tables")
+    # A table named `secret` is not enough: an intact SQLite file with the
+    # wrong columns is unusable by the server, and the server's own startup
+    # check would refuse it. Compare with the migration, column by column.
+    columns = tuple(
+        (row[1], row[2], row[3], row[4], row[5])
+        for row in connection.execute("PRAGMA table_info('secret')")
+    )
+    if columns != EXPECTED_SECRET_COLUMNS:
+        raise RuntimeError("backup secret table schema does not match migration 0001")
+
+    migration_columns = tuple(
+        (row[1], row[2], row[3], row[4], row[5])
+        for row in connection.execute(
+            "PRAGMA table_info('__diesel_schema_migrations')"
+        )
+    )
+    if migration_columns != EXPECTED_MIGRATION_COLUMNS:
+        raise RuntimeError("backup Diesel migration ledger has an incompatible schema")
+    migration_versions = tuple(
+        row[0]
+        for row in connection.execute(
+            "SELECT version FROM __diesel_schema_migrations ORDER BY version"
+        )
+    )
+    if migration_versions != EXPECTED_MIGRATION_VERSIONS:
+        raise RuntimeError("backup Diesel migration ledger has unexpected versions")
 
 
 def _sync_directory(directory: Path) -> None:
@@ -67,9 +110,9 @@ def _sync_directory(directory: Path) -> None:
 
 
 def _remove_temporary(path: Path) -> None:
-    for candidate in (path, *_sidecars(path)):
+    for file_to_remove in (path, *_sidecars(path)):
         try:
-            candidate.unlink()
+            file_to_remove.unlink()
         except FileNotFoundError:
             pass
 
@@ -134,7 +177,7 @@ def backup(source: Path, destination: Path, replace: bool = False, timeout: floa
             _remove_temporary(Path(temporary_name))
 
 
-def verify(path: Path) -> None:
+def _validate_backup(path: Path) -> None:
     path = path.resolve()
     if not path.is_file():
         raise RuntimeError("backup does not exist or is not a file")
@@ -151,7 +194,7 @@ def restore(backup_path: Path, destination: Path) -> None:
     _private_parent(destination)
     if not backup_path.is_file():
         raise RuntimeError("backup does not exist or is not a file")
-    verify(backup_path)
+    _validate_backup(backup_path)
     paths = (destination, *_sidecars(destination))
     if not all(_absent(path) for path in paths):
         raise FileExistsError("restore destination or SQLite sidecar already exists")
@@ -173,7 +216,7 @@ def restore(backup_path: Path, destination: Path) -> None:
         temporary.unlink()
         _sync_directory(destination.parent)
         try:
-            verify(destination)
+            _validate_backup(destination)
         except Exception:
             try:
                 destination.unlink()
@@ -201,9 +244,9 @@ def main(argv: list[str] | None = None) -> int:
     backup_parser.add_argument("destination", type=Path)
     backup_parser.add_argument("--replace", action="store_true")
     backup_parser.add_argument("--timeout", type=_positive_timeout, default=30.0)
-    verify_parser = subparsers.add_parser("verify", help="check a backup")
-    verify_parser.add_argument("backup", type=Path)
-    restore_parser = subparsers.add_parser("restore", help="install a verified backup atomically")
+    restore_parser = subparsers.add_parser(
+        "restore", help="validate and install a backup atomically"
+    )
     restore_parser.add_argument("backup", type=Path)
     restore_parser.add_argument("destination", type=Path)
     arguments = parser.parse_args(argv)
@@ -211,9 +254,6 @@ def main(argv: list[str] | None = None) -> int:
         if arguments.command == "backup":
             backup(arguments.source, arguments.destination, arguments.replace, arguments.timeout)
             print("backup: ok")
-        elif arguments.command == "verify":
-            verify(arguments.backup)
-            print("verify: ok")
         else:
             restore(arguments.backup, arguments.destination)
             print("restore: ok")

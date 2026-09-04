@@ -9,7 +9,7 @@ use crate::{
     },
     config::RecoveryConfig,
     observability::SecurityCounters,
-    rate_limit::TokenBucket,
+    rate_limit::{BucketDecision, TokenBucket},
     storage::sqlite::{NewStoredSecret, SqliteStorage, StorageError, StoredSecret},
 };
 use base64::Engine;
@@ -29,9 +29,9 @@ pub(crate) struct StoreCommand {
 
 /// Primitive lookup input crossing the HTTP/recovery boundary.
 pub(crate) struct LookupCommand {
-    /// HTTP identifier supplied for candidate derivation.
+    /// HTTP identifier supplied for secret_id derivation.
     pub(crate) identifier: String,
-    /// HTTP authentication key supplied for candidate derivation.
+    /// HTTP authentication key supplied for secret_id derivation.
     pub(crate) authentication_key: String,
 }
 
@@ -48,8 +48,9 @@ pub(crate) enum StoreResult {
     Stored,
     /// Input failed validation, with a client-safe explanation.
     Invalid(String),
-    /// The global store bucket had no token.
-    GlobalOverload,
+    /// The global store bucket had no token; the backoff is the bucket's
+    /// own estimate of its next token.
+    GlobalOverload { retry_after_secs: u64 },
     /// A database lease could not be acquired before its deadline.
     DatabaseBusy,
     /// The detached database operation failed.
@@ -60,11 +61,14 @@ pub(crate) enum StoreResult {
 pub(crate) enum LookupResult {
     /// Input failed canonical hash validation.
     Invalid,
-    /// The global lookup bucket had no token.
-    GlobalOverload,
+    /// The global lookup bucket had no token; the backoff is the bucket's
+    /// own estimate of its next token.
+    GlobalOverload {
+        retry_after_secs: u64,
+    },
     /// The identifier map reached its configured capacity.
     Capacity,
-    /// An identical candidate is currently being processed.
+    /// An identical secret_id is currently being processed.
     Pending,
     RateLimited {
         count: u8,
@@ -77,7 +81,7 @@ pub(crate) enum LookupResult {
     Completed {
         /// Secret when credentials matched; `None` is a uniform miss.
         secret: Option<StoredSecret>,
-        /// Attempt counters for the current candidate window.
+        /// Attempt counters for the current secret_id window.
         attempt_status: AttemptStatus,
         /// Time at which this lookup was admitted.
         requested_at: DateTime<Utc>,
@@ -149,9 +153,11 @@ impl RecoveryService {
             self.counters.store_rejected();
             return StoreResult::Invalid("encrypted_secret should be base64 encoded".to_owned());
         }
-        if !self.store_bucket.lock().await.try_consume() {
+        if let BucketDecision::Rejected { retry_after_secs } =
+            self.store_bucket.lock().await.try_consume()
+        {
             self.counters.store_rejected();
-            return StoreResult::GlobalOverload;
+            return StoreResult::GlobalOverload { retry_after_secs };
         }
         let secret = NewStoredSecret {
             id: generate_secret_id(&identifier, &authentication_key),
@@ -250,7 +256,7 @@ impl RecoveryService {
         self.max_secret_length
     }
 
-    /// Admits a fetch or trash candidate and returns a transport-neutral
+    /// Admits a fetch or trash secret_id and returns a transport-neutral
     /// outcome after bounded storage work and ledger finalization.
     pub(crate) async fn lookup(&self, request: LookupCommand, kind: LookupKind) -> LookupResult {
         let identifier = request.identifier.to_lowercase();
@@ -258,12 +264,14 @@ impl RecoveryService {
         if !is_256bits_hex_hash(&identifier) || !is_256bits_hex_hash(&authentication_key) {
             return LookupResult::Invalid;
         }
-        if !self.lookup_bucket.lock().await.try_consume() {
+        if let BucketDecision::Rejected { retry_after_secs } =
+            self.lookup_bucket.lock().await.try_consume()
+        {
             self.counters.lookup_rate_limited();
-            return LookupResult::GlobalOverload;
+            return LookupResult::GlobalOverload { retry_after_secs };
         }
         let id_hash = identifier_hash(&identifier).expect("validated hex identifier");
-        let candidate = generate_secret_id(&identifier, &authentication_key);
+        let secret_id = generate_secret_id(&identifier, &authentication_key);
         let requested_at = Utc::now();
         // Lookup proceeds through global throttling, ledger admission, a
         // bounded SQLite lease, then generation finalization and counters.
@@ -272,7 +280,7 @@ impl RecoveryService {
             .ledger
             .admit(
                 id_hash.clone(),
-                candidate.clone(),
+                secret_id.clone(),
                 requested_at,
                 self.attempts.policy.max_attempts(),
                 self.attempts.policy.max_identifiers(),
@@ -286,16 +294,16 @@ impl RecoveryService {
             }
             Admission::RateLimited {
                 count,
-                last_candidate_at,
+                last_secret_id_at,
             } => {
                 self.counters.lookup_target_lockout();
-                let retry_after_secs = (last_candidate_at + self.attempts.policy.cooldown()
+                let retry_after_secs = (last_secret_id_at + self.attempts.policy.cooldown()
                     - requested_at)
                     .num_seconds()
                     .max(1) as u64;
                 LookupResult::RateLimited {
                     count,
-                    requested_at: last_candidate_at,
+                    requested_at: last_secret_id_at,
                     retry_after_secs,
                     cooldown_minutes: self.attempts.policy.cooldown().num_minutes(),
                 }
@@ -304,12 +312,17 @@ impl RecoveryService {
                 self.counters.lookup_rate_limited();
                 LookupResult::Pending
             }
-            Admission::Replay {
-                status,
-                generation: _generation,
-            } => {
-                self.run_lookup(None, id_hash, candidate, requested_at, status, kind)
-                    .await
+            Admission::Replay { status, generation } => {
+                self.run_lookup(
+                    generation,
+                    None,
+                    id_hash,
+                    secret_id,
+                    requested_at,
+                    status,
+                    kind,
+                )
+                .await
             }
             Admission::New {
                 status,
@@ -317,9 +330,10 @@ impl RecoveryService {
                 reservation,
             } => {
                 self.run_lookup(
-                    Some((generation, reservation)),
+                    generation,
+                    Some(reservation),
                     id_hash,
-                    candidate,
+                    secret_id,
                     requested_at,
                     status,
                     kind,
@@ -329,19 +343,22 @@ impl RecoveryService {
         }
     }
 
+    /// Runs the storage operation for an admitted secret_id. `reservation` is
+    /// `Some` for a new secret_id and `None` for a committed replay; the
+    /// generation is carried in both cases so that a replayed `/trash` can
+    /// forget its `secret_id` without touching a replacement window.
+    #[allow(clippy::too_many_arguments)]
     async fn run_lookup(
         &self,
-        reservation: Option<(DateTime<Utc>, ReservationGuard)>,
+        generation: DateTime<Utc>,
+        mut reservation: Option<ReservationGuard>,
         id_hash: String,
-        candidate: String,
+        secret_id: String,
         requested_at: DateTime<Utc>,
         attempt_status: AttemptStatus,
         kind: LookupKind,
     ) -> LookupResult {
-        let (generation, mut reservation) = match reservation {
-            Some(value) => (Some(value.0), Some(value.1)),
-            None => (None, None),
-        };
+        let reserved = reservation.is_some();
         // A detached task receives both the opaque permit and reservation
         // finalization responsibility; only its JoinHandle is awaited here.
         let operation = match self.storage.acquire().await {
@@ -357,28 +374,41 @@ impl RecoveryService {
         let task_ledger = self.attempts.ledger.clone();
         let task_counters = self.counters.clone();
         let task_id_hash = id_hash.clone();
-        let task_candidate = candidate.clone();
-        let operation_candidate = task_candidate.clone();
+        let task_secret_id = secret_id.clone();
+        let operation_secret_id = task_secret_id.clone();
         // Once this task is spawned, it owns the lease, blocking operation and
         // generation finalization even if the HTTP handler is cancelled.
         let task = tokio::spawn(async move {
             let database_result = tokio::task::spawn_blocking(move || match kind {
-                LookupKind::Fetch => operation.fetch(operation_candidate.clone()),
-                LookupKind::Trash => operation.trash(operation_candidate.clone()),
+                LookupKind::Fetch => operation.fetch(operation_secret_id.clone()),
+                LookupKind::Trash => operation.trash(operation_secret_id.clone()),
             })
             .await;
             let final_result = match database_result {
                 Ok(result) => result,
                 Err(_) => Err(StorageError::Database),
             };
-            if let Some(generation) = generation {
-                let outcome = match &final_result {
-                    Ok(Some(_)) => LookupOutcome::Hit,
-                    Ok(None) => LookupOutcome::Miss,
-                    Err(_) => LookupOutcome::Error,
-                };
+            let outcome = match (&final_result, kind) {
+                (Ok(Some(_)), LookupKind::Trash) => LookupOutcome::Deleted,
+                (Ok(Some(_)), LookupKind::Fetch) => LookupOutcome::Hit,
+                (Ok(None), _) => LookupOutcome::Miss,
+                (Err(_), _) => LookupOutcome::Error,
+            };
+            if reserved {
                 task_ledger
-                    .finalize(&task_id_hash, &task_candidate, generation, outcome)
+                    .finalize(
+                        &task_id_hash,
+                        &task_secret_id,
+                        generation,
+                        outcome,
+                        requested_at,
+                    )
+                    .await;
+            } else if outcome == LookupOutcome::Deleted {
+                // A committed replay that deleted the row: the `secret_id` must not
+                // stay recognizable after the deletion it authenticated.
+                task_ledger
+                    .forget_committed(&task_id_hash, &task_secret_id, generation)
                     .await;
             }
             match &final_result {
@@ -408,10 +438,10 @@ impl RecoveryService {
         let result = match task.await {
             Ok(result) => result,
             Err(_) => {
-                if let Some(generation) = generation {
+                if reserved {
                     self.attempts
                         .ledger
-                        .refund(&id_hash, &candidate, generation)
+                        .refund(&id_hash, &secret_id, generation)
                         .await;
                 }
                 self.counters.database_error();

@@ -276,7 +276,7 @@ async fn test_cancelled_trash_after_sqlite_start_keeps_attempt_reserved() {
         encrypted_secret: BASE64_ENCRYPTED_SECRET.to_string(),
     };
     server.post("/store").json(&store).expect_success().await;
-    state.observability.counters.flush();
+    state.counters.flush();
 
     let mut lock_connection =
         crate::storage::sqlite::establish_connection(state.storage.database_url_for_test())
@@ -333,7 +333,7 @@ async fn test_cancelled_trash_after_sqlite_start_keeps_attempt_reserved() {
     let mut trash_miss = 0;
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         loop {
-            let counters = state.observability.counters.flush();
+            let counters = state.counters.flush();
             lookup_accepted += counters.lookup_accepted;
             trash_hit += counters.trash_hit;
             trash_miss += counters.trash_miss;
@@ -391,7 +391,7 @@ async fn test_cancelled_store_after_sqlite_start_counts_once() {
 
     let counted = tokio::time::timeout(Duration::from_secs(1), async {
         loop {
-            let snapshot = state.observability.counters.flush();
+            let snapshot = state.counters.flush();
             if snapshot.store_accepted == 1 {
                 break snapshot;
             }
@@ -401,7 +401,7 @@ async fn test_cancelled_store_after_sqlite_start_counts_once() {
     .await
     .expect("detached store operation did not report in time");
     assert_eq!(counted.store_accepted, 1);
-    assert_eq!(state.observability.counters.flush().store_accepted, 0);
+    assert_eq!(state.counters.flush().store_accepted, 0);
 }
 
 /// 20 concurrent requests on the same identifier, all cancelled while parked

@@ -1,6 +1,7 @@
 //! Saturating security counters and their fixed-shape reporting snapshot.
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Default)]
@@ -21,12 +22,13 @@ pub struct SecurityCounters {
     /// the unconditional five-minute window, so a broken telemetry subsystem
     /// is visible even when per-request diagnostics are starved or off.
     attempts_snapshot_failed: AtomicU64,
+    /// Requests the router cut at its timeout. Every `503` this server
+    /// returns is counted somewhere, because none of them is ever logged.
+    request_timeout: AtomicU64,
     database_busy: AtomicU64,
     database_error: AtomicU64,
     timing_floor_overrun: AtomicU64,
     canary_unavailable: AtomicU64,
-    diagnostic_logs_emitted: AtomicU64,
-    diagnostic_logs_suppressed: AtomicU64,
 }
 
 fn saturating_increment(counter: &AtomicU64) {
@@ -68,25 +70,16 @@ impl SecurityCounters {
         trash_miss,
         attempts_rate_limited,
         attempts_snapshot_failed,
+        request_timeout,
         database_busy,
         database_error,
         timing_floor_overrun,
         canary_unavailable,
-        diagnostic_logs_emitted,
-        diagnostic_logs_suppressed,
     );
 
     #[cfg(test)]
     pub(crate) fn set_database_error_for_test(&self, value: u64) {
         self.database_error.store(value, Ordering::Relaxed);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_diagnostic_logs_for_test(&self, emitted: u64, suppressed: u64) {
-        self.diagnostic_logs_emitted
-            .store(emitted, Ordering::Relaxed);
-        self.diagnostic_logs_suppressed
-            .store(suppressed, Ordering::Relaxed);
     }
 
     /// Resets one reporting window and returns its fixed-shape values.
@@ -104,12 +97,11 @@ impl SecurityCounters {
             trash_miss: self.trash_miss.swap(0, Ordering::Relaxed),
             attempts_rate_limited: self.attempts_rate_limited.swap(0, Ordering::Relaxed),
             attempts_snapshot_failed: self.attempts_snapshot_failed.swap(0, Ordering::Relaxed),
+            request_timeout: self.request_timeout.swap(0, Ordering::Relaxed),
             database_busy: self.database_busy.swap(0, Ordering::Relaxed),
             database_error: self.database_error.swap(0, Ordering::Relaxed),
             timing_floor_overrun: self.timing_floor_overrun.swap(0, Ordering::Relaxed),
             canary_unavailable: self.canary_unavailable.swap(0, Ordering::Relaxed),
-            diagnostic_logs_emitted: self.diagnostic_logs_emitted.swap(0, Ordering::Relaxed),
-            diagnostic_logs_suppressed: self.diagnostic_logs_suppressed.swap(0, Ordering::Relaxed),
         }
     }
 }
@@ -129,28 +121,30 @@ pub struct CounterSnapshot {
     pub trash_miss: u64,
     pub attempts_rate_limited: u64,
     pub attempts_snapshot_failed: u64,
+    pub request_timeout: u64,
     pub database_busy: u64,
     pub database_error: u64,
     pub timing_floor_overrun: u64,
     pub canary_unavailable: u64,
-    pub diagnostic_logs_emitted: u64,
-    pub diagnostic_logs_suppressed: u64,
 }
 
 /// Spawns a detached reporter that drains counters at each bounded interval.
-pub(crate) fn spawn_reporter(state: super::ObservabilityState, period: Duration) {
+pub(crate) fn spawn_reporter(counters: Arc<SecurityCounters>, period: Duration) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
         loop {
             interval.tick().await;
-            report_once(&state);
+            report_once(&counters);
         }
     });
 }
 
-/// Drains and emits one privacy-safe counter window.
-pub(crate) fn report_once(state: &super::ObservabilityState) {
-    let snapshot = state.counters.flush();
+/// Drains and emits one privacy-safe counter window. This line is emitted at
+/// `info` unconditionally and is the only aggregate view of activity, so a
+/// signal that must survive log-volume pressure belongs in a counter here
+/// rather than in a per-request line.
+pub(crate) fn report_once(counters: &SecurityCounters) {
+    let snapshot = counters.flush();
     tracing::info!(
         target: "security_counters",
         store_accepted = snapshot.store_accepted,
@@ -165,12 +159,11 @@ pub(crate) fn report_once(state: &super::ObservabilityState) {
         trash_miss = snapshot.trash_miss,
         attempts_rate_limited = snapshot.attempts_rate_limited,
         attempts_snapshot_failed = snapshot.attempts_snapshot_failed,
+        request_timeout = snapshot.request_timeout,
         database_busy = snapshot.database_busy,
         database_error = snapshot.database_error,
         timing_floor_overrun = snapshot.timing_floor_overrun,
         canary_unavailable = snapshot.canary_unavailable,
-        diagnostic_logs_emitted = snapshot.diagnostic_logs_emitted,
-        diagnostic_logs_suppressed = snapshot.diagnostic_logs_suppressed,
         "security counter window"
     );
 }

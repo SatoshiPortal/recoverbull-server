@@ -50,7 +50,8 @@ pub(crate) fn new_with_limits(
     response_delay: Duration,
     request_timeout: Duration,
 ) -> Router {
-    let security_counters = app_state.request_diagnostics_state().counters.clone();
+    let security_counters = app_state.counters();
+    let timeout_counters = app_state.counters();
 
     let sensitive_routes = Router::new()
         .route("/store", post(store::store_secret))
@@ -71,16 +72,15 @@ pub(crate) fn new_with_limits(
     sensitive_routes
         .merge(public_routes)
         // Layers are applied outside-in: diagnostics observes the final
-        // response (including a timeout's 503), the timeout bounds the
-        // request, and body limits precede JSON. The body limit is the bound
+        // response (including a timeout's 503) and tags it with a request
+        // ID, the timeout bounds the request, and body limits precede JSON.
+        // The body limit is the bound
         // `SECRET_MAX_LENGTH` is validated against at startup.
         .layer(DefaultBodyLimit::max(crate::config::MAX_REQUEST_BODY_BYTES))
         .layer(from_fn(move |request, next| {
-            request_timeout_middleware(request, next, request_timeout)
+            request_timeout_middleware(request, next, request_timeout, timeout_counters.clone())
         }))
-        .layer(from_fn(move |request, next| {
-            diagnostic_middleware(app_state.request_diagnostics_state(), request, next)
-        }))
+        .layer(from_fn(diagnostic_middleware))
 }
 
 /// Advisory backoff for an expired request: there is no deadline to derive,
@@ -99,38 +99,35 @@ const REQUEST_TIMEOUT_RETRY_AFTER_SECS: u64 = 1;
 /// it. Dropping the inner future cancels the handler, which refunds any
 /// reservation not yet transferred to detached storage work. Diagnostics
 /// wrap this layer and therefore record the final `503`.
-async fn request_timeout_middleware(request: Request, next: Next, timeout: Duration) -> Response {
+async fn request_timeout_middleware(
+    request: Request,
+    next: Next,
+    timeout: Duration,
+    counters: Arc<crate::observability::SecurityCounters>,
+) -> Response {
     match tokio::time::timeout(timeout, next.run(request)).await {
         Ok(response) => response,
-        Err(_elapsed) => crate::http::error::retry_after_response(
-            axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            REQUEST_TIMEOUT_RETRY_AFTER_SECS,
-            "Request timed out, retry later",
-        ),
+        Err(_elapsed) => {
+            // A `503` is never logged per request, so it must be counted.
+            counters.request_timeout();
+            crate::http::error::retry_after_response(
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                REQUEST_TIMEOUT_RETRY_AFTER_SECS,
+                "Request timed out, retry later",
+            )
+        }
     }
 }
 
-/// Adapts Axum requests and responses to the transport-neutral diagnostics API.
-async fn diagnostic_middleware(
-    state: crate::observability::ObservabilityState,
-    mut request: Request,
-    next: Next,
-) -> Response {
+/// Tags every response with a server-generated request ID and logs the one
+/// diagnostic this server keeps: a server error.
+async fn diagnostic_middleware(mut request: Request, next: Next) -> Response {
     // A client-supplied value must not reach handlers or influence diagnostics.
     request.headers_mut().remove("x-request-id");
     let request_id = crate::observability::diagnostic::request_id();
     let route = crate::observability::diagnostic::route_kind(request.uri().path());
-    let method = crate::observability::diagnostic::method_kind(request.method().as_str());
-    let started = Instant::now();
     let mut response = next.run(request).await;
-    crate::observability::diagnostic::record(
-        &state,
-        &request_id,
-        route,
-        method,
-        response.status().as_u16(),
-        started.elapsed(),
-    );
+    crate::observability::diagnostic::record(&request_id, route, response.status().as_u16());
     if let Ok(value) = axum::http::HeaderValue::from_str(&request_id) {
         response.headers_mut().insert("x-request-id", value);
     }

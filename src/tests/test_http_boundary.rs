@@ -311,8 +311,10 @@ async fn test_request_timeout_is_a_503_with_retry_after_and_error_body() {
         response.maybe_header("x-request-id").is_some(),
         "diagnostics must still tag the response"
     );
+    // A `503` is pressure: counted in the five-minute window, never logged.
     assert!(
-        logs.contains("status=503") && logs.contains("category=\"overload\""),
-        "diagnostics must record the final 503 as overload: {logs}"
+        logs.is_empty(),
+        "a timeout is pressure and must not be logged: {logs}"
     );
+    assert_eq!(app_state.counters.flush().request_timeout, 1);
 }

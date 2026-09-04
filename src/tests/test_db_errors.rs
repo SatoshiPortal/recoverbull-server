@@ -97,7 +97,7 @@ async fn test_handlers_return_generic_500_when_connection_setup_fails() {
         .await;
     assert_eq!(fetch.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
     assert!(state.attempts.ledger.lock_for_test().await.is_empty());
-    assert_eq!(state.observability.counters.flush().database_error, 2);
+    assert_eq!(state.counters.flush().database_error, 2);
 }
 
 /// A database failure must not be confused with wrong credentials:

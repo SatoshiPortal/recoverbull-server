@@ -611,7 +611,7 @@ async fn test_attempts_recovers_after_a_snapshot_build_dies() {
     // The failure is counted in the unconditional five-minute window: a
     // client reads `/attempts` to confirm that nothing is wrong, so a broken
     // build must not be as quiet as a quiet channel.
-    let counters = state.observability.counters.flush();
+    let counters = state.counters.flush();
     assert_eq!(counters.attempts_snapshot_failed, 1);
 
     state
@@ -637,11 +637,7 @@ async fn test_attempts_recovers_after_a_snapshot_build_dies() {
         "the recovery must be a genuinely new build, not a cached result"
     );
     assert_eq!(
-        state
-            .observability
-            .counters
-            .flush()
-            .attempts_snapshot_failed,
+        state.counters.flush().attempts_snapshot_failed,
         0,
         "a successful rebuild is not a failure"
     );

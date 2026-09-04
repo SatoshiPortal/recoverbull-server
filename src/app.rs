@@ -7,7 +7,7 @@
 use crate::{
     attempts::{AttemptsPolicy, AttemptsState},
     config::ValidatedConfig,
-    observability::ObservabilityState,
+    observability::SecurityCounters,
     recovery::service::RecoveryService,
     storage::sqlite::SqliteStorage,
 };
@@ -25,7 +25,7 @@ pub(crate) struct InfoState {
     canary_read_semaphore: Arc<Semaphore>,
     secret_max_length: usize,
     policy: AttemptsPolicy,
-    counters: Arc<crate::observability::SecurityCounters>,
+    counters: Arc<SecurityCounters>,
 }
 
 #[derive(Clone)]
@@ -51,7 +51,7 @@ pub(crate) struct AppComponents {
     pub(crate) recovery: RecoveryService,
     pub(crate) attempts: AttemptsState,
     pub(crate) info: InfoState,
-    pub(crate) observability: ObservabilityState,
+    pub(crate) counters: Arc<SecurityCounters>,
 }
 
 #[cfg(not(test))]
@@ -62,7 +62,7 @@ struct AppComponents {
     recovery: RecoveryService,
     attempts: AttemptsState,
     info: InfoState,
-    observability: ObservabilityState,
+    counters: Arc<SecurityCounters>,
 }
 
 #[cfg(test)]
@@ -88,18 +88,18 @@ pub(crate) fn build(config: ValidatedConfig) -> AppState {
     // handlers, detached recovery work, and background tasks observe one state.
     let storage = SqliteStorage::from_config(config.storage);
     let attempts = AttemptsState::new(config.attempts);
-    let observability = ObservabilityState::new();
+    let counters = Arc::new(SecurityCounters::default());
     let info = InfoState::new(
         &config.info,
         config.recovery.secret_max_length,
         attempts.policy(),
-        observability.counters.clone(),
+        counters.clone(),
     );
     let recovery = RecoveryService::new(
         config.recovery,
         attempts.clone(),
         storage.clone(),
-        observability.counters.clone(),
+        counters.clone(),
     );
     AppState {
         components: AppComponents {
@@ -110,7 +110,7 @@ pub(crate) fn build(config: ValidatedConfig) -> AppState {
             recovery,
             attempts,
             info,
-            observability,
+            counters,
         },
     }
 }
@@ -129,17 +129,14 @@ impl AppState {
         self.components.storage.initialize()
     }
 
-    /// Clones the privacy-safe state consumed by the HTTP diagnostics adapter.
-    pub(crate) fn request_diagnostics_state(&self) -> ObservabilityState {
-        self.components.observability.clone()
+    /// Clones the aggregate counter owner for the HTTP layer.
+    pub(crate) fn counters(&self) -> Arc<SecurityCounters> {
+        self.components.counters.clone()
     }
 
     /// Starts the fixed-window aggregate security counter reporter.
     pub(crate) fn spawn_security_reporter(&self, period: std::time::Duration) {
-        crate::observability::counters::spawn_reporter(
-            self.components.observability.clone(),
-            period,
-        );
+        crate::observability::counters::spawn_reporter(self.components.counters.clone(), period);
     }
 
     /// Starts expiry maintenance without exposing the ledger to the process
@@ -180,10 +177,7 @@ impl AppState {
             .try_consume_request()
             .await;
         if matches!(decision, crate::rate_limit::BucketDecision::Rejected { .. }) {
-            self.components
-                .observability
-                .counters
-                .attempts_rate_limited();
+            self.components.counters.attempts_rate_limited();
         }
         decision
     }
@@ -206,10 +200,7 @@ impl AppState {
             )
             .await;
         if result.is_err() {
-            self.components
-                .observability
-                .counters
-                .attempts_snapshot_failed();
+            self.components.counters.attempts_snapshot_failed();
         }
         result
     }
@@ -244,7 +235,7 @@ impl InfoState {
         config: &crate::config::InfoConfig,
         secret_max_length: usize,
         policy: AttemptsPolicy,
-        counters: Arc<crate::observability::SecurityCounters>,
+        counters: Arc<SecurityCounters>,
     ) -> Self {
         Self {
             canary: config.canary.clone(),

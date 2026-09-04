@@ -47,6 +47,31 @@ dominated by the candidate budget, so re-measure RSS after changing
 grep VmHWM /proc/$(systemctl show -p MainPID --value recoverbull)/status
 ```
 
+## Log volume and retention
+
+The service writes little: one `WARN` line per server error, one aggregate
+counter line every five minutes at `info`, and a few lifecycle lines. A `503`
+is never logged per request, so an exhausted token bucket cannot fill the
+disk. There is no in-process log quota; volume control belongs here.
+
+`systemd-journald` rate-limits per service, 10,000 messages per 30 seconds by
+default, and records a "suppressed N messages" line when it does. Set an
+explicit policy in a drop-in if the default is not wanted:
+
+```ini
+# /etc/systemd/system/recoverbull.service.d/logging.conf
+[Service]
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=200
+```
+
+Never run a live service with `RUST_LOG=trace`: Axum traces extractor
+rejections at that level with a message derived from the request body. The
+reference `RUST_LOG` is `info`. Reverse-proxy and Tor logs are not covered by
+the application's log guarantees; `deploy/logrotate/recoverbull` is the
+reference rotation policy for the proxy error log, and
+[docs/RETENTION.md](RETENTION.md) governs retention.
+
 ## Reproducible installation
 
 The commands below use sample paths and never contain a secret. Run privileged

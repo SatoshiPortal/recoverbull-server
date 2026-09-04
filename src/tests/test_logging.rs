@@ -85,130 +85,148 @@ fn assert_no_sensitive_values(logs: &str, canary: &str) {
     }
 }
 
+/// Request IDs are fixed width, unique, and — the part that matters — not
+/// the request counter. A bare counter would let any client subtract two IDs
+/// and read how many requests the server handled in between, an activity
+/// oracle no endpoint publishes.
 #[test]
-fn test_request_ids_are_fixed_width_and_non_repeating() {
-    let ids: std::collections::HashSet<_> = (0..1_000)
+fn test_request_ids_are_opaque_fixed_width_and_non_repeating() {
+    let ids: Vec<_> = (0..1_000)
         .map(|_| crate::observability::diagnostic::request_id())
         .collect();
-    assert_eq!(ids.len(), 1_000);
+    let unique: std::collections::HashSet<_> = ids.iter().collect();
+    assert_eq!(unique.len(), 1_000);
     assert!(ids
         .iter()
-        .all(|id| id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit())));
+        .all(|id| id.len() == 16 && id.bytes().all(|b| b.is_ascii_hexdigit())));
+
+    let values: Vec<u64> = ids
+        .iter()
+        .map(|id| u64::from_str_radix(id, 16).unwrap())
+        .collect();
+    let consecutive = values
+        .windows(2)
+        .filter(|pair| pair[1] == pair[0] + 1)
+        .count();
+    assert!(
+        consecutive < 10,
+        "request IDs must not expose the request counter, {consecutive} consecutive pairs"
+    );
 }
 
+/// Paths are never logged as text: an unknown target collapses to the static
+/// `other` enum, so a client cannot place its own bytes in a log line.
 #[test]
-fn test_duration_bucket_boundaries_are_deterministic() {
-    use std::time::Duration;
-    assert_eq!(
-        crate::observability::diagnostic::duration_bucket(Duration::from_millis(499)),
-        "lt500ms"
-    );
-    assert_eq!(
-        crate::observability::diagnostic::duration_bucket(Duration::from_millis(500)),
-        "500ms_1s"
-    );
-    assert_eq!(
-        crate::observability::diagnostic::duration_bucket(Duration::from_secs(1)),
-        "1s_5s"
-    );
-    assert_eq!(
-        crate::observability::diagnostic::duration_bucket(Duration::from_secs(5)),
-        "gte5s"
-    );
+fn test_unknown_routes_collapse_to_a_static_enum() {
+    use crate::observability::diagnostic::route_kind;
+    assert_eq!(route_kind("/user-controlled/path"), "other");
+    assert_eq!(route_kind("/fetch"), "fetch");
+    assert_eq!(route_kind("/attempts"), "attempts");
 }
 
-#[test]
-fn test_status_categories_are_deterministic() {
-    assert_eq!(
-        crate::observability::diagnostic::status_category(503),
-        "overload"
-    );
-    assert_eq!(
-        crate::observability::diagnostic::status_category(500),
-        "server_error"
-    );
-    assert_eq!(
-        crate::observability::diagnostic::status_category(429),
-        "overload"
-    );
-    assert_eq!(
-        crate::observability::diagnostic::status_category(400),
-        "client_error"
-    );
-    assert_eq!(
-        crate::observability::diagnostic::status_category(200),
-        "success"
-    );
-    assert_eq!(
-        crate::observability::diagnostic::status_category(201),
-        "success"
-    );
-}
-
-/// Only a genuine `5xx` may spend the WARN-level server-error budget.
+/// **A server error leaves one line; a `503` leaves none because it is
+/// pressure.** Those two sentences are the whole logging policy, and this
+/// test is their oracle: every status this service can return to a client,
+/// `503` included, is driven through the router and must produce no line.
 ///
-/// The category and the quota class come from one table, so they cannot drift
-/// apart. This pins both directions of the trap: a benign status must never
-/// reach the WARN budget (that was the `304` defect), and an overload status
-/// must not either even though `503 >= 500` — `503` is the most frequent
-/// failure under load, so promoting it would starve the budget just as
-/// effectively.
-#[test]
-fn test_only_genuine_server_errors_spend_the_warn_budget() {
-    use crate::observability::diagnostic::spends_server_error_budget as warns;
-
-    // every status this service can actually return
-    for status in [
-        200u16, 201, 202, 304, 400, 401, 404, 405, 408, 413, 415, 422, 429, 503,
-    ] {
-        assert!(
-            !warns(status),
-            "{status} must not spend the server-error budget"
-        );
-    }
-    assert!(warns(500), "a genuine 500 must reach the WARN budget");
-    assert!(warns(502));
-
-    // the category and the class never disagree
-    for status in [
-        200u16, 201, 202, 304, 400, 401, 404, 405, 408, 413, 415, 422, 429, 500, 503,
-    ] {
-        let category = crate::observability::diagnostic::status_category(status);
-        assert_eq!(
-            warns(status),
-            category == "server_error",
-            "category and quota class disagree for {status}"
-        );
-    }
-}
-
-/// A conditional `GET /attempts` that returns `304` is the success path the
-/// README tells clients to use. It must not be categorized as a server error.
-///
-/// `304` used to fall through to the unexpected-status fallback, so every
-/// conditional poll was classified `server_error` and routed to the WARN
-/// quota class. WARN is enabled by the default `RUST_LOG=info` filter, so
-/// benign polling both raised false server-error alarms in production logs
-/// and spent the 10-token server-error budget that a genuine `500` needs.
+/// It replaces a two-class quota system whose status-to-category table
+/// misfiled `304` into the WARN class, so ordinary conditional polling raised
+/// false server-error alarms and starved the budget a genuine `500` needed.
+/// With one rule there is no table to misfile and no budget to starve.
 #[tokio::test]
-async fn test_not_modified_is_not_a_server_error() {
-    assert_eq!(
-        crate::observability::diagnostic::status_category(304),
-        "success",
-        "304 is a successful conditional response, not a server error"
-    );
-
+async fn test_only_a_genuine_server_error_is_logged() {
     let (server, state) = crate::tests::test_server::new_test_server().await;
-    // Dedicated telemetry bucket: the default burst is 20, so the polling
-    // below would otherwise turn into 503s for a reason unrelated to what
-    // this test guards (see SECURITY.md "Test-writing traps").
+    let request = FetchSecret {
+        identifier: SHA256_111111.to_owned(),
+        authentication_key: SHA256_222222.to_owned(),
+    };
+
+    let (statuses, logs) = capture(async {
+        let mut statuses = Vec::new();
+        // 200 and a conditional 304 on the documented polling path
+        statuses.push(server.get("/info").await.status_code());
+        let primed = server.get("/attempts").await;
+        let etag = primed.header("etag").to_str().unwrap().to_string();
+        statuses.push(primed.status_code());
+        statuses.push(
+            server
+                .get("/attempts")
+                .add_header("If-None-Match", etag)
+                .await
+                .status_code(),
+        );
+        // 400 invalid body, 401 wrong credentials, 404 unknown route,
+        // 405 wrong method, 413 oversized body
+        statuses.push(
+            server
+                .post("/fetch")
+                .json(&serde_json::json!({ "identifier": "short" }))
+                .await
+                .status_code(),
+        );
+        statuses.push(server.post("/fetch").json(&request).await.status_code());
+        statuses.push(server.get("/unknown").await.status_code());
+        statuses.push(server.get("/fetch").await.status_code());
+        statuses.push(
+            server
+                .post("/fetch")
+                .json(&serde_json::json!({
+                    "identifier": SHA256_111111,
+                    "authentication_key": SHA256_222222,
+                    "pad": "x".repeat(2048),
+                }))
+                .await
+                .status_code(),
+        );
+        // 503 from an exhausted global bucket: the one 5xx a client can
+        // trigger at will, and the reason the rule has an exception
+        state
+            .recovery
+            .set_lookup_bucket_for_test(crate::rate_limit::TokenBucket::new(1.0, 0.0))
+            .await;
+        server.post("/fetch").json(&request).await;
+        statuses.push(server.post("/fetch").json(&request).await.status_code());
+        statuses
+    })
+    .await;
+
+    assert!(
+        statuses
+            .iter()
+            .all(|status| status.as_u16() < 500 || status.as_u16() == 503),
+        "fixture must only produce responses below 500 plus the 503: {statuses:?}"
+    );
+    // The capture subscriber enables every level, so axum's own extractor
+    // rejections appear here at TRACE (invisible under the default `info`
+    // filter). What must never appear is a line from this server's
+    // diagnostics, which is the only thing WARN-visible by default.
+    assert!(
+        !logs.contains("request failed") && !logs.contains("WARN"),
+        "only a genuine server error may be logged: {logs}"
+    );
+    assert_no_sensitive_values(&logs, state.info.canary_for_test());
+}
+
+/// The `304` of a conditional `GET /attempts` is the caching path the README
+/// tells clients to use, and a client may poll it continuously. Pinned on its
+/// own because misfiling exactly this status is what broke the previous
+/// design.
+#[tokio::test]
+async fn test_conditional_polling_is_never_logged() {
+    let (server, state) = crate::tests::test_server::new_test_server().await;
     state
         .attempts
         .maintenance
         .set_bucket_for_test(crate::rate_limit::TokenBucket::new(10_000.0, 10_000.0))
         .await;
-    let first = server.get("/attempts").expect_success().await;
-    let etag = first.header("etag").to_str().unwrap().to_string();
+    let etag = server
+        .get("/attempts")
+        .expect_success()
+        .await
+        .header("etag")
+        .to_str()
+        .unwrap()
+        .to_string();
 
     let (statuses, logs) = capture(async {
         let mut statuses = Vec::new();
@@ -231,20 +249,9 @@ async fn test_not_modified_is_not_a_server_error() {
             .all(|status| *status == StatusCode::NOT_MODIFIED),
         "every conditional poll must be a 304, got {statuses:?}"
     );
-    // The capture subscriber enables every level, so the detail events are
-    // visible here; what must never appear is a WARN-level event, because
-    // that is the class the default production filter lets through.
     assert!(
-        !logs.contains("WARN"),
-        "conditional polling must not produce WARN-level diagnostics: {logs}"
-    );
-    assert!(
-        !logs.contains("category=\"server_error\""),
-        "a 304 must not be reported as a server error: {logs}"
-    );
-    assert!(
-        logs.contains("status=304") && logs.contains("category=\"success\""),
-        "the 304 must still be observable as a success at detail level: {logs}"
+        logs.is_empty(),
+        "conditional polling must produce no log line at all: {logs}"
     );
 }
 
@@ -257,7 +264,7 @@ async fn test_request_id_header_ignores_client_value() {
         .await;
     let request_id = response.header("x-request-id");
     let id = request_id.to_str().unwrap();
-    assert_eq!(id.len(), 64);
+    assert_eq!(id.len(), 16);
     assert_ne!(id, "client-value");
 }
 
@@ -272,53 +279,30 @@ async fn test_request_id_header_covers_public_sensitive_and_other_routes() {
     ] {
         let request_id = response.header("x-request-id");
         let id = request_id.to_str().unwrap();
-        assert_eq!(id.len(), 64);
+        assert_eq!(id.len(), 16);
     }
 }
 
+/// A request to an attacker-chosen path with an attacker-chosen request ID
+/// leaves nothing behind: it is a `404`, so it produces no line, and the
+/// client's `x-request-id` is dropped before routing rather than echoed.
 #[tokio::test]
-async fn test_other_route_logs_do_not_contain_user_path_or_header() {
-    let (server, state) = crate::tests::test_server::new_test_server().await;
-    let (_, logs) = capture(async {
+async fn test_user_controlled_path_and_header_never_reach_the_logs() {
+    let (server, _) = crate::tests::test_server::new_test_server().await;
+    let (response, logs) = capture(async {
         server
             .get("/user-controlled/path?secret=fixture-secret")
             .add_header("x-request-id", "client-controlled-id")
             .await
     })
     .await;
-    assert!(
-        logs.contains("route=\"other\""),
-        "missing static other route: {logs}"
+    assert_eq!(response.status_code(), StatusCode::NOT_FOUND);
+    assert!(logs.is_empty(), "a 404 must produce no log line: {logs}");
+    assert_ne!(
+        response.header("x-request-id").to_str().unwrap(),
+        "client-controlled-id",
+        "the client value must never be reused"
     );
-    assert!(!logs.contains("user-controlled"));
-    assert!(!logs.contains("fixture-secret"));
-    assert!(!logs.contains("client-controlled-id"));
-    assert!(state.observability.counters.flush().diagnostic_logs_emitted > 0);
-}
-
-#[tokio::test]
-async fn test_debug_request_logging_is_quota_bounded() {
-    let (server, state) = crate::tests::test_server::new_test_server().await;
-    let (_, logs) = capture(async {
-        for _ in 0..1_000 {
-            let _ = server.get("/unknown").await;
-        }
-    })
-    .await;
-    let detailed = logs
-        .lines()
-        .filter(|line| line.contains("request completed"))
-        .count();
-    assert!(
-        detailed <= 10,
-        "request diagnostics escaped quota: {detailed}"
-    );
-    let counters = state.observability.counters.flush();
-    assert_eq!(
-        counters.diagnostic_logs_emitted + counters.diagnostic_logs_suppressed,
-        1_000
-    );
-    assert!(counters.diagnostic_logs_suppressed >= 990);
 }
 
 #[tokio::test]
@@ -433,6 +417,25 @@ async fn test_database_error_logs_are_diagnostic_without_sensitive_details() {
 
     let (response, logs) = capture(async { server.post("/fetch").json(&request).await }).await;
     assert_eq!(response.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
+    // exactly one line, at WARN so the default `info` filter lets it through,
+    // carrying only the request ID, the static route and the status
+    assert_eq!(
+        logs.lines().count(),
+        1,
+        "one server error, one line: {logs}"
+    );
+    assert!(
+        logs.contains("WARN"),
+        "a 500 must be visible by default: {logs}"
+    );
+    assert!(
+        logs.contains("route=\"fetch\"") && logs.contains("status=500"),
+        "{logs}"
+    );
+    assert!(
+        logs.contains(response.header("x-request-id").to_str().unwrap()),
+        "the line must be correlatable with the response: {logs}"
+    );
     assert_no_sensitive_values(&logs, state.info.canary_for_test());
     assert!(
         !logs.contains(&state.storage.database_url_for_test()),
@@ -442,12 +445,12 @@ async fn test_database_error_logs_are_diagnostic_without_sensitive_details() {
     assert!(!logs.contains(SHA256_CONCAT_111111_222222));
 }
 
-/// The external PoC sends 10,000 requests; 1,000 is sufficient here to prove
-/// the event-volume contract while keeping this Rust test fast. Counter
-/// saturation overflow is intentionally deferred until an aggregate counter
-/// implementation exists.
+/// Overload is counted, not logged. A thousand rejections produce no line at
+/// all, so an attacker cannot use them to fill the disk or to push a genuine
+/// server error out of a bounded log; the volume is visible in the
+/// unconditional five-minute counter window instead.
 #[tokio::test]
-async fn test_global_lookup_rejection_logging_is_bounded() {
+async fn test_global_lookup_rejections_are_counted_not_logged() {
     let (server, state) = crate::tests::test_server::new_test_server().await;
     state
         .recovery
@@ -471,18 +474,11 @@ async fn test_global_lookup_rejection_logging_is_bounded() {
     assert!(statuses[1..]
         .iter()
         .all(|status| *status == StatusCode::SERVICE_UNAVAILABLE));
-    let warning_lines = logs
-        .lines()
-        .filter(|line| line.contains("global lookup rate-limit exceeded"))
-        .count();
     assert!(
-        warning_lines <= 2,
-        "expected O(1) rejection warnings, observed {warning_lines}: {logs}"
+        logs.is_empty(),
+        "1,000 overload rejections must produce no log line: {logs}"
     );
-    assert_eq!(
-        state.observability.counters.flush().lookup_rate_limited,
-        999
-    );
+    assert_eq!(state.counters.flush().lookup_rate_limited, 999);
 }
 
 #[test]
@@ -495,29 +491,14 @@ fn test_security_counter_saturates_and_flush_resets() {
     assert_eq!(counters.flush().database_error, 0);
 }
 
-#[test]
-fn test_diagnostic_counters_saturate_and_flush() {
-    let counters = crate::observability::counters::SecurityCounters::default();
-    counters.set_diagnostic_logs_for_test(u64::MAX - 1, u64::MAX - 1);
-    counters.diagnostic_logs_emitted();
-    counters.diagnostic_logs_emitted();
-    counters.diagnostic_logs_suppressed();
-    counters.diagnostic_logs_suppressed();
-    let snapshot = counters.flush();
-    assert_eq!(snapshot.diagnostic_logs_emitted, u64::MAX);
-    assert_eq!(snapshot.diagnostic_logs_suppressed, u64::MAX);
-    assert_eq!(counters.flush().diagnostic_logs_emitted, 0);
-    assert_eq!(counters.flush().diagnostic_logs_suppressed, 0);
-}
-
 #[tokio::test]
 async fn test_counter_report_is_one_line_and_resets_window() {
     let (_, state) = crate::tests::test_server::new_test_server().await;
-    state.observability.counters.store_rejected();
+    state.counters.store_rejected();
     let (_, logs) = capture(async {
-        crate::observability::counters::report_once(&state.observability);
+        crate::observability::counters::report_once(&state.counters);
     })
     .await;
     assert_eq!(logs.lines().count(), 1, "unexpected counter report: {logs}");
-    assert_eq!(state.observability.counters.flush().store_rejected, 0);
+    assert_eq!(state.counters.flush().store_rejected, 0);
 }

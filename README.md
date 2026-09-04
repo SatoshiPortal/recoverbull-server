@@ -25,22 +25,23 @@ The SQLite backup and restore procedure is in [deploy/backup/README.md](deploy/b
 
 Every response includes a server-generated `X-Request-ID`. Client-provided
 `x-request-id` headers are removed before routing and are never reused. The
-security counter reporter emits one aggregate summary every five minutes at
-`info`, including the saturating `diagnostic_logs_emitted` and
-`diagnostic_logs_suppressed` counters.
+value is opaque and deliberately not the request counter, which would let any
+client subtract two IDs and read the server's request volume.
 
-Detailed request events are disabled at the normal `info` level. For temporary
-diagnosis, enable `RUST_LOG=info,request_diagnostics=debug`; debug logging must not
-be left enabled during normal operation. It is globally quota-limited per
-class to a burst of 10 events with a refill rate of 1 event per second. The
-only request-event fields are the generated `request_id`, static route enum
-(`store`, `fetch`, `trash`, `info`, `attempts`, `other`), static method enum,
-numeric HTTP `status`, static category enum, and static duration bucket enum.
-Categories are `success`, `client_error`, `overload`, or `server_error`; duration
-buckets are `lt500ms`, `500ms_1s`, `1s_5s`, or `gte5s`.
-Raw URIs, query strings, headers, bodies, remote addresses, database paths,
-identifiers, hashes, tags, keys, ciphertexts, canary values, and raw errors
-are never logged.
+Request logging is one rule: **a server error produces one `WARN` line, and
+nothing else produces any**. That line carries only the request ID, the static
+route enum (`store`, `fetch`, `trash`, `info`, `attempts`, `other`) and the
+numeric status; an unknown path collapses to `other`, so a request target
+never reaches a log as text. A `503` is pressure, not a fault: it is the one
+`5xx` a client can trigger at will, so it is counted rather than logged.
+
+Everything else is aggregate. The security counter reporter emits one summary
+line every five minutes at `info`, including `request_timeout`,
+`lookup_rate_limited`, `attempts_rate_limited`, `database_busy`,
+`database_error` and `attempts_snapshot_failed`. That line is unconditional
+and cannot be crowded out, so a signal that must survive load belongs there.
+Log volume control belongs to the log daemon (see
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)).
 
 ### Store
 

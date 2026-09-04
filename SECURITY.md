@@ -194,11 +194,12 @@ Operators are responsible for retention of those copies.
    another device, and attacker probes produce the same entry shape. This
    relies on clients generating identifiers with 256 bits of entropy — a
    low-entropy identifier would make its hash brute-forceable.
-   Proactive polling is not a Profile 1 recovery prerequisite, but it is part
-   of the intended Bull Mobile detection rollout. Bull Mobile does not
-   currently perform it, so deploying the server before the corresponding
-   wallet release creates a temporary detection gap: rate limiting still
-   applies, but there is no early warning before recovery. The wallet release
+   Proactive polling is not a Profile 1 recovery prerequisite, and it is the
+   client's responsibility: the server publishes the snapshot and cannot
+   notify anyone. It is part of the intended Bull Mobile detection rollout,
+   but Bull Mobile does not currently perform it, so deploying the server
+   before the corresponding wallet release leaves a detection gap: rate
+   limiting still applies, but there is no early warning before recovery. The wallet release
    should poll regularly in the foreground and use best-effort background
    scheduling where the platform permits it, with jitter, `ETag`, snapshot
    freshness, Tor, and the shared proxy cache. The global request does not
@@ -334,7 +335,7 @@ Operators are responsible for retention of those copies.
 
 ## Invariants (each guarded by tests)
 
-The table below is the minimal primary-guard index for the security invariants; it is not an exhaustive index of every test. Supplemental tests are classified here by module so an auditor can locate evidence without listing all 211 tests individually.
+The table below is the minimal primary-guard index for the security invariants; it is not an exhaustive index of every test. Supplemental tests are classified here by module so an auditor can locate evidence without listing all 215 tests individually.
 
 ### Additional evidence by test module
 
@@ -432,7 +433,7 @@ code, keep the invariant — and run the guarding test.
 
 - [ ] `src/main.rs`, `src/app.rs`, `src/config.rs`, `src/router.rs`, `src/http/`, `src/handlers/`, `src/recovery/`, `src/attempts/`, `src/storage/sqlite.rs`, and `src/observability/` exist at the paths in the reading map.
 - [ ] `src/schema.rs` remains the Diesel schema path imposed by `diesel.toml`.
-- [ ] The final test listing contains every test named in the invariant table: verify with `cargo test --locked -- --list` (the local listing contains 211 tests; no listing is checked in).
+- [ ] The final test listing contains every test named in the invariant table: verify with `cargo test --locked -- --list` (the local listing contains 215 tests; no listing is checked in).
 - [ ] CI compiles rustdocs with `cargo doc --no-deps --document-private-items --locked`; this proves only that rustdoc compiles, not that an invariant is correct or tested.
 - [ ] For a documentation-only change, the local static checks are `git diff --check`, path existence checks, and exact-name checks against the final `cargo test --locked -- --list` output; do not substitute `cargo doc` for executable invariant evidence.
 
@@ -484,10 +485,11 @@ code, keep the invariant — and run the guarding test.
   `MAIN-001` loopback check, `RL-001`/`RL-003` `Retry-After`, and, by
   maintainer decision, `ATT-003` post-`/trash` counter oracle, which changes
   the published meaning of `total_attempts` to consumed slots and must be
-  mirrored in the specification). Left open for a maintainer decision:
-  `RL-002` (zero refill), `MAIN-002` (shutdown bound), `SYS-001` (Bull
-  Mobile polling), `F-J` (Caddy `x/net` pin), `F-K` (`created_at`
-  precision), `DOC-001` (nginx conditional-request caveat).
+  mirrored in the specification). `SYS-001` (Bull Mobile polling) is
+  documented as a client responsibility, and `DOC-001` (nginx
+  conditional-request caveat) was corrected from the nginx tracker. Left open
+  for a maintainer decision: `RL-002` (zero refill), `MAIN-002` (shutdown
+  bound), `F-J` (Caddy `x/net` pin), `F-K` (`created_at` precision).
 - **Distinct-candidate limiter review** (2026-08-20): the rate-limit bucket
   remains `sha256(identifier)`, while `secret_id/key_id` CandidateTags are
   retained only in bounded memory. Pending reservations, saturation-before-

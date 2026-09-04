@@ -173,12 +173,16 @@ Identifiers are kept and published hashed, never raw. The entire identifier map,
 
 The body is **always gzip-compressed JSON** (`Content-Encoding: gzip`); clients must be gzip-capable. This initial telemetry contract, version `1`, reports distinct-candidate counters plus `total_requests` and never exposes CandidateTags. The snapshot is rebuilt at most once per minute and served as immutable shared bytes with a strong `ETag`: send `If-None-Match` to receive a bodyless `304` when nothing changed. `Cache-Control: public, max-age=<remaining seconds>` reflects the real freshness. A dedicated global token bucket (`ATTEMPTS_RATE_LIMIT_*`) bounds cache-bypass traffic; production deployments must additionally cache and rate-limit this route at the reverse proxy (see Deployment). Nginx is the reference template; Caddy is a conditional, mutually exclusive alternative under `deploy/caddy/`.
 
-Server deployment and wallet rollout are two stages of the same detection
-feature. Bull Mobile does not currently poll `/attempts`, so deploying this
-server alone leaves proactive detection temporarily incomplete; a compatible
-Bull Mobile release is required to finish the rollout. That release should
-poll regularly while the app is in the foreground and use best-effort
-background scheduling where the operating system permits it. Requests should
+**Proactive detection is the client's responsibility.** The server publishes
+the snapshot and cannot notify anyone; only a wallet that polls it can turn an
+entry into a warning. Server deployment and wallet rollout are therefore two
+stages of the same detection feature. Bull Mobile does not currently poll
+`/attempts`, so deploying this server alone leaves proactive detection
+incomplete until a compatible Bull Mobile release ships; until then the server
+side offers rate limiting, `attempt_status` on lookups, and `429`, but no early
+warning. That release should poll regularly while the app is in the foreground
+and use best-effort background scheduling where the operating system permits
+it. Requests should
 be jittered, respect snapshot freshness and `ETag`, and travel through Tor and
 the shared proxy cache. The global request does not reveal the identifier being
 checked because matching happens locally. It does add observable wallet-online
@@ -336,7 +340,7 @@ activity metadata and also require restricted access and retention.
 
 All Tor connections reach nginx from loopback, so these connection and request limits are intentionally global. The backend already serves `/attempts` precompressed: nginx caches that exact body instead of recompressing per request. The explicit cache key uses `$uri`, not the default `$request_uri`, because `/attempts` ignores query parameters: `/attempts?x=1` and `/attempts?x=2` must share one entry and one cache-fill lock. The Caddy alternative enforces the same invariant with `disable_query` and `disable_host`, and its smoke test proves that different Host/query values cause only one backend call. `limit_rate` caps per-connection throughput; multiplied by the connection limit it bounds aggregate snapshot egress. The proxy is also what lets slow clients take their time: with default `proxy_buffering`, nginx drains Axum quickly (within its 30s route timeout) and feeds the client at its own pace.
 
-> **Conditional requests behind nginx**: when serving `/attempts` from `proxy_cache`, nginx answers with the cached `200` body without evaluating the client's `If-None-Match` — the bodyless `304` path only benefits clients reaching Axum directly. Clients behind nginx therefore re-download the snapshot body whenever nginx's cache entry has expired (30s) and the content changed. This is an egress tradeoff, not a correctness issue: clients must still compare the received `ETag` to detect change, and aggregate egress stays bounded by `limit_conn` × `limit_rate`.
+> **Conditional requests behind nginx**: nginx evaluates a client's `If-None-Match` against a cached `200` and answers a bodyless `304` when the `ETag` matches. Early releases did not: cached responses without a `Last-Modified` header were served in full ([ticket #558](https://trac.nginx.org/nginx/ticket/558)), fixed by changeset `5fb1e57c758a` and released in nginx 1.7.3 (July 2014); the [nginx caching guide](https://blog.nginx.org/blog/nginx-caching-guide) documents `ETag`/`If-None-Match` support from that release. Every supported nginx is newer, so a client behind nginx gets the `304` path too. This was established from the nginx tracker and documentation, not reproduced against this template: before relying on it for egress planning, prime the cache, repeat the request with the returned `ETag`, and confirm a `304` with no second upstream call. Clients must compare the received `ETag` in any case, and aggregate egress stays bounded by `limit_conn` × `limit_rate`.
 
 3. Configure the onion service in `torrc` to reach nginx, with Tor's built-in DoS defenses enabled (they cover connection floods; body downloads remain an nginx concern):
 

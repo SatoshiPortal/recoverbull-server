@@ -76,7 +76,7 @@ async fn test_info_rereads_canary_from_file_with_startup_fallback() {
     ));
     state.info.set_canary_path_for_test(canary_path.clone());
     state.storage.initialize().unwrap();
-    let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone())).unwrap();
+    let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone()));
 
     // the file value wins over the startup value
     std::fs::write(&canary_path, "CANARY='🐦‍⬛'\n").unwrap();
@@ -117,7 +117,7 @@ async fn test_info_rereads_same_length_canary_when_file_metadata_is_restored() {
     ));
     state.info.set_canary_path_for_test(canary_path.clone());
     state.storage.initialize().unwrap();
-    let server = axum_test::TestServer::new(crate::router::new_for_tests(state)).unwrap();
+    let server = axum_test::TestServer::new(crate::router::new_for_tests(state));
 
     std::fs::write(&canary_path, "CANARY=AAAA\n").unwrap();
     let original_metadata = std::fs::metadata(&canary_path).unwrap();
@@ -159,7 +159,7 @@ async fn test_info_env_canary_is_authoritative_over_file() {
     ));
     state.info.set_canary_path_for_test(canary_path.clone());
     state.storage.initialize().unwrap();
-    let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone())).unwrap();
+    let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone()));
 
     std::fs::write(&canary_path, "CANARY='🐦‍⬛'\n").unwrap();
     let response = server.get("/info").expect_success().await;
@@ -187,7 +187,7 @@ async fn test_info_serves_a_cached_canary_and_advertises_its_freshness() {
     state.storage.initialize().unwrap();
     let interval = std::time::Duration::from_secs(600);
     state.info.set_canary_reread_interval_for_test(interval);
-    let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone())).unwrap();
+    let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone()));
 
     std::fs::write(&canary_path, "CANARY=first\n").unwrap();
     let response = server.get("/info").expect_success().await;
@@ -218,7 +218,7 @@ async fn test_info_serves_a_cached_canary_and_advertises_its_freshness() {
     expired
         .info
         .set_canary_reread_interval_for_test(std::time::Duration::ZERO);
-    let expired_server = axum_test::TestServer::new(crate::router::new_for_tests(expired)).unwrap();
+    let expired_server = axum_test::TestServer::new(crate::router::new_for_tests(expired));
     let response = expired_server.get("/info").expect_success().await;
     assert_eq!(response.json::<Info>().canary, "second");
 
@@ -232,7 +232,7 @@ async fn test_info_advertises_no_freshness_for_an_env_canary() {
     let mut state = crate::app::init();
     state.info.set_canary_from_env_for_test(true);
     state.storage.initialize().unwrap();
-    let server = axum_test::TestServer::new(crate::router::new_for_tests(state)).unwrap();
+    let server = axum_test::TestServer::new(crate::router::new_for_tests(state));
     let response = server.get("/info").expect_success().await;
     assert_eq!(
         response.header("cache-control").to_str().unwrap(),

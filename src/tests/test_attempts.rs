@@ -233,7 +233,7 @@ async fn test_attempts_snapshot_rebuild_is_deterministic() {
         .snapshot
         .set_ttl_for_test(std::time::Duration::ZERO);
     state.storage.initialize().unwrap();
-    let server = axum_test::TestServer::new(crate::router::new_for_tests(state)).unwrap();
+    let server = axum_test::TestServer::new(crate::router::new_for_tests(state));
 
     // unchanged activity: the ETag survives rebuilds
     let first = server.get("/attempts").expect_success().await;
@@ -370,7 +370,7 @@ async fn test_attempts_omit_expired_entries_at_build_time() {
             },
         );
     }
-    let server = axum_test::TestServer::new(crate::router::new_for_tests(state)).unwrap();
+    let server = axum_test::TestServer::new(crate::router::new_for_tests(state));
 
     let response = server.get("/attempts").expect_success().await;
     let (_, snapshot) = decode_gzip(response.as_bytes());
@@ -405,7 +405,7 @@ async fn test_attempts_last_attempt_at_is_last_distinct_secret_id() {
             },
         );
     }
-    let server = axum_test::TestServer::new(crate::router::new_for_tests(state)).unwrap();
+    let server = axum_test::TestServer::new(crate::router::new_for_tests(state));
 
     let response = server.get("/attempts").expect_success().await;
     let (_, snapshot) = decode_gzip(response.as_bytes());
@@ -425,7 +425,7 @@ async fn test_attempts_rate_limit_bucket() {
         .set_bucket_for_test(crate::rate_limit::TokenBucket::new(1.0, 0.0))
         .await;
     state.storage.initialize().unwrap();
-    let server = axum_test::TestServer::new(crate::router::new_for_tests(state)).unwrap();
+    let server = axum_test::TestServer::new(crate::router::new_for_tests(state));
 
     server.get("/attempts").expect_success().await;
     let response = server.get("/attempts").await;
@@ -514,7 +514,7 @@ async fn test_snapshot_is_independent_of_secret_ids() {
         .policy
         .set_cooldown_for_test(chrono::TimeDelta::hours(24));
     state.storage.initialize().unwrap();
-    let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone())).unwrap();
+    let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone()));
 
     let id_hash = crate::recovery::identifiers::identifier_hash(SHA256_111111).unwrap();
     let now = chrono::Utc::now();

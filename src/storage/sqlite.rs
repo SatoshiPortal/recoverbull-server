@@ -247,7 +247,7 @@ impl SqliteOperation {
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!();
 const INITIAL_MIGRATION_VERSION: &str = "0001";
 /// Minimum SQLite runtime version required by the service.
-pub const MINIMUM_SQLITE_VERSION: &str = "3.51.3";
+pub const MINIMUM_SQLITE_VERSION: &str = "3.53.2";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 /// Startup failures for SQLite capability, migration, and journal checks.

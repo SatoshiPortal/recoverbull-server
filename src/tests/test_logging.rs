@@ -370,7 +370,7 @@ async fn test_canary_updates_and_wipe_do_not_log_canary_value() {
     ));
     state.info.set_canary_path_for_test(canary_path.clone());
     state.storage.initialize().unwrap();
-    let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone())).unwrap();
+    let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone()));
     let first = "logging-canary-first";
     let second = "logging-canary-second";
 

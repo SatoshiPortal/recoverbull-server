@@ -67,7 +67,7 @@ async fn test_handlers_return_generic_500_when_connection_setup_fails() {
     state
         .recovery
         .set_database_url_for_test("/path/that/does/not/exist/recoverbull.sqlite3".to_owned());
-    let server = axum_test::TestServer::new(crate::router::new(state.clone())).unwrap();
+    let server = axum_test::TestServer::new(crate::router::new(state.clone()));
 
     let store = server
         .post("/store")

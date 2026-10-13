@@ -19,7 +19,7 @@ pub async fn new_test_server_with_delay(response_delay: Duration) -> (TestServer
             .unwrap();
     clear_table_secret(&mut connection).await;
 
-    (TestServer::new(app).unwrap(), app_state)
+    (TestServer::new(app), app_state)
 }
 
 pub async fn clear_table_secret(connection: &mut SqliteConnection) {

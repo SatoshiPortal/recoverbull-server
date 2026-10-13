@@ -47,13 +47,13 @@ fn test_application_connection_uses_patched_sqlite_and_wal() {
 #[test]
 fn test_sqlite_version_comparator_boundaries() {
     assert!(!crate::storage::sqlite::sqlite_version_at_least_for_test(
-        "3.51.2"
+        "3.53.1"
     ));
     assert!(crate::storage::sqlite::sqlite_version_at_least_for_test(
-        "3.51.3"
+        "3.53.2"
     ));
     assert!(crate::storage::sqlite::sqlite_version_at_least_for_test(
-        "3.52.0"
+        "3.54.0"
     ));
     assert!(!crate::storage::sqlite::sqlite_version_at_least_for_test(
         "not-a-version"

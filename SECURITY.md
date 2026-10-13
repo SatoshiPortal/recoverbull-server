@@ -403,14 +403,14 @@ connection cap as accepted denial-of-service ceilings.
 Two consequences of this change, both confirmed against the running binary
 under podman:
 
-- **The two files are coupled and must be upgraded Tor-first.** `listen …
-  proxy_protocol` makes the PROXY header mandatory: nginx rejects any
-  connection that arrives without one. So enabling `proxy_protocol` on nginx
-  before `HiddenServiceExportCircuitID` is active on Tor refuses **every**
-  request — a full outage, not a degradation. The safe order is to enable the
-  Tor export first (old nginx ignores the header harmlessly), then switch nginx
-  to `proxy_protocol`; roll back nginx first. A validated end-to-end smoke
-  before admitting traffic (docs/OPERATIONS.md) catches a mismatch.
+- **The two files are coupled and must change together, with Tor stopped.**
+  `listen … proxy_protocol` makes the PROXY header mandatory: nginx rejects any
+  connection that arrives without one. The reverse mismatch fails too: a plain
+  nginx listener answers `400` to a request preceded by a PROXY header
+  (verified on Debian nginx 1.26.3, audit of 2026-10-08). No order of separate
+  upgrades is safe. Stop Tor, change both files, validate both, then start
+  nginx and Tor; an upgrade with `deploy/recoverbull install` does exactly this, and rolls back
+  both together.
 - **The PROXY header is trusted from loopback, so co-located processes can
   forge a circuit id.** `set_real_ip_from 127.0.0.1` trusts the header from any
   source that can reach `127.0.0.1:3000`, which on a shared host is any local

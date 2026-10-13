@@ -110,7 +110,14 @@ What to watch:
 - **The five-minute counter line** in the logs (`sudo deploy/recoverbull logs`). `lookup_rate_limited`, `database_busy`, `database_error` and `request_timeout` should stay near zero.
 - **The service being down.** It does not restart on its own (rule 4).
 
-The server logs one line per server error and one summary every five minutes, never request contents. journald limits each service to 10,000 lines per 30 seconds by default.
+The server logs one line per server error and one summary every five minutes, never request contents. journald limits each service to 10,000 lines per 30 seconds by default; to tighten it, add a drop-in and restart the service:
+
+```ini
+# /etc/systemd/system/recoverbull.service.d/logging.conf
+[Service]
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=200
+```
 
 Debian security updates for Tor and nginx install automatically through `unattended-upgrades`. Upgrades of the server itself are yours to schedule (rule 4).
 

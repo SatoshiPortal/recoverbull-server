@@ -588,6 +588,18 @@ code, keep the invariant — and run the guarding test.
   static invariant test and executable CI smoke.
   `SYS-001` remains a client-delivery responsibility. `F-K` (`created_at`
   precision) remains a protocol decision and was not changed.
+- **SECURITY-AUDIT-2026-10-08** (external review of `main@98622bb`, report
+  kept out of the repository): AUD-2026-10-01 (high, **open**) — when the
+  database file cannot grow (quota, `RLIMIT_FSIZE`, full volume), `/store`
+  answers `201` for an existing `secret_id` and `500` for a new one, an
+  existence oracle that bypasses the per-identifier budget because `/store`
+  never consults the ledger; reproduced on the binary with `RLIMIT_FSIZE`.
+  The fix must make `/store` admission independent of row existence under
+  storage pressure; a bare `500`→`503` rename is not enough. AUD-02 (medium)
+  — the runbook's staged PROXY-protocol upgrade was wrong in both orders;
+  absorbed above. AUD-03 (low) — the runbook's `curl :3000` smoke could never
+  pass behind `proxy_protocol`; the runbook was replaced by
+  `deploy/recoverbull`, which checks `:3001` and the onion itself.
 - **Post-review regression pass** (2026-09-04): made dotenv-canary refresh
   single-flight and returned its value/freshness atomically; removed the
   misleading public Python backup-verification command, validated Diesel's

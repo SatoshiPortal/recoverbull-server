@@ -62,7 +62,6 @@ async fn test_whole_map_retention_removes_only_expired_entries() {
             RateLimitInfo {
                 window_started_at: expired_at,
                 last_secret_id_at: expired_at,
-                last_request_at: expired_at,
                 // expiry decides on the monotonic clock: back-date it too
                 last_secret_id_instant: crate::tests::monotonic_age(
                     (state.attempts.policy.cooldown() + chrono::Duration::minutes(1))
@@ -80,7 +79,6 @@ async fn test_whole_map_retention_removes_only_expired_entries() {
             RateLimitInfo {
                 window_started_at: now,
                 last_secret_id_at: now,
-                last_request_at: now,
                 last_secret_id_instant: tokio::time::Instant::now(),
                 secret_ids: std::collections::HashMap::new(),
                 forgotten_slots: 0,
@@ -121,7 +119,6 @@ async fn test_fetch_expires_sub_threshold_entry_after_cooldown() {
             RateLimitInfo {
                 window_started_at,
                 last_secret_id_at: window_started_at,
-                last_request_at: window_started_at,
                 // expiry decides on the monotonic clock: back-date it too
                 last_secret_id_instant: crate::tests::monotonic_age(
                     (state.attempts.policy.cooldown() + chrono::Duration::minutes(1))
@@ -604,7 +601,6 @@ async fn test_a_forward_wall_clock_jump_does_not_reset_a_saturated_budget() {
             .expect("the saturated entry is present");
         info.window_started_at -= jump;
         info.last_secret_id_at -= jump;
-        info.last_request_at -= jump;
     }
 
     let response = server

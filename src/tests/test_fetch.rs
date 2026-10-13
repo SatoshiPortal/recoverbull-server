@@ -184,7 +184,6 @@ async fn test_fetch_rate_limit_enforced_and_reset_after_cooldown() {
         let expired_at = chrono::Utc::now() - age;
         info.window_started_at = expired_at;
         info.last_secret_id_at = expired_at;
-        info.last_request_at = expired_at;
         // Expiry decides on the monotonic clock, so aging the published
         // wall-clock fields alone would leave the entry active.
         info.set_monotonic_age_for_test(age.to_std().unwrap());

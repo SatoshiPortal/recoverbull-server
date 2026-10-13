@@ -566,7 +566,6 @@ async fn test_expired_entry_disappears_from_snapshot() {
             crate::attempts::ledger::RateLimitInfo {
                 window_started_at: expired_at,
                 last_secret_id_at: expired_at,
-                last_request_at: expired_at,
                 // expiry decides on the monotonic clock: back-date it too
                 last_secret_id_instant: crate::tests::monotonic_age(
                     (state.attempts.policy.cooldown() + chrono::Duration::minutes(1))
@@ -1109,7 +1108,6 @@ async fn test_attempts_counter_does_not_overflow_at_u8_max() {
             crate::attempts::ledger::RateLimitInfo {
                 window_started_at: chrono::Utc::now(),
                 last_secret_id_at: chrono::Utc::now(),
-                last_request_at: chrono::Utc::now(),
                 last_secret_id_instant: tokio::time::Instant::now(),
                 secret_ids: (0..254)
                     .map(|i| {

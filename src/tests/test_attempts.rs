@@ -357,7 +357,6 @@ async fn test_attempts_omit_expired_entries_at_build_time() {
             RateLimitInfo {
                 window_started_at,
                 last_secret_id_at: window_started_at,
-                last_request_at: window_started_at,
                 // expiry decides on the monotonic clock: back-date it too
                 last_secret_id_instant: crate::tests::monotonic_age(
                     (state.attempts.policy.cooldown() + chrono::Duration::seconds(1))
@@ -388,7 +387,6 @@ async fn test_attempts_last_attempt_at_is_last_distinct_secret_id() {
     let now = chrono::Utc::now();
     let window_started_at = now - chrono::TimeDelta::hours(4);
     let last_secret_id_at = now - chrono::TimeDelta::hours(2);
-    let last_request_at = now - chrono::TimeDelta::hours(1);
     {
         let mut entries = state.attempts.ledger.lock_for_test().await;
         entries.insert(
@@ -396,7 +394,6 @@ async fn test_attempts_last_attempt_at_is_last_distinct_secret_id() {
             RateLimitInfo {
                 window_started_at,
                 last_secret_id_at,
-                last_request_at,
                 // The entry is active (24-hour cooldown), so the monotonic
                 // clock stays fresh while the *published* last_secret_id_at
                 // remains two hours old: that decoupling is the point here.
@@ -462,7 +459,6 @@ async fn test_attempts_snapshot_at_full_map_scale() {
                 crate::attempts::ledger::RateLimitInfo {
                     window_started_at: now,
                     last_secret_id_at: now,
-                    last_request_at: now,
                     last_secret_id_instant: tokio::time::Instant::now(),
                     secret_ids: std::collections::HashMap::new(),
                     forgotten_slots: 0,

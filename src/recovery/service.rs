@@ -14,6 +14,7 @@ use crate::{
 };
 use base64::Engine;
 use chrono::{DateTime, Utc};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -51,6 +52,9 @@ pub(crate) enum StoreResult {
     /// The global store bucket had no token; the backoff is the bucket's
     /// own estimate of its next token.
     GlobalOverload { retry_after_secs: u64 },
+    /// A previous store failed on storage; every store is refused until an
+    /// operator has looked and restarted the server (AUD-2026-10-01).
+    StoragePressure,
     /// A database lease could not be acquired before its deadline.
     DatabaseBusy,
     /// The detached database operation failed.
@@ -100,6 +104,9 @@ pub(crate) struct RecoveryService {
     storage: SqliteStorage,
     counters: Arc<SecurityCounters>,
     max_secret_length: usize,
+    /// Set once a store fails on storage and never cleared: `/store` then
+    /// refuses uniformly until a restart (AUD-2026-10-01).
+    storage_pressure: Arc<AtomicBool>,
 }
 
 impl RecoveryService {
@@ -123,7 +130,21 @@ impl RecoveryService {
             storage,
             counters,
             max_secret_length: config.secret_max_length,
+            storage_pressure: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    #[cfg(test)]
+    /// Test-only initialization seam; excluded from release builds.
+    pub(crate) fn initialize_for_test(
+        &self,
+    ) -> Result<(), crate::storage::sqlite::ConnectionSetupError> {
+        self.storage.initialize()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn storage_pressure_for_test(&self) -> bool {
+        self.storage_pressure.load(Ordering::Relaxed)
     }
 
     /// Validates and canonicalizes a store command, applies the global write
@@ -153,6 +174,13 @@ impl RecoveryService {
             self.counters.store_rejected();
             return StoreResult::Invalid("encrypted_secret should be base64 encoded".to_owned());
         }
+        // Uniform refusal once storage has failed: the answer no longer
+        // depends on whether the row exists, which is the oracle the write
+        // path closes for the first failure and this gate for every later one.
+        if self.storage_pressure.load(Ordering::Relaxed) {
+            self.counters.store_storage_pressure();
+            return StoreResult::StoragePressure;
+        }
         if let BucketDecision::Rejected { retry_after_secs } =
             self.store_bucket.lock().await.try_consume()
         {
@@ -175,6 +203,7 @@ impl RecoveryService {
             }
         };
         let counters = self.counters.clone();
+        let storage_pressure = self.storage_pressure.clone();
         // The outer task owns the counter update so dropping the handler future
         // cannot cancel the operation after its permit was transferred.
         let task = tokio::spawn(async move {
@@ -183,7 +212,20 @@ impl RecoveryService {
                     counters.store_accepted();
                     StoreResult::Stored
                 }
-                Ok(Err(_)) => {
+                Ok(Err(StorageError::Busy)) => {
+                    counters.database_busy();
+                    StoreResult::DatabaseBusy
+                }
+                Ok(Err(StorageError::Database)) => {
+                    // Full disk, quota, unwritable or damaged file: from now
+                    // on every store is refused the same way (see the gate
+                    // above), so the one `500` here is the last distinguishable
+                    // answer this process gives.
+                    storage_pressure.store(true, Ordering::Relaxed);
+                    counters.database_error();
+                    StoreResult::DatabaseError
+                }
+                Ok(Err(StorageError::Connection)) => {
                     counters.database_error();
                     StoreResult::DatabaseError
                 }
@@ -234,13 +276,6 @@ impl RecoveryService {
         self.storage.database_semaphore_for_test()
     }
     #[cfg(test)]
-    /// Test-only initialization seam; excluded from release builds.
-    pub(crate) fn initialize_for_test(
-        &self,
-    ) -> Result<(), crate::storage::sqlite::ConnectionSetupError> {
-        self.storage.initialize()
-    }
-    #[cfg(test)]
     /// Test-only store-bucket seam; excluded from release builds.
     pub(crate) async fn set_store_bucket_for_test(&self, bucket: TokenBucket) {
         *self.store_bucket.lock().await = bucket;
@@ -262,6 +297,7 @@ impl RecoveryService {
         let identifier = request.identifier.to_lowercase();
         let authentication_key = request.authentication_key.to_lowercase();
         if !is_256bits_hex_hash(&identifier) || !is_256bits_hex_hash(&authentication_key) {
+            self.counters.lookup_rejected();
             return LookupResult::Invalid;
         }
         if let BucketDecision::Rejected { retry_after_secs } =

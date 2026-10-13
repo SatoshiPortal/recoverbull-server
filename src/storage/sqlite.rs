@@ -62,11 +62,30 @@ pub(crate) struct StoredSecret {
     pub(crate) encrypted_secret: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 /// Opaque storage failure categories safe for domain and HTTP mapping.
 pub(crate) enum StorageError {
+    /// No lease before the deadline, or SQLite reported the database locked:
+    /// transient pressure, retry later.
+    Busy,
+    /// The database file could not be opened or checked.
     Connection,
+    /// The operation itself failed: full or unwritable storage, a damaged
+    /// file, or any other non-transient SQLite error.
     Database,
+}
+
+/// SQLite reports contention as an error like any other; it is the one
+/// failure a client should simply retry rather than the operator investigate.
+fn classify_database_error(error: &diesel::result::Error) -> StorageError {
+    match error {
+        diesel::result::Error::DatabaseError(_, info)
+            if info.message().contains("locked") || info.message().contains("busy") =>
+        {
+            StorageError::Busy
+        }
+        _ => StorageError::Database,
+    }
 }
 
 impl SqliteStorage {
@@ -86,8 +105,8 @@ impl SqliteStorage {
             self.database_semaphore.clone().acquire_owned(),
         )
         .await
-        .map_err(|_| StorageError::Connection)?
-        .map_err(|_| StorageError::Connection)?;
+        .map_err(|_| StorageError::Busy)?
+        .map_err(|_| StorageError::Busy)?;
         Ok(SqliteOperation {
             database_url: self.database_url.clone(),
             permit,
@@ -182,7 +201,7 @@ impl SqliteOperation {
                 encrypted_secret: new_secret.encrypted_secret,
             },
         )
-        .map_err(|_| StorageError::Database)
+        .map_err(|error| classify_database_error(&error))
     }
 
     /// Reads without deleting the stored row.
@@ -206,7 +225,7 @@ impl SqliteOperation {
         } else {
             read_secret_by_id(&mut connection, &secret_id)
         }
-        .map_err(|_| StorageError::Database)?;
+        .map_err(|error| classify_database_error(&error))?;
         Ok(row.map(|row| StoredSecret {
             id: row.id,
             created_at: row.created_at,
@@ -437,15 +456,25 @@ pub fn write(
     connection: &mut SqliteConnection,
     new_secret: &Secret,
 ) -> Result<(), diesel::result::Error> {
-    // ON CONFLICT DO NOTHING: storing is idempotent. The response must not
-    // reveal whether the secret_id already exists, otherwise /store becomes
-    // an unthrottled authentication_key oracle (a 403 would confirm a
-    // correct guess without ever touching the fetch rate-limit).
-    diesel::insert_into(crate::schema::secret::table)
-        .values(new_secret)
-        .on_conflict_do_nothing()
-        .execute(connection)
-        .map(|_| ())
+    connection.immediate_transaction(|connection| {
+        // ON CONFLICT DO NOTHING: storing is idempotent. The response must not
+        // reveal whether the secret_id already exists, otherwise /store becomes
+        // an unthrottled authentication_key oracle (a 403 would confirm a
+        // correct guess without ever touching the fetch rate-limit).
+        diesel::insert_into(crate::schema::secret::table)
+            .values(new_secret)
+            .on_conflict_do_nothing()
+            .execute(connection)?;
+        // AUD-2026-10-01: a no-op insert needs no storage, so when the file
+        // can no longer grow a store for an existing row would still succeed
+        // while a new one fails. Rewriting the row unconditionally makes both
+        // cases a real write that must reach the WAL, so storage pressure
+        // refuses them alike. The values do not change.
+        diesel::update(secret.filter(id.eq(&new_secret.id)))
+            .set((id.eq(&new_secret.id), created_at.eq(created_at)))
+            .execute(connection)?;
+        Ok(())
+    })
 }
 
 /// Reads one row, preserving database errors distinct from a missing row.

@@ -9,7 +9,13 @@ use std::time::Duration;
 pub struct SecurityCounters {
     store_accepted: AtomicU64,
     store_rejected: AtomicU64,
+    /// Stores refused because an earlier one failed on storage (AUD-2026-10-01):
+    /// the server fails closed until an operator restarts it.
+    store_storage_pressure: AtomicU64,
     lookup_accepted: AtomicU64,
+    /// Lookups refused at validation; without it a `400` flood on `/fetch`
+    /// or `/trash` left no trace in the window.
+    lookup_rejected: AtomicU64,
     lookup_rate_limited: AtomicU64,
     lookup_target_lockout: AtomicU64,
     lookup_map_capacity: AtomicU64,
@@ -60,7 +66,9 @@ impl SecurityCounters {
     counter_methods!(
         store_accepted,
         store_rejected,
+        store_storage_pressure,
         lookup_accepted,
+        lookup_rejected,
         lookup_rate_limited,
         lookup_target_lockout,
         lookup_map_capacity,
@@ -87,7 +95,9 @@ impl SecurityCounters {
         CounterSnapshot {
             store_accepted: self.store_accepted.swap(0, Ordering::Relaxed),
             store_rejected: self.store_rejected.swap(0, Ordering::Relaxed),
+            store_storage_pressure: self.store_storage_pressure.swap(0, Ordering::Relaxed),
             lookup_accepted: self.lookup_accepted.swap(0, Ordering::Relaxed),
+            lookup_rejected: self.lookup_rejected.swap(0, Ordering::Relaxed),
             lookup_rate_limited: self.lookup_rate_limited.swap(0, Ordering::Relaxed),
             lookup_target_lockout: self.lookup_target_lockout.swap(0, Ordering::Relaxed),
             lookup_map_capacity: self.lookup_map_capacity.swap(0, Ordering::Relaxed),
@@ -111,7 +121,9 @@ impl SecurityCounters {
 pub struct CounterSnapshot {
     pub store_accepted: u64,
     pub store_rejected: u64,
+    pub store_storage_pressure: u64,
     pub lookup_accepted: u64,
+    pub lookup_rejected: u64,
     pub lookup_rate_limited: u64,
     pub lookup_target_lockout: u64,
     pub lookup_map_capacity: u64,
@@ -149,7 +161,9 @@ pub(crate) fn report_once(counters: &SecurityCounters) {
         target: "security_counters",
         store_accepted = snapshot.store_accepted,
         store_rejected = snapshot.store_rejected,
+        store_storage_pressure = snapshot.store_storage_pressure,
         lookup_accepted = snapshot.lookup_accepted,
+        lookup_rejected = snapshot.lookup_rejected,
         lookup_rate_limited = snapshot.lookup_rate_limited,
         lookup_target_lockout = snapshot.lookup_target_lockout,
         lookup_map_capacity = snapshot.lookup_map_capacity,

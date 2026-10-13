@@ -109,6 +109,7 @@ What to watch:
 - **Disk.** Each stored secret is a few hundred bytes, but a sustained `/store` flood can grow the database by up to about 90 MB per day. Alert at 70% use and never let the disk fill up: the server must keep accepting writes. A dedicated volume for `/var/lib/recoverbull` keeps a flood from filling the system disk.
 - **The five-minute counter line** in the logs (`sudo deploy/recoverbull logs`). `lookup_rate_limited`, `database_busy`, `database_error` and `request_timeout` should stay near zero.
 - **The service being down.** It does not restart on its own (rule 4).
+- **`store_storage_pressure` in the counter line, or clients reporting `503` on `/store` only.** A store failed on storage (full disk, quota, unwritable or damaged file) and the server now refuses every store until restarted, on purpose: answering some of them would reveal which backups exist. Fix the cause, check the database with `check-database`, then restart.
 
 The server logs one line per server error and one summary every five minutes, never request contents. journald limits each service to 10,000 lines per 30 seconds by default; to tighten it, add a drop-in and restart the service:
 

@@ -204,6 +204,22 @@ fn check_database_refuses_an_uninitialized_file() {
     );
 }
 
+/// A file that is not SQLite at all is reported as such, not as a schema
+/// problem an operator would try to migrate.
+#[test]
+fn check_database_names_a_file_that_is_not_a_database() {
+    let (url, _guard) = crate::config::unique_test_database();
+    std::fs::write(
+        &url,
+        b"this is not an sqlite file, just text long enough to look like one",
+    )
+    .unwrap();
+    assert_eq!(
+        crate::storage::sqlite::check_database(url),
+        Err(crate::storage::sqlite::ConnectionSetupError::NotADatabase)
+    );
+}
+
 /// A genuinely initialized database still passes the check.
 #[test]
 fn check_database_accepts_an_initialized_file() {

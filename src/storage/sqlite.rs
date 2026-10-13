@@ -150,9 +150,20 @@ impl SqliteStorage {
 /// initialization afterwards (idempotent migrations, schema postcondition, WAL
 /// setup) on the restored copy, as the drill documents.
 pub(crate) fn check_database(database_url: String) -> Result<(), ConnectionSetupError> {
+    // SQLite opens any file and fails only on first read, at whichever
+    // pragma runs first; the header says up front whether this is a database
+    // at all. An empty file is left to the uninitialized check below.
+    const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
+    let mut header = [0u8; 16];
+    let read = std::fs::File::open(&database_url)
+        .and_then(|mut file| std::io::Read::read(&mut file, &mut header))
+        .map_err(|_| ConnectionSetupError::Open)?;
+    if read > 0 && (read < header.len() || &header != SQLITE_HEADER) {
+        return Err(ConnectionSetupError::NotADatabase);
+    }
     let mut probe = establish_connection_without_wal_check(database_url.clone())?;
     let initialized =
-        table_exists(&mut probe, "secret").map_err(|_| ConnectionSetupError::Migration)?;
+        table_exists(&mut probe, "secret").map_err(|_| ConnectionSetupError::NotADatabase)?;
     drop(probe);
     if !initialized {
         return Err(ConnectionSetupError::Uninitialized);
@@ -250,6 +261,10 @@ pub enum ConnectionSetupError {
     SecureDeleteVerification,
     Wal,
     Migration,
+    /// The `check-database` target is not an SQLite file (wrong header) or
+    /// its schema cannot be read. Distinct from `Migration` so a restore
+    /// drill on a garbage file is not reported as a schema problem.
+    NotADatabase,
     /// The `check-database` restore-drill target has no `secret` table, so it
     /// is not an initialized database. Only the check path returns this: normal
     /// startup deliberately creates the schema on a fresh `DATABASE_URL`.

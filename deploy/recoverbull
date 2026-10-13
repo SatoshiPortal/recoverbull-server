@@ -1,0 +1,433 @@
+#!/usr/bin/env bash
+# Install, upgrade and check a RecoverBull server on Debian 13.
+# Run `deploy/recoverbull help`. See docs/OPERATIONS.md.
+set -Eeuo pipefail
+umask 077
+
+APP_DIR=/opt/recoverbull
+BIN=$APP_DIR/bin/keychain
+DATA_DIR=/var/lib/recoverbull
+ENV_FILE=$DATA_DIR/.env
+DB=$DATA_DIR/database.sqlite3
+PREVIOUS_DIR=$DATA_DIR/previous-version
+TOR_HS_DIR=/var/lib/tor/recoverbull
+UNIT=/etc/systemd/system/recoverbull.service
+NGINX_CONF=/etc/nginx/conf.d/recoverbull.conf
+TOR_CONF=/etc/tor/torrc.d/recoverbull.conf
+TOR_SERVICE=tor@default
+
+REPO=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
+YES=false
+
+# Files copied from the checkout, as "source:destination:mode".
+MANAGED_FILES=(
+  "target/release/keychain:$BIN:0755"
+  "deploy/systemd/recoverbull.service:$UNIT:0644"
+  "deploy/nginx/recoverbull.conf:$NGINX_CONF:0644"
+  "deploy/tor/recoverbull.torrc:$TOR_CONF:0644"
+)
+
+say() { printf '==> %s\n' "$*" >&2; }
+warn() { printf 'WARNING: %s\n' "$*" >&2; }
+die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+on_error() { die "'$BASH_COMMAND' failed (line ${BASH_LINENO[0]}). See: sudo deploy/recoverbull logs"; }
+trap on_error ERR
+
+usage() {
+  cat <<'EOF'
+Install, upgrade and check a RecoverBull server on Debian 13.
+
+Examples:
+  sudo deploy/recoverbull install
+      First install: asks for the warrant canary, prints the onion address.
+  git pull && cargo build --release --locked && sudo deploy/recoverbull install
+      Upgrade: replaces what changed and keeps the database.
+  sudo deploy/recoverbull install --database old.sqlite3 --onion-keys old-hs/
+      Redeploy an existing server on this host, same data and onion address.
+  sudo deploy/recoverbull status
+  sudo deploy/recoverbull logs -f
+
+Commands:
+  install    Install, or upgrade to this checkout. Safe to run again.
+  status     Health of the server, nginx and Tor, and the onion address.
+  logs       Recent server logs.
+
+Options for install:
+  --canary <text>     Warrant canary for a first install (asked if omitted).
+  --database <file>   Existing SQLite database to start from (first install only).
+  --onion-keys <dir>  Existing Tor HiddenServiceDir to keep the onion address.
+  -y, --yes           Do not ask for confirmation before an upgrade.
+
+Options for logs:
+  -f, --follow        Keep printing new lines.
+  --all               Interleave nginx and Tor with the server.
+  -n, --lines <n>     Number of past lines (default 100).
+EOF
+}
+
+interactive() { [[ -t 0 ]]; }
+
+confirm() {
+  $YES && return 0
+  interactive || die "$1 Run again with --yes to confirm."
+  local answer
+  read -r -p "$1 [y/N] " answer
+  [[ $answer == [yY] ]] || die "nothing changed"
+}
+
+require_debian_13() {
+  # shellcheck disable=SC1091
+  . /etc/os-release
+  [[ ${ID:-} == debian && ${VERSION_ID:-} == 13 ]] ||
+    die "Debian 13 is required (found ${PRETTY_NAME:-unknown})"
+}
+
+require_build() {
+  local built=$REPO/target/release/keychain
+  [[ -x $built ]] || die "build it first, as your user: cargo build --release --locked"
+  local stale
+  stale=$(find "$REPO/src" "$REPO/migrations" "$REPO/Cargo.toml" "$REPO/Cargo.lock" "$REPO/build.rs" \
+    -newer "$built" -print -quit)
+  [[ -z $stale ]] || die "$stale changed since the last build: run cargo build --release --locked"
+}
+
+# Runs git as the checkout owner: as root, it would rewrite .git/index as a
+# root-owned file and break the owner's next `git pull` or `cargo build`.
+checkout_version() {
+  runuser -u "$(stat -c %U "$REPO")" -- git -C "$REPO" describe --always --dirty 2>/dev/null ||
+    echo unknown
+}
+
+# The unit and nginx rely on these values; anything else would silently serve
+# another database or an unproxied port.
+check_env() {
+  grep -qx "DATABASE_URL=$DB" "$ENV_FILE" || die "$ENV_FILE must contain DATABASE_URL=$DB"
+  grep -qx 'SERVER_ADDRESS=127.0.0.1:3001' "$ENV_FILE" ||
+    die "$ENV_FILE must contain SERVER_ADDRESS=127.0.0.1:3001"
+  grep -q '^CANARY=.' "$ENV_FILE" || die "$ENV_FILE has no CANARY"
+}
+
+write_env() {
+  local canary=$1
+  if [[ -z $canary ]] && interactive; then
+    read -r -p "Warrant canary (shown by /info): " canary
+  fi
+  [[ -n $canary ]] || die "a first install needs a warrant canary: add --canary '<text>'"
+  [[ $canary != *$'\n'* && $canary != *"'"* && $canary != *'|'* ]] ||
+    die "the canary cannot contain a newline, a single quote or |"
+  sed "s|^CANARY=.*|CANARY='$canary'|" "$REPO/deploy/recoverbull.env.example" |
+    install -o recoverbull -g recoverbull -m 0600 /dev/stdin "$ENV_FILE"
+}
+
+wait_for_server() {
+  for _ in $(seq 1 30); do
+    curl -fsS --max-time 2 http://127.0.0.1:3001/info >/dev/null 2>&1 && return 0
+    systemctl is-active --quiet recoverbull || return 1
+    sleep 1
+  done
+  return 1
+}
+
+check_database() {
+  [[ -f $DB ]] || return 0
+  runuser -u recoverbull -- "$BIN" check-database "$DB" >/dev/null
+}
+
+# Same check as Debian's tor@default ExecStartPre; it must run as root.
+verify_tor() {
+  local output
+  output=$(tor --defaults-torrc /usr/share/tor/tor-service-defaults-torrc \
+    -f /etc/tor/torrc --RunAsDaemon 0 --verify-config 2>&1) || {
+    printf '%s\n' "$output" >&2
+    return 1
+  }
+}
+
+validate_config() {
+  systemd-analyze verify "$UNIT"
+  nginx -t -q
+  verify_tor
+}
+
+install_files() {
+  local entry source destination mode
+  install -d -o root -g root -m 0755 "$APP_DIR" "$APP_DIR/bin" /etc/tor/torrc.d /var/cache/nginx
+  for entry in "${MANAGED_FILES[@]}"; do
+    IFS=: read -r source destination mode <<<"$entry"
+    install -o root -g root -m "$mode" "$REPO/$source" "$destination"
+  done
+  checkout_version >"$APP_DIR/VERSION"
+  chmod 0644 "$APP_DIR/VERSION"
+  if ! grep -qs '^%include /etc/tor/torrc.d' /etc/tor/torrc; then
+    printf '\n%%include /etc/tor/torrc.d/*.conf\n' >>/etc/tor/torrc
+  fi
+  systemctl daemon-reload
+}
+
+changed_files() {
+  local entry source destination mode
+  for entry in "${MANAGED_FILES[@]}"; do
+    IFS=: read -r source destination mode <<<"$entry"
+    cmp -s "$REPO/$source" "$destination" || echo "$destination"
+  done
+}
+
+# Copies an SQLite database with the online backup API, so a -wal file next to
+# the source is included. Any schema is accepted here: check-database adopts or
+# refuses it with the server's own rules.
+copy_database() {
+  python3 - "$1" "$2" <<'PY'
+import sqlite3, sys
+source = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+target = sqlite3.connect(sys.argv[2])
+source.backup(target)
+target.close()
+PY
+}
+
+own_database() {
+  local suffix
+  for suffix in "" -wal -shm; do
+    [[ -e $DB$suffix ]] || continue
+    chown recoverbull:recoverbull "$DB$suffix"
+    chmod 0600 "$DB$suffix"
+  done
+}
+
+first_install() {
+  local canary=$1 database=$2 onion_keys=$3
+  say "Installing packages"
+  apt-get update -qq
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq tor nginx python3 curl unattended-upgrades >/dev/null
+
+  getent passwd recoverbull >/dev/null ||
+    useradd --system --home-dir "$DATA_DIR" --shell /usr/sbin/nologin recoverbull
+  install -d -o recoverbull -g recoverbull -m 0700 "$DATA_DIR"
+  [[ -f $ENV_FILE ]] || write_env "$canary"
+  check_env
+
+  say "Installing RecoverBull $(checkout_version)"
+  install_files
+  # Debian's default site listens publicly on port 80; this host needs no public listener.
+  rm -f /etc/nginx/sites-enabled/default
+  validate_config
+
+  if [[ -n $database ]]; then
+    say "Importing $database"
+    copy_database "$database" "$DB"
+    own_database
+    check_database
+  fi
+  if [[ -n $onion_keys ]]; then
+    say "Importing the onion keys from $onion_keys"
+    install -d -o debian-tor -g debian-tor -m 0700 "$TOR_HS_DIR"
+    local name
+    for name in hs_ed25519_secret_key hs_ed25519_public_key hostname; do
+      [[ -f $onion_keys/$name ]] || continue
+      install -o debian-tor -g debian-tor -m 0600 "$onion_keys/$name" "$TOR_HS_DIR/$name"
+    done
+  fi
+
+  say "Starting the server, nginx, then Tor"
+  systemctl enable --quiet --now recoverbull
+  wait_for_server || die "the server did not start. See: sudo deploy/recoverbull logs"
+  systemctl enable --quiet nginx "$TOR_SERVICE"
+  systemctl restart nginx "$TOR_SERVICE"
+  for _ in $(seq 1 60); do [[ -f $TOR_HS_DIR/hostname ]] && break; sleep 1; done
+  [[ -f $TOR_HS_DIR/hostname ]] ||
+    die "Tor did not create the onion address. See: sudo deploy/recoverbull logs --all"
+
+  cat >&2 <<EOF
+
+RecoverBull is running at http://$(cat "$TOR_HS_DIR/hostname")
+It becomes reachable over Tor within a few minutes; check with:
+  sudo deploy/recoverbull status
+
+Back up these two now, off this host. Losing the onion keys loses the address:
+  $TOR_HS_DIR/   onion keys
+  $DB   database (see docs/OPERATIONS.md, "Backups")
+EOF
+}
+
+upgrade() {
+  local changed from to
+  mapfile -t changed < <(changed_files)
+  from=$(cat "$APP_DIR/VERSION" 2>/dev/null || echo unknown)
+  to=$(checkout_version)
+  if ((${#changed[@]} == 0)); then
+    say "Already up to date ($from)"
+    return 0
+  fi
+  check_env
+
+  say "Upgrade $from -> $to, replacing:"
+  printf '      %s\n' "${changed[@]}" >&2
+  warn "the restart resets every in-memory attempt budget"
+  confirm "Stop the server and upgrade?"
+
+  trap abort_upgrade ERR
+  say "Stopping Tor, then the server"
+  systemctl stop "$TOR_SERVICE" recoverbull
+  rm -rf "$PREVIOUS_DIR"
+  install -d -o root -g root -m 0700 "$PREVIOUS_DIR"
+  copy_database "$DB" "$PREVIOUS_DIR/database.sqlite3"
+  local entry source destination mode
+  for entry in "${MANAGED_FILES[@]}"; do
+    IFS=: read -r source destination mode <<<"$entry"
+    [[ -f $destination ]] && install -D -m "$mode" "$destination" "$PREVIOUS_DIR/files$destination"
+  done
+  cp -p "$APP_DIR/VERSION" "$PREVIOUS_DIR/VERSION"
+
+  trap roll_back ERR
+  install_files
+  validate_config
+  check_database
+  systemctl start recoverbull
+  wait_for_server
+  trap on_error ERR
+
+  systemctl reload-or-restart nginx
+  systemctl start "$TOR_SERVICE"
+  say "Upgraded to $to. Check it in a few minutes with: sudo deploy/recoverbull status"
+}
+
+# Nothing was replaced yet: start the current version again.
+abort_upgrade() {
+  trap - ERR
+  set +e
+  systemctl start recoverbull
+  wait_for_server ||
+    die "the upgrade stopped early and the server did not restart. See: sudo deploy/recoverbull logs"
+  systemctl start "$TOR_SERVICE"
+  die "the upgrade stopped before changing anything; the current version is running again"
+}
+
+# Puts back the previous files and database. Tor was stopped before the copy,
+# so the copy holds every accepted write.
+roll_back() {
+  trap - ERR
+  set +e
+  warn "the upgrade failed: going back to the previous version"
+  systemctl stop recoverbull
+  local entry source destination mode suffix
+  for entry in "${MANAGED_FILES[@]}"; do
+    IFS=: read -r source destination mode <<<"$entry"
+    [[ -f $PREVIOUS_DIR/files$destination ]] &&
+      install -o root -g root -m "$mode" "$PREVIOUS_DIR/files$destination" "$destination"
+  done
+  cp -p "$PREVIOUS_DIR/VERSION" "$APP_DIR/VERSION"
+  systemctl daemon-reload
+  for suffix in "" -wal -shm -journal; do rm -f "$DB$suffix"; done
+  copy_database "$PREVIOUS_DIR/database.sqlite3" "$DB" && own_database
+  systemctl start recoverbull
+  wait_for_server ||
+    die "the previous version did not start either. Its database is in $PREVIOUS_DIR. See: sudo deploy/recoverbull logs"
+  systemctl reload-or-restart nginx
+  systemctl start "$TOR_SERVICE"
+  die "the upgrade failed and the previous version is running again. See: sudo deploy/recoverbull logs"
+}
+
+cmd_install() {
+  local canary="" database="" onion_keys=""
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      --canary) canary=${2:?--canary needs a value}; shift 2 ;;
+      --database) database=${2:?--database needs a file}; shift 2 ;;
+      --onion-keys) onion_keys=${2:?--onion-keys needs a directory}; shift 2 ;;
+      -y | --yes) YES=true; shift ;;
+      *) die "unknown option for install: $1 (see: deploy/recoverbull help)" ;;
+    esac
+  done
+  require_debian_13
+  require_build
+  [[ -z $database || -f $database ]] || die "no database at $database"
+  [[ -z $onion_keys || -f $onion_keys/hs_ed25519_secret_key ]] ||
+    die "$onion_keys has no hs_ed25519_secret_key: give the old HiddenServiceDir"
+
+  if [[ -x $BIN && -f $DB ]]; then
+    [[ -z $database && -z $onion_keys && -z $canary ]] ||
+      die "RecoverBull is already installed here; --canary, --database and --onion-keys only apply to a first install"
+    upgrade
+  else
+    first_install "$canary" "$database" "$onion_keys"
+  fi
+}
+
+line() { printf '%-16s %s\n' "$1" "$2"; }
+
+cmd_status() {
+  local ok=true unit
+  for unit in recoverbull nginx "$TOR_SERVICE"; do
+    if systemctl is-active --quiet "$unit"; then
+      line "$unit" "running"
+    else
+      line "$unit" "STOPPED"
+      ok=false
+    fi
+  done
+
+  if curl -fsS --max-time 5 http://127.0.0.1:3001/info >/dev/null 2>&1; then
+    line "server /info" "ok"
+  else
+    line "server /info" "FAILED"
+    ok=false
+  fi
+
+  local onion="" since
+  [[ -f $TOR_HS_DIR/hostname ]] && onion=$(cat "$TOR_HS_DIR/hostname")
+  since=$(systemctl show -p ActiveEnterTimestamp --value "$TOR_SERVICE")
+  if [[ -z $onion ]]; then
+    line "onion" "NO ADDRESS"
+    ok=false
+  elif curl -fsS --max-time 60 --socks5-hostname 127.0.0.1:9050 "http://$onion/info" >/dev/null 2>&1; then
+    line "onion" "ok  $onion"
+  elif [[ -n $since ]] && (($(date +%s) - $(date -d "$since" +%s) < 600)); then
+    line "onion" "starting, Tor was started less than 10 minutes ago  $onion"
+  else
+    line "onion" "UNREACHABLE  $onion"
+    ok=false
+  fi
+
+  line "version" "$(cat "$APP_DIR/VERSION" 2>/dev/null || echo unknown)"
+  line "disk" "$(df -h --output=pcent "$DATA_DIR" | tail -n 1 | tr -d ' ') used"
+  $ok
+}
+
+# nginx writes its critical errors to a file, not to the journal.
+NGINX_ERROR_LOG=/var/log/nginx/recoverbull-error.log
+
+cmd_logs() {
+  local follow=() lines=100 units=(-u recoverbull)
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      -f | --follow) follow=(--follow); shift ;;
+      --all) units=(-u recoverbull -u nginx -u "$TOR_SERVICE"); shift ;;
+      -n | --lines) lines=${2:?--lines needs a number}; shift 2 ;;
+      *) die "unknown option for logs: $1 (see: deploy/recoverbull help)" ;;
+    esac
+  done
+  [[ $lines =~ ^[0-9]+$ ]] || die "--lines needs a number"
+  if [[ ${#units[@]} -gt 2 && -s $NGINX_ERROR_LOG ]]; then
+    say "nginx errors ($NGINX_ERROR_LOG):"
+    tail -n "$lines" "$NGINX_ERROR_LOG" >&2
+  fi
+  exec journalctl --no-pager "${units[@]}" -n "$lines" "${follow[@]}"
+}
+
+main() {
+  local command=${1:-help}
+  [[ $# -eq 0 ]] || shift
+  case $command in
+    install | status | logs)
+      [[ $EUID -eq 0 ]] || exec sudo -- "$0" "$command" "$@"
+      "cmd_$command" "$@"
+      ;;
+    help | -h | --help) usage ;;
+    *)
+      usage >&2
+      exit 2
+      ;;
+  esac
+}
+
+main "$@"

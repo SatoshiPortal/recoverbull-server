@@ -1,5 +1,5 @@
-# Operator-adapted example; see deploy/README.md. Validate supported directives,
-# paths, ownership, and the complete onion route with the installed Tor build.
+# Onion service for RecoverBull. Installed by `deploy/recoverbull` at
+# /etc/tor/torrc.d/recoverbull.conf; requires Tor >= 0.4.8.
 HiddenServiceDir /var/lib/tor/recoverbull/
 HiddenServicePort 80 127.0.0.1:3000
 HiddenServiceEnableIntroDoSDefense 1

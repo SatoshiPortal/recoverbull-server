@@ -325,7 +325,7 @@ fn test_example_nginx_preserves_attempts_proxy_contract() {
 
     // The Tor example must export the per-circuit identifier the nginx real_ip
     // directive consumes, or the per-circuit keying above is inert.
-    let torrc = include_str!("../../deploy/tor/recoverbull.torrc.example");
+    let torrc = include_str!("../../deploy/tor/recoverbull.torrc");
     assert!(
         torrc.contains("HiddenServiceExportCircuitID haproxy"),
         "torrc example must export the per-circuit id as a PROXY header"

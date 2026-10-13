@@ -142,7 +142,14 @@ async fn serve() -> Duration {
         )
         .init();
 
-    let app_state = crate::app::build(crate::config::init());
+    let config = match crate::config::init() {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("Error: {error}");
+            std::process::exit(1);
+        }
+    };
+    let app_state = crate::app::build(config);
 
     if let Err(error) = app_state.initialize_storage() {
         eprintln!("Failed to initialize database: {error:?}");

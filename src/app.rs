@@ -236,7 +236,7 @@ impl AppState {
 #[cfg(test)]
 /// Test-only state constructor; this seam is excluded from release builds.
 pub(crate) fn init() -> AppState {
-    build(crate::config::init())
+    build(crate::config::init().unwrap_or_else(|error| panic!("configuration error: {error}")))
 }
 
 impl InfoState {

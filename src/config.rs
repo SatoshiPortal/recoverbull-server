@@ -8,21 +8,25 @@ use dotenvy::dotenv;
 use std::sync::Arc;
 use std::{env, fmt::Display, str::FromStr};
 
-fn optional_env<T>(name: &str, default: T) -> T
+/// Reads a required variable; absence or an unreadable value is a startup error.
+fn required_env(name: &str) -> Result<String, String> {
+    env::var(name).map_err(|error| match error {
+        env::VarError::NotPresent => format!("{name} must be set"),
+        error => format!("cannot read {name}: {error}"),
+    })
+}
+
+fn optional_env<T>(name: &str, default: T) -> Result<T, String>
 where
     T: FromStr,
     T::Err: Display,
 {
     match env::var(name) {
-        Ok(value) => value.parse().unwrap_or_else(|error| {
-            eprintln!("Error: {name} has an invalid value: {error}");
-            std::process::exit(1);
-        }),
-        Err(env::VarError::NotPresent) => default,
-        Err(error) => {
-            eprintln!("Error: cannot read {name}: {error}");
-            std::process::exit(1);
-        }
+        Ok(value) => value
+            .parse()
+            .map_err(|error| format!("{name} has an invalid value: {error}")),
+        Err(env::VarError::NotPresent) => Ok(default),
+        Err(error) => Err(format!("cannot read {name}: {error}")),
     }
 }
 
@@ -499,9 +503,11 @@ pub(crate) struct ValidatedConfig {
     pub(crate) info: InfoConfig,
 }
 
-/// Loads environment and dotenv configuration, validates every configured
-/// bound, and returns the values consumed by the application owners.
-pub fn init() -> ValidatedConfig {
+/// Loads environment and dotenv configuration and validates every configured
+/// bound. The error is the message to print before refusing to start: the
+/// function never exits the process itself, so a test gets a failed assertion
+/// rather than a dead test harness.
+pub fn init() -> Result<ValidatedConfig, String> {
     // Whether CANARY comes from the process environment must be known before
     // dotenv loads the file: dotenvy never overrides an existing variable.
     // An environment-provided canary is authoritative (file edits are
@@ -511,11 +517,10 @@ pub fn init() -> ValidatedConfig {
     // parent directory: keep it as the live canary source.
     let dotenv_path = dotenv().ok();
 
-    let server_addr: String = env::var("SERVER_ADDRESS").expect("SERVER_ADDRESS must be set");
-    let rate_limit_cooldown =
-        env::var("RATE_LIMIT_COOLDOWN").expect("RATE_LIMIT_COOLDOWN must be set");
-    let secret_max_length = env::var("SECRET_MAX_LENGTH").expect("SECRET_MAX_LENGTH must be set");
-    let canary = env::var("CANARY").expect("CANARY must be set");
+    let server_addr = required_env("SERVER_ADDRESS")?;
+    let rate_limit_cooldown = required_env("RATE_LIMIT_COOLDOWN")?;
+    let secret_max_length = required_env("SECRET_MAX_LENGTH")?;
+    let canary = required_env("CANARY")?;
     let (rate_limit_max_attempts_name, rate_limit_max_attempts) = match env::var(
         "RATE_LIMIT_MAX_ATTEMPTS",
     ) {
@@ -528,10 +533,16 @@ pub fn init() -> ValidatedConfig {
                     );
                 ("RATE_LIMIT_MAX_FAILED_ATTEMPTS", value)
             }
-            Err(env::VarError::NotPresent) => panic!("RATE_LIMIT_MAX_ATTEMPTS must be set"),
-            Err(error) => panic!("cannot read RATE_LIMIT_MAX_FAILED_ATTEMPTS: {error}"),
+            Err(env::VarError::NotPresent) => {
+                return Err("RATE_LIMIT_MAX_ATTEMPTS must be set".to_owned())
+            }
+            Err(error) => {
+                return Err(format!(
+                    "cannot read RATE_LIMIT_MAX_FAILED_ATTEMPTS: {error}"
+                ))
+            }
         },
-        Err(error) => panic!("cannot read RATE_LIMIT_MAX_ATTEMPTS: {error}"),
+        Err(error) => return Err(format!("cannot read RATE_LIMIT_MAX_ATTEMPTS: {error}")),
     };
 
     #[cfg(test)]
@@ -543,69 +554,43 @@ pub fn init() -> ValidatedConfig {
         unique_test_database()
     };
     #[cfg(not(test))]
-    let database_url = { env::var("DATABASE_URL").expect("DATABASE_URL must be set") };
+    let database_url = required_env("DATABASE_URL")?;
 
-    let rate_limit_cooldown = match rate_limit_cooldown.parse::<i64>() {
-        Ok(number) => number,
-        Err(e) => {
-            println!("Error: RATE_LIMIT_COOLDOWN must be a integer: {}", e);
-            std::process::exit(1);
-        }
-    };
+    let rate_limit_cooldown = rate_limit_cooldown
+        .parse::<i64>()
+        .map_err(|e| format!("RATE_LIMIT_COOLDOWN must be an integer: {e}"))?;
+    let secret_max_length = secret_max_length
+        .parse::<usize>()
+        .map_err(|e| format!("SECRET_MAX_LENGTH must be a usize: {e}"))?;
+    let rate_limit_max_attempts = rate_limit_max_attempts
+        .parse::<u8>()
+        .map_err(|e| format!("{rate_limit_max_attempts_name} must be a u8: {e}"))?;
 
-    let secret_max_length = match secret_max_length.parse::<usize>() {
-        Ok(number) => number,
-        Err(e) => {
-            println!("Error: SECRET_MAX_LENGTH must be a usize: {}", e);
-            std::process::exit(1);
-        }
-    };
-
-    let rate_limit_max_attempts = match rate_limit_max_attempts.parse::<u8>() {
-        Ok(number) => number,
-        Err(e) => {
-            println!("Error: {rate_limit_max_attempts_name} must be a u8: {e}");
-            std::process::exit(1);
-        }
-    };
-
-    if let Err(e) = validate_config(
+    validate_config(
         rate_limit_cooldown,
         secret_max_length,
         rate_limit_max_attempts,
-    ) {
-        println!("Error: {}", e);
-        std::process::exit(1);
-    }
+    )?;
 
     // Global write damper (optional, with defaults). Behind an onion
     // service per-IP limiting is useless, so the bucket is global.
-    let store_rate_limit_burst: f64 = optional_env("STORE_RATE_LIMIT_BURST", 10.0);
-    let store_rate_limit_refill: f64 = optional_env("STORE_RATE_LIMIT_REFILL_PER_SECOND", 2.0);
-    if let Err(e) = validate_token_bucket("STORE", store_rate_limit_burst, store_rate_limit_refill)
-    {
-        println!("Error: {e}");
-        std::process::exit(1);
-    }
+    let store_rate_limit_burst: f64 = optional_env("STORE_RATE_LIMIT_BURST", 10.0)?;
+    let store_rate_limit_refill: f64 = optional_env("STORE_RATE_LIMIT_REFILL_PER_SECOND", 2.0)?;
+    validate_token_bucket("STORE", store_rate_limit_burst, store_rate_limit_refill)?;
 
     // A second global bucket bounds identifier spraying and database reads.
     // It is deliberately independent from the per-identifier security budget.
-    let lookup_rate_limit_burst: f64 = optional_env("LOOKUP_RATE_LIMIT_BURST", 100.0);
-    let lookup_rate_limit_refill: f64 = optional_env("LOOKUP_RATE_LIMIT_REFILL_PER_SECOND", 5.0);
-    if let Err(e) =
-        validate_token_bucket("LOOKUP", lookup_rate_limit_burst, lookup_rate_limit_refill)
-    {
-        println!("Error: {e}");
-        std::process::exit(1);
-    }
+    let lookup_rate_limit_burst: f64 = optional_env("LOOKUP_RATE_LIMIT_BURST", 100.0)?;
+    let lookup_rate_limit_refill: f64 = optional_env("LOOKUP_RATE_LIMIT_REFILL_PER_SECOND", 5.0)?;
+    validate_token_bucket("LOOKUP", lookup_rate_limit_burst, lookup_rate_limit_refill)?;
 
-    let rate_limit_max_identifiers = optional_env("RATE_LIMIT_MAX_IDENTIFIERS", 100_000usize);
-    let database_max_concurrency = optional_env("DATABASE_MAX_CONCURRENCY", 16usize);
+    let rate_limit_max_identifiers = optional_env("RATE_LIMIT_MAX_IDENTIFIERS", 100_000usize)?;
+    let database_max_concurrency = optional_env("DATABASE_MAX_CONCURRENCY", 16usize)?;
     // The capacity bound is derived from a declared whole-process budget, so
     // an over-budget capacity fails at startup instead of being killed by the
     // cgroup once the map fills and a snapshot is built.
     let memory_budget_mb: usize =
-        optional_env("RATE_LIMIT_MEMORY_BUDGET_MB", DEFAULT_MEMORY_BUDGET_MB);
+        optional_env("RATE_LIMIT_MEMORY_BUDGET_MB", DEFAULT_MEMORY_BUDGET_MB)?;
     let declared_budget_bytes = memory_budget_mb.saturating_mul(1024 * 1024);
     // The declared budget is a statement of intent; the cgroup limit is what
     // the kernel will enforce. Trusting the declaration alone would leave the
@@ -626,38 +611,29 @@ pub fn init() -> ValidatedConfig {
             );
         }
     }
-    if let Err(e) = validate_capacity(
+    validate_capacity(
         rate_limit_max_identifiers,
         database_max_concurrency,
         rate_limit_max_attempts,
         memory_budget_bytes,
-    ) {
-        println!("Error: {}", e);
-        std::process::exit(1);
-    }
+    )?;
 
     // `/attempts` serves a cached snapshot; this third bucket bounds direct
     // cache-bypass traffic without consuming lookup tokens needed for
     // recovery. The reverse-proxy cache absorbs the normal read volume.
-    let attempts_rate_limit_burst: f64 = optional_env("ATTEMPTS_RATE_LIMIT_BURST", 20.0);
+    let attempts_rate_limit_burst: f64 = optional_env("ATTEMPTS_RATE_LIMIT_BURST", 20.0)?;
     let attempts_rate_limit_refill: f64 =
-        optional_env("ATTEMPTS_RATE_LIMIT_REFILL_PER_SECOND", 2.0);
-    if let Err(e) = validate_token_bucket(
+        optional_env("ATTEMPTS_RATE_LIMIT_REFILL_PER_SECOND", 2.0)?;
+    validate_token_bucket(
         "ATTEMPTS",
         attempts_rate_limit_burst,
         attempts_rate_limit_refill,
-    ) {
-        println!("Error: {e}");
-        std::process::exit(1);
-    }
+    )?;
 
-    let attempts_snapshot_ttl_seconds = optional_env("ATTEMPTS_SNAPSHOT_TTL_SECONDS", 60u64);
-    if let Err(e) = validate_snapshot_ttl(attempts_snapshot_ttl_seconds, rate_limit_cooldown) {
-        println!("Error: {e}");
-        std::process::exit(1);
-    }
+    let attempts_snapshot_ttl_seconds = optional_env("ATTEMPTS_SNAPSHOT_TTL_SECONDS", 60u64)?;
+    validate_snapshot_ttl(attempts_snapshot_ttl_seconds, rate_limit_cooldown)?;
 
-    ValidatedConfig {
+    Ok(ValidatedConfig {
         server_address: server_addr,
         storage: StorageConfig {
             database_url,
@@ -685,5 +661,5 @@ pub fn init() -> ValidatedConfig {
             canary_from_env,
             canary_path: dotenv_path.unwrap_or_else(|| std::path::PathBuf::from(".env")),
         },
-    }
+    })
 }

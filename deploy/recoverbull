@@ -105,6 +105,7 @@ check_env() {
   grep -qx 'SERVER_ADDRESS=127.0.0.1:3001' "$ENV_FILE" ||
     die "$ENV_FILE must contain SERVER_ADDRESS=127.0.0.1:3001"
   grep -q '^CANARY=.' "$ENV_FILE" || die "$ENV_FILE has no CANARY"
+  ! grep -q '^CANARY=CHANGE_ME$' "$ENV_FILE" || die "$ENV_FILE still has the placeholder canary"
 }
 
 write_env() {
@@ -113,9 +114,14 @@ write_env() {
     read -r -p "Warrant canary (shown by /info): " canary
   fi
   [[ -n $canary ]] || die "a first install needs a warrant canary: add --canary '<text>'"
-  [[ $canary != *$'\n'* && $canary != *"'"* && $canary != *'|'* ]] ||
-    die "the canary cannot contain a newline, a single quote or |"
-  sed "s|^CANARY=.*|CANARY='$canary'|" "$REPO/deploy/recoverbull.env.example" |
+  [[ $canary != *$'\n'* && $canary != *"'"* ]] ||
+    die "the canary cannot contain a newline or a single quote"
+  # Single quotes keep every other character literal for dotenvy.
+  local template_line
+  while IFS= read -r template_line; do
+    [[ $template_line == CANARY=* ]] && template_line="CANARY='$canary'"
+    printf '%s\n' "$template_line"
+  done <"$REPO/deploy/recoverbull.env.example" |
     install -o recoverbull -g recoverbull -m 0600 /dev/stdin "$ENV_FILE"
 }
 
@@ -203,7 +209,11 @@ first_install() {
   getent passwd recoverbull >/dev/null ||
     useradd --system --home-dir "$DATA_DIR" --shell /usr/sbin/nologin recoverbull
   install -d -o recoverbull -g recoverbull -m 0700 "$DATA_DIR"
-  [[ -f $ENV_FILE ]] || write_env "$canary"
+  if [[ -f $ENV_FILE ]]; then
+    [[ -z $canary ]] || warn "$ENV_FILE already exists: keeping its canary, ignoring --canary"
+  else
+    write_env "$canary"
+  fi
   check_env
 
   say "Installing RecoverBull $(checkout_version)"
@@ -419,7 +429,10 @@ main() {
   [[ $# -eq 0 ]] || shift
   case $command in
     install | status | logs)
-      [[ $EUID -eq 0 ]] || exec sudo -- "$0" "$command" "$@"
+      if [[ $EUID -ne 0 ]]; then
+        command -v sudo >/dev/null || die "run this as root"
+        exec sudo -- "$0" "$command" "$@"
+      fi
       "cmd_$command" "$@"
       ;;
     help | -h | --help) usage ;;

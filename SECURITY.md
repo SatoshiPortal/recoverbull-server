@@ -99,10 +99,11 @@ counters retain coarse activity metadata and require the same access controls.
 For deployment guardrails (single-instance, a validated reverse proxy, and Tor
 onion), see
 [docs/OPERATIONS.md](docs/OPERATIONS.md) — they are part of the
-security model, not optional hardening. Files under `deploy/` are examples and
-their installed adaptation, updates, and end-to-end validation belong to the
-operator. Tor and single-instance operation are required by the model but are
-not enforced by the binary; a public bind only produces a warning.
+security model, not optional hardening. `deploy/recoverbull` installs the
+files under `deploy/` as they are; the host, its updates, and the end-to-end
+validation of the installed service belong to the operator. Tor and
+single-instance operation are required by the model but are not enforced by
+the binary; a public bind only produces a warning.
 
 ## Clocks: which one decides what
 

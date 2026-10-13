@@ -334,7 +334,11 @@ Operators are responsible for retention of those copies.
     published `resets_at` can be misled until the entry expires. The
     conservative direction was chosen deliberately — a wrong retry hint costs
     a client one early request, whereas a wrong expiry decision costs the
-    victim its entire brute-force budget. Relatedly, monotonic time does not
+    victim its entire brute-force budget. The `Retry-After` of a `429` is
+    derived from the same wall-clock values and floored at one second, so
+    after a forward step larger than the cooldown it reads `1` for the rest
+    of the monotonic window: a compliant client then retries every second,
+    and each retry is counted in `total_requests` but admits nothing. Relatedly, monotonic time does not
     advance while the process is stopped or suspended, so entries do not
     expire during suspension; that also keeps budgets rather than resetting
     them, and matches the existing behaviour of the 24-hour wipe timer.

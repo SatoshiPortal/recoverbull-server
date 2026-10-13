@@ -1,5 +1,5 @@
-# Operator-adapted example; see deploy/README.md. Validate the installed unit,
-# resource limits, filesystem paths, journal policy, and service identity.
+# RecoverBull server unit. Installed by `deploy/recoverbull`; see docs/OPERATIONS.md.
+# Restart=no is deliberate: every restart resets the in-memory attempt budgets.
 [Unit]
 Description=RecoverBull keychain server
 After=network-online.target
@@ -27,8 +27,7 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 # safe for this process (loopback TCP to the reverse proxy, SQLite/WAL on the
 # ReadWritePaths volume, a plain multi-thread Tokio runtime). PrivateNetwork is
 # deliberately NOT set: the process must remain reachable on loopback by the
-# proxy. Validate each directive against the installed build before relying on
-# it, as deploy/README.md requires.
+# proxy.
 ProtectSystem=strict
 ProtectProc=invisible
 ProcSubset=pid

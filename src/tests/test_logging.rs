@@ -207,7 +207,7 @@ async fn test_only_a_genuine_server_error_is_logged() {
     assert_no_sensitive_values(&logs, state.info.canary_for_test());
 }
 
-/// The `304` of a conditional `GET /attempts` is the caching path the README
+/// The `304` of a conditional `GET /attempts` is the caching path docs/API.md
 /// tells clients to use, and a client may poll it continuously. Pinned on its
 /// own because misfiling exactly this status is what broke the previous
 /// design.

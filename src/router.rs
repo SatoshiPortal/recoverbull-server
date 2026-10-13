@@ -95,7 +95,7 @@ const REQUEST_TIMEOUT_RETRY_AFTER_SECS: u64 = 1;
 /// finish in time is exactly that, whatever the cause (slow storage, a held
 /// lock, a dribbled body), so it must not surface as the framework's bare
 /// `408 Request Timeout` with an empty body: that status is outside the
-/// documented set, and a client following the README is not told to retry
+/// documented set, and a client following docs/API.md is not told to retry
 /// it. Dropping the inner future cancels the handler, which refunds any
 /// reservation not yet transferred to detached storage work. Diagnostics
 /// wrap this layer and therefore record the final `503`.

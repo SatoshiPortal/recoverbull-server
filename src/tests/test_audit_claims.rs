@@ -22,8 +22,8 @@ use axum::http::StatusCode;
 #[tokio::test]
 async fn test_audit_f1_store_gives_no_existence_signal() {
     // Dedicated store bucket with no refill: the 12 stores below must not
-    // depend on the environment-provided bucket (burst defaults to 10 in the
-    // README while CI and the repo .env set 10000), otherwise the final
+    // depend on the environment-provided bucket (burst defaults to 10 in
+    // production while CI and the repo .env set 10000), otherwise the final
     // assertion fails on a 503 for a reason unrelated to the oracle.
     let app_state = crate::app::init();
     app_state

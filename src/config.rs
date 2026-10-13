@@ -153,12 +153,12 @@ pub fn validate_config(
 /// building one `/attempts` snapshot costs 1121-1254 peak bytes per entry
 /// between 10,000 and 100,000 entries at `RATE_LIMIT_MAX_ATTEMPTS=3`
 /// (100,000 entries reached 117 MB peak RSS, with a 4.01 MB gzip body — the
-/// same gzip size the audit recorded in the README). The constant is rounded
+/// same gzip size an earlier audit recorded). The constant is rounded
 /// up so the model stays conservative.
 ///
 /// It covers the map slot, the 64-byte `id_hash` allocation, the snapshot
 /// projection, the JSON serialization buffer and its growth, and the gzip
-/// encoder. See `docs/DEPLOYMENT.md` for the measurement procedure.
+/// encoder. See `docs/OPERATIONS.md` for the measurement procedure.
 pub const RATE_LIMIT_BYTES_PER_IDENTIFIER: usize = 1_100;
 
 /// Peak process bytes each retained SecretId adds to an entry.

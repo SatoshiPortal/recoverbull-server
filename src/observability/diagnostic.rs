@@ -62,7 +62,7 @@ const PRESSURE_STATUS: u16 = 503;
 /// really bought — without it an exhausted bucket writes one line per
 /// rejected request — and stating it as a rule costs one comparison instead
 /// of two buckets. Volume control for what remains belongs to the log daemon
-/// (see `docs/DEPLOYMENT.md`), which already rate-limits per service.
+/// (see `docs/OPERATIONS.md`), which already rate-limits per service.
 pub(crate) fn record(request_id: &str, route: &'static str, status: u16) {
     if status < 500 || status == PRESSURE_STATUS {
         return;

@@ -100,9 +100,8 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install the current runner nginx package
-        # This is a compatibility/smoke gate for the committed example, not a
-        # production version pin. Operators own their installed package and
-        # security-update policy, as deploy/README.md states.
+        # This is a compatibility/smoke gate for the committed configuration,
+        # not a production version pin: production uses Debian's package.
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends --yes nginx

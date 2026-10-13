@@ -8,7 +8,7 @@ The protocol is described in the [RecoverBull whitepaper and specification](http
 
 | You want to… | Read |
 |---|---|
-| Run a server, update it, back it up | [docs/OPERATIONS.md](docs/OPERATIONS.md) |
+| Run a server, upgrade it, back it up | [docs/OPERATIONS.md](docs/OPERATIONS.md) |
 | Write a client | [docs/API.md](docs/API.md) |
 | Review or audit the security model | [SECURITY.md](SECURITY.md) |
 

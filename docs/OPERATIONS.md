@@ -71,7 +71,7 @@ sudo deploy/recoverbull install
 
 It lists the files that changed and asks before stopping anything (`--yes` to skip the question). Then it stops Tor and the server, keeps a copy of the current version and database in `/var/lib/recoverbull/previous-version/`, installs the new files, migrates the database, and starts everything again.
 
-If the new version fails to start, it puts the previous one back, with its database, and tells you. If nothing changed, it does nothing.
+If the new version fails to start, it puts the previous one back, with its database, and tells you. One reason this happens: a new version needs a setting that your `.env` does not have yet. The script never edits `.env`; read the logs, add the setting, and run the install again. If nothing changed, it does nothing.
 
 ## Backups
 

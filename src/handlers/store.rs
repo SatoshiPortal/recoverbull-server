@@ -9,9 +9,6 @@ use crate::app::AppState;
 use crate::http::{contract::StoreSecret, error::retry_after_response};
 use crate::recovery::service::{StoreCommand, StoreResult};
 
-/// Advisory backoff for pressure that has no deadline to derive (a busy
-/// database): "try again shortly". Bucket refusals carry their own estimate.
-const DATABASE_BUSY_RETRY_AFTER_SECS: u64 = 1;
 /// Storage pressure clears only when an operator intervenes, so a client
 /// gains nothing by retrying every second.
 const STORAGE_PRESSURE_RETRY_AFTER_SECS: u64 = 60;
@@ -43,7 +40,7 @@ pub async fn store_secret(
         ),
         StoreResult::DatabaseBusy => retry_after_response(
             StatusCode::SERVICE_UNAVAILABLE,
-            DATABASE_BUSY_RETRY_AFTER_SECS,
+            crate::rate_limit::ADVISORY_RETRY_AFTER_SECS,
             "Database busy, retry later",
         ),
         StoreResult::StoragePressure => retry_after_response(

@@ -10,10 +10,7 @@ use crate::http::contract::{FetchSecret, LookupSuccessResponse, ResponseFailedAt
 use crate::http::error::retry_after_response;
 use crate::recovery::service::{LookupCommand, LookupKind, LookupResult};
 
-/// Advisory backoff for pressure that has no deadline to derive (a full
-/// identifier map, a pending duplicate, a busy database): "try again
-/// shortly". Bucket refusals carry their own estimate.
-const ADVISORY_RETRY_AFTER_SECS: u64 = 1;
+use crate::rate_limit::ADVISORY_RETRY_AFTER_SECS;
 
 /// Performs a non-destructive authenticated lookup.
 pub async fn fetch_secret(

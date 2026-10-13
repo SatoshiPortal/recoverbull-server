@@ -316,7 +316,7 @@ impl RecoveryService {
             )
             .await;
         match admission {
-            Admission::Saturated {} => {
+            Admission::Saturated => {
                 self.counters.lookup_map_capacity();
                 LookupResult::Capacity
             }
@@ -408,8 +408,8 @@ impl RecoveryService {
         // generation finalization even if the HTTP handler is cancelled.
         let task = tokio::spawn(async move {
             let database_result = tokio::task::spawn_blocking(move || match kind {
-                LookupKind::Fetch => operation.fetch(operation_secret_id.clone()),
-                LookupKind::Trash => operation.trash(operation_secret_id.clone()),
+                LookupKind::Fetch => operation.fetch(operation_secret_id),
+                LookupKind::Trash => operation.trash(operation_secret_id),
             })
             .await;
             let final_result = match database_result {

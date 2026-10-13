@@ -4,10 +4,8 @@
 //! retain their permit through blocking work and trash uses an immediate
 //! transaction.
 
-use crate::schema::secret::dsl::*;
-
 use crate::config::StorageConfig;
-use crate::schema::secret::*;
+use crate::schema::secret::dsl::*;
 use std::sync::Arc;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 

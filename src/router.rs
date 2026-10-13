@@ -83,10 +83,6 @@ pub(crate) fn new_with_limits(
         .layer(from_fn(diagnostic_middleware))
 }
 
-/// Advisory backoff for an expired request: there is no deadline to derive,
-/// only "the server could not finish in time, try again shortly".
-const REQUEST_TIMEOUT_RETRY_AFTER_SECS: u64 = 1;
-
 /// Bounds one request's total duration, body reads included, and answers an
 /// expired request with the contractual service-pressure response.
 ///
@@ -112,7 +108,7 @@ async fn request_timeout_middleware(
             counters.request_timeout();
             crate::http::error::retry_after_response(
                 axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                REQUEST_TIMEOUT_RETRY_AFTER_SECS,
+                crate::rate_limit::ADVISORY_RETRY_AFTER_SECS,
                 "Request timed out, retry later",
             )
         }

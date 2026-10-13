@@ -30,10 +30,6 @@ where
     }
 }
 
-/// Builds a database path unique to this call, under the OS temp directory.
-/// Every test calls `app::init()`, so each test gets its own SQLite file:
-/// without this, all tests shared a single file and ran into each other's
-/// data under `cargo test`'s parallel execution.
 #[cfg(test)]
 /// Test-only lifetime guard for an isolated SQLite database and its sidecars;
 /// `cfg(test)` excludes this parallel-test seam from release builds.
@@ -56,7 +52,11 @@ impl Drop for TestDatabaseGuard {
 }
 
 #[cfg(test)]
-/// Test-only unique database allocation; each guard removes SQLite sidecars on drop.
+/// Builds a database path unique to this call, under the OS temp directory.
+/// Every test calls `app::init()`, so each test gets its own SQLite file:
+/// without this, all tests shared a single file and ran into each other's
+/// data under `cargo test`'s parallel execution. The guard removes the file
+/// and its sidecars on drop.
 pub(crate) fn unique_test_database() -> (String, Arc<TestDatabaseGuard>) {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let count = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

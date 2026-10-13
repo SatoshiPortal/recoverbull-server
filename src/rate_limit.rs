@@ -2,11 +2,13 @@
 
 use std::time::Instant;
 
-/// Smallest backoff ever advertised. A rounded-up estimate below one second
-/// would tell a client to retry immediately at the boundary. A bucket without
-/// refill has no deadline at all and gets this advisory value; startup
-/// refuses such a configuration, so that case is reachable only from a test.
-const ADVISORY_RETRY_AFTER_SECS: u64 = 1;
+/// Smallest backoff ever advertised, and the value for every refusal that has
+/// no deadline to derive (request timeout, busy database, full identifier
+/// map, pending duplicate): "try again shortly". A rounded-up bucket
+/// estimate below one second would otherwise tell a client to retry
+/// immediately at the boundary; a bucket without refill has no deadline at
+/// all and gets this value too, though startup refuses such a configuration.
+pub(crate) const ADVISORY_RETRY_AFTER_SECS: u64 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Outcome of one admission attempt, decided under the bucket owner's lock.

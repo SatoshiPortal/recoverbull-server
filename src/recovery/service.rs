@@ -135,14 +135,6 @@ impl RecoveryService {
     }
 
     #[cfg(test)]
-    /// Test-only initialization seam; excluded from release builds.
-    pub(crate) fn initialize_for_test(
-        &self,
-    ) -> Result<(), crate::storage::sqlite::ConnectionSetupError> {
-        self.storage.initialize()
-    }
-
-    #[cfg(test)]
     pub(crate) fn storage_pressure_for_test(&self) -> bool {
         self.storage_pressure.load(Ordering::Relaxed)
     }

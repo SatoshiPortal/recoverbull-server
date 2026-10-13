@@ -67,7 +67,7 @@ async fn test_info_rereads_canary_from_file_with_startup_fallback() {
         .info
         .set_canary_reread_interval_for_test(std::time::Duration::ZERO);
     let canary_path = std::env::temp_dir().join(format!(
-        "keychain-test-info-canary-{}-{}",
+        "recoverbull-test-info-canary-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -108,7 +108,7 @@ async fn test_info_rereads_same_length_canary_when_file_metadata_is_restored() {
         .info
         .set_canary_reread_interval_for_test(std::time::Duration::ZERO);
     let canary_path = std::env::temp_dir().join(format!(
-        "keychain-test-info-canary-metadata-{}-{}",
+        "recoverbull-test-info-canary-metadata-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -150,7 +150,7 @@ async fn test_info_env_canary_is_authoritative_over_file() {
         .info
         .set_canary_reread_interval_for_test(std::time::Duration::ZERO);
     let canary_path = std::env::temp_dir().join(format!(
-        "keychain-test-info-canary-env-{}-{}",
+        "recoverbull-test-info-canary-env-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -176,7 +176,7 @@ async fn test_info_serves_a_cached_canary_and_advertises_its_freshness() {
     let mut state = crate::app::init();
     state.info.set_canary_from_env_for_test(false);
     let canary_path = std::env::temp_dir().join(format!(
-        "keychain-test-info-canary-freshness-{}-{}",
+        "recoverbull-test-info-canary-freshness-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -255,7 +255,7 @@ async fn test_concurrent_info_refresh_reads_the_canary_once() {
         .info
         .set_canary_read_delay_for_test(std::time::Duration::from_millis(50));
     let canary_path = std::env::temp_dir().join(format!(
-        "keychain-test-info-canary-single-flight-{}-{}",
+        "recoverbull-test-info-canary-single-flight-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

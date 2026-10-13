@@ -63,10 +63,10 @@ def run_database_check(
 
 def main() -> None:
     if len(sys.argv) != 2:
-        raise SystemExit("usage: test_sqlite_backup.py /path/to/keychain")
+        raise SystemExit("usage: test_sqlite_backup.py /path/to/recoverbull")
     binary = Path(sys.argv[1]).resolve()
     if not binary.is_file():
-        raise SystemExit(f"keychain binary does not exist: {binary}")
+        raise SystemExit(f"recoverbull binary does not exist: {binary}")
     migration_versions = tuple(
         path.name.split("_", 1)[0]
         for path in sorted((ROOT.parent.parent / "migrations").iterdir())

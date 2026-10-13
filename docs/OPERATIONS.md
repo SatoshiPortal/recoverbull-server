@@ -3,7 +3,7 @@
 One Debian 13 host runs three services. Clients only ever reach it through Tor:
 
 ```
-Tor onion service ──► nginx 127.0.0.1:3000 ──► keychain 127.0.0.1:3001 ──► SQLite
+Tor onion service ──► nginx 127.0.0.1:3000 ──► recoverbull 127.0.0.1:3001 ──► SQLite
   (tor@default)        per-circuit limits,       (recoverbull.service)     /var/lib/recoverbull
                        /attempts cache
 ```

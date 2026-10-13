@@ -25,7 +25,7 @@ jobs:
       - name: Build database checker
         run: cargo build --locked
       - name: Test SQLite backup procedure
-        run: python3 deploy/backup/test_sqlite_backup.py target/debug/keychain
+        run: python3 deploy/backup/test_sqlite_backup.py target/debug/recoverbull
 
   lint:
     runs-on: ubuntu-latest

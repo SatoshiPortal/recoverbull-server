@@ -1,7 +1,7 @@
 # RecoverBull server unit. Installed by `deploy/recoverbull`; see docs/OPERATIONS.md.
 # Restart=no is deliberate: every restart resets the in-memory attempt budgets.
 [Unit]
-Description=RecoverBull keychain server
+Description=RecoverBull server
 After=network-online.target
 Wants=network-online.target
 
@@ -10,7 +10,7 @@ Type=simple
 User=recoverbull
 Group=recoverbull
 WorkingDirectory=/var/lib/recoverbull
-ExecStart=/opt/recoverbull/bin/keychain
+ExecStart=/opt/recoverbull/bin/recoverbull
 Restart=no
 TimeoutStopSec=40s
 LimitCORE=0

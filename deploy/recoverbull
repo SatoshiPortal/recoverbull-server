@@ -5,7 +5,7 @@ set -Eeuo pipefail
 umask 077
 
 APP_DIR=/opt/recoverbull
-BIN=$APP_DIR/bin/keychain
+BIN=$APP_DIR/bin/recoverbull
 DATA_DIR=/var/lib/recoverbull
 ENV_FILE=$DATA_DIR/.env
 DB=$DATA_DIR/database.sqlite3
@@ -21,7 +21,7 @@ YES=false
 
 # Files copied from the checkout, as "source:destination:mode".
 MANAGED_FILES=(
-  "target/release/keychain:$BIN:0755"
+  "target/release/recoverbull:$BIN:0755"
   "deploy/systemd/recoverbull.service:$UNIT:0644"
   "deploy/nginx/recoverbull.conf:$NGINX_CONF:0644"
   "deploy/tor/recoverbull.torrc:$TOR_CONF:0644"
@@ -83,7 +83,7 @@ require_debian_13() {
 }
 
 require_build() {
-  local built=$REPO/target/release/keychain
+  local built=$REPO/target/release/recoverbull
   [[ -x $built ]] || die "build it first, as your user: cargo build --release --locked"
   local stale
   stale=$(find "$REPO/src" "$REPO/migrations" "$REPO/Cargo.toml" "$REPO/Cargo.lock" "$REPO/build.rs" \

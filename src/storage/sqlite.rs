@@ -138,7 +138,7 @@ impl SqliteStorage {
 
 /// Validates an already-initialized database for the restore drill.
 ///
-/// A restore drill points `keychain check-database` at a RESTORED copy, which
+/// A restore drill points `recoverbull check-database` at a RESTORED copy, which
 /// already carries the schema of the live database it was backed up from. An
 /// empty or truncated file has no `secret` table; letting the shared
 /// initialization create one would report a brand-new or damaged file as a
@@ -171,7 +171,7 @@ pub(crate) fn check_database(database_url: String) -> Result<(), ConnectionSetup
 
 /// Applies the exact database initialization used by server startup.
 ///
-/// The restore drill invokes this through `keychain check-database` on the
+/// The restore drill invokes this through `recoverbull check-database` on the
 /// restored copy, so an independent Python schema approximation cannot be
 /// the final authority on whether this application can open and migrate it.
 pub(crate) fn initialize_database(database_url: String) -> Result<(), ConnectionSetupError> {

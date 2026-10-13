@@ -40,6 +40,8 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Clippy
         run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Shellcheck the deploy script
+        run: shellcheck deploy/recoverbull
 
   build:
     runs-on: ubuntu-latest

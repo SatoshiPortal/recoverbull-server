@@ -162,9 +162,16 @@ async fn serve() -> Duration {
 
     let app = router::new(app_state.clone());
 
-    let listener = tokio::net::TcpListener::bind(app_state.server_address())
-        .await
-        .unwrap();
+    let listener = match tokio::net::TcpListener::bind(app_state.server_address()).await {
+        Ok(listener) => listener,
+        Err(error) => {
+            eprintln!(
+                "Error: cannot listen on {}: {error}",
+                app_state.server_address()
+            );
+            std::process::exit(1);
+        }
+    };
     warn_unless_loopback(listener.local_addr());
     let (shutdown_trigger, shutdown_request) = tokio::sync::oneshot::channel();
     let server = axum::serve(listener, app)

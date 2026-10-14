@@ -109,7 +109,7 @@ What to watch:
 - **Disk.** Each stored secret is a few hundred bytes, but a sustained `/store` flood can grow the database by up to about 90 MB per day. Alert at 70% use and never let the disk fill up: the server must keep accepting writes. A dedicated volume for `/var/lib/recoverbull` keeps a flood from filling the system disk.
 - **The five-minute counter line** in the logs (`sudo deploy/recoverbull logs`). `lookup_rate_limited`, `database_busy`, `database_error` and `request_timeout` should stay near zero.
 - **The service being down.** It does not restart on its own (rule 4).
-- **`store_storage_pressure` in the counter line, or clients reporting `503` on `/store` only.** A store failed on storage (full disk, quota, unwritable or damaged file) and the server now refuses every store until restarted, on purpose: answering some of them would reveal which backups exist. Fix the cause, check the database with `check-database`, then restart.
+- **`store_storage_pressure` in the counter line, or clients reporting `503` on `/store` only.** Either the data volume is below `STORAGE_RESERVE_MB` of free space (stores resume by themselves once space is freed), or a store failed on storage (quota, unwritable or damaged file) and the server refuses every store until restarted, on purpose: answering some of them would reveal which backups exist. Fix the cause, check the database with `check-database`, then restart.
 
 The server logs one line per server error and one summary every five minutes, never request contents. journald limits each service to 10,000 lines per 30 seconds by default; to tighten it, add a drop-in and restart the service:
 
@@ -134,6 +134,7 @@ Debian security updates for Tor and nginx install automatically through `unatten
 | `ATTEMPTS_SNAPSHOT_TTL_SECONDS` | 60 | How long one `/attempts` snapshot is reused |
 | `RATE_LIMIT_MAX_IDENTIFIERS` | 100000 | Identifiers tracked at once; more get `503` |
 | `RATE_LIMIT_MEMORY_BUDGET_MB` | 512 | Keep equal to `MemoryMax=` in the systemd unit |
+| `STORAGE_RESERVE_MB` | 64 | Free space on the data volume below which `/store` answers `503`; 0 disables it |
 | `DATABASE_MAX_CONCURRENCY` | 16 | Parallel database operations |
 
 The server checks every value at startup and refuses to start, with an explicit message, if one is out of bounds or if the identifier capacity does not fit the memory budget. The older name `RATE_LIMIT_MAX_FAILED_ATTEMPTS` is still accepted for `RATE_LIMIT_MAX_ATTEMPTS`, with a warning.

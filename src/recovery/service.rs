@@ -107,6 +107,11 @@ pub(crate) struct RecoveryService {
     /// Set once a store fails on storage and never cleared: `/store` then
     /// refuses uniformly until a restart (AUD-2026-10-01).
     storage_pressure: Arc<AtomicBool>,
+    /// Free bytes on the data volume below which `/store` is refused before
+    /// any database work; zero disables the check.
+    storage_reserve_bytes: Arc<std::sync::atomic::AtomicU64>,
+    #[cfg(test)]
+    free_space_override: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl RecoveryService {
@@ -131,7 +136,44 @@ impl RecoveryService {
             counters,
             max_secret_length: config.secret_max_length,
             storage_pressure: Arc::new(AtomicBool::new(false)),
+            storage_reserve_bytes: Arc::new(std::sync::atomic::AtomicU64::new(
+                config.storage_reserve_bytes,
+            )),
+            #[cfg(test)]
+            free_space_override: Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX)),
         }
+    }
+
+    /// Free bytes available to this process on the data volume, or `None`
+    /// when the volume cannot be queried. An unqueryable volume is left to
+    /// the write itself: its failure is existence-independent and latches.
+    fn free_space_bytes(&self) -> Option<u64> {
+        #[cfg(test)]
+        {
+            let forced = self.free_space_override.load(Ordering::Relaxed);
+            if forced != u64::MAX {
+                return Some(forced);
+            }
+        }
+        let stats = rustix::fs::statvfs(self.storage.data_directory()).ok()?;
+        Some(stats.f_bavail.saturating_mul(stats.f_frsize))
+    }
+
+    /// Whether the data volume is below the reserve: a refusal that depends
+    /// on free space alone, never on the row being stored.
+    fn storage_below_reserve(&self) -> bool {
+        let reserve = self.storage_reserve_bytes.load(Ordering::Relaxed);
+        reserve > 0 && self.free_space_bytes().is_some_and(|free| free < reserve)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_free_space_for_test(&self, bytes: u64) {
+        self.free_space_override.store(bytes, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_storage_reserve_for_test(&self, bytes: u64) {
+        self.storage_reserve_bytes.store(bytes, Ordering::Relaxed);
     }
 
     #[cfg(test)]
@@ -166,10 +208,12 @@ impl RecoveryService {
             self.counters.store_rejected();
             return StoreResult::Invalid("encrypted_secret should be base64 encoded".to_owned());
         }
-        // Uniform refusal once storage has failed: the answer no longer
-        // depends on whether the row exists, which is the oracle the write
-        // path closes for the first failure and this gate for every later one.
-        if self.storage_pressure.load(Ordering::Relaxed) {
+        // Uniform refusal while the volume is near full or once storage has
+        // failed: the answer then depends on free space alone, never on
+        // whether the row exists. The reserve keeps the point where a
+        // rewrite still fits but an insert does not from ever being reached
+        // on a filling volume; the latch covers what the reserve cannot see.
+        if self.storage_pressure.load(Ordering::Relaxed) || self.storage_below_reserve() {
             self.counters.store_storage_pressure();
             return StoreResult::StoragePressure;
         }

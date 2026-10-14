@@ -103,6 +103,16 @@ impl SqliteStorage {
         }
     }
 
+    /// The directory holding the database, where free space decides whether
+    /// a store may proceed.
+    pub(crate) fn data_directory(&self) -> std::path::PathBuf {
+        let path = std::path::Path::new(&self.database_url);
+        match path.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+            _ => std::path::PathBuf::from("."),
+        }
+    }
+
     pub(crate) async fn acquire(&self) -> Result<SqliteOperation, StorageError> {
         let permit = tokio::time::timeout(
             std::time::Duration::from_secs(1),

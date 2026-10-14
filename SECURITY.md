@@ -494,7 +494,7 @@ code, keep the invariant — and run the guarding test.
 | Invariant | Owner | Why | Guarding test(s) |
 |---|---|---|---|
 | `/store` is idempotent: fresh and duplicate return the same `201`, never overwrite | `RecoveryService::store`, `SqliteOperation::store` | F1: duplicate `403` was an unthrottled `authentication_key` oracle | `test_audit_f1_store_gives_no_existence_signal`, `test_duplicate_store_is_indistinguishable_and_does_not_overwrite`, `test_concurrent_identical_store_is_idempotent` |
-| A `/store` for an existing row commits a real write, and the first storage failure latches every later `/store` into a uniform `503`; a locked database stays a retryable `503` and does not latch | `sqlite::write`, `RecoveryService::store` (`storage_pressure`) | AUD-2026-10-01: a no-op insert needs no storage, so on a full volume an existing `secret_id` got `201` while a new one got `500`, an existence oracle outside the per-identifier budget | `test_store_of_an_existing_secret_id_is_a_real_write`, `test_store_latches_closed_after_a_storage_failure`, `test_a_locked_database_does_not_latch_store_closed` |
+| `/store` is refused with a uniform `503` below the free-space reserve and after the first storage failure (latched until restart); a store for an existing row commits a real write; a locked database stays a retryable `503` and does not latch | `sqlite::write`, `RecoveryService::store` (`storage_below_reserve`, `storage_pressure`) | AUD-2026-10-01: a no-op insert needs no storage, so on a full volume an existing `secret_id` got `201` while a new one got `500`, an existence oracle outside the per-identifier budget | `test_store_of_an_existing_secret_id_is_a_real_write`, `test_store_latches_closed_after_a_storage_failure`, `test_a_locked_database_does_not_latch_store_closed`, `test_store_is_refused_below_the_reserve_whether_or_not_the_row_exists` |
 | Rate-limit check-and-increment is atomic under one lock | `attempts::ledger::admit` | Concurrent requests otherwise overshoot the budget | `test_rate_limit_holds_under_concurrency` |
 | Every distinct `secret_id` consumes budget, hits and misses included; committed replays are free only before saturation and never extend cooldown | `attempts::ledger::admit` | Planted rows must not bypass the budget, while identical replays improve availability | `test_replaying_one_valid_secret_id_does_not_consume_more_slots`, `test_replaying_one_invalid_secret_id_does_not_consume_more_slots`, `test_replaying_one_secret_id_does_not_slide_resets_at`, `test_audit_f1_planted_rows_cannot_reset_fetch_rate_limit` |
 | Reaching `max` consumed slots returns `429` before membership/DB for known, Pending, and Committed values | `attempts::ledger::admit` | Saturation must not become an authentication oracle | `test_known_secret_id_is_rejected_when_the_budget_is_full`, `test_distinct_planted_secret_ids_consume_capacity`, `test_pending_distinct_secret_ids_consume_the_budget` |
@@ -598,16 +598,23 @@ code, keep the invariant — and run the guarding test.
   file cannot grow (quota, `RLIMIT_FSIZE`, full volume), `/store` answered
   `201` for an existing `secret_id` and `500` for a new one, an existence
   oracle that bypasses the per-identifier budget because `/store` never
-  consults the ledger; reproduced on the binary with `RLIMIT_FSIZE`. Fixed
-  in two layers: a store for an existing row now rewrites it, so it needs the
-  same WAL space as a new row and fails with it; and the first storage
-  failure latches `/store` closed (`503`, `Retry-After: 60`) until a restart;
-  a request that finishes after the latch is refused too, so the only true
-  answers that leave the window are those of the requests already in
-  flight when it closed, at most a store burst, and the one `500` that
-  tripped it is what the operator sees. SQLite's "database is locked" is classified as contention
-  and does not latch. `/fetch` and `/trash` are unaffected: recovery keeps
-  working on a full disk. AUD-02 (medium)
+  consults the ledger; reproduced on the binary with `RLIMIT_FSIZE`.
+  Mitigated in three layers, with a stated residual: (1) below
+  `STORAGE_RESERVE_MB` of free space on the data volume (64 MB by default)
+  every `/store` is refused with `503` before any database work, so on a
+  filling volume the point where a rewrite still fits but an insert does
+  not is never reached; (2) a store for an existing row rewrites it, so it
+  needs WAL space like a new row; (3) the first storage failure latches
+  `/store` closed (`503`, `Retry-After: 60`) until a restart, and a request
+  that finishes after the latch is refused too. Residual: a limit the
+  volume does not report, such as a per-process `RLIMIT_FSIZE` or a quota
+  invisible to `statvfs`, can still let one existing `secret_id` answer
+  `201` before the first failure latches the process, since a rewrite can
+  need fewer WAL frames than an insert (a page split); the requests already
+  in flight when the latch closes keep their answers too. SQLite's
+  "database is locked" is classified as contention and does not latch.
+  `/fetch` and `/trash` are unaffected: recovery keeps working on a full
+  disk. AUD-02 (medium)
   — the runbook's staged PROXY-protocol upgrade was wrong in both orders;
   absorbed above. AUD-03 (low) — the runbook's `curl :3000` smoke could never
   pass behind `proxy_protocol`; the runbook was replaced by

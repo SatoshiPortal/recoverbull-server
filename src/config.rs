@@ -472,6 +472,9 @@ pub(crate) struct RecoveryConfig {
     pub(crate) lookup_rate_limit_burst: f64,
     pub(crate) lookup_rate_limit_refill: f64,
     pub(crate) secret_max_length: usize,
+    /// Free space on the data volume below which every `/store` is refused
+    /// before any database work (AUD-2026-10-01).
+    pub(crate) storage_reserve_bytes: u64,
 }
 
 #[derive(Clone)]
@@ -586,6 +589,11 @@ pub fn init() -> Result<ValidatedConfig, String> {
 
     let rate_limit_max_identifiers = optional_env("RATE_LIMIT_MAX_IDENTIFIERS", 100_000usize)?;
     let database_max_concurrency = optional_env("DATABASE_MAX_CONCURRENCY", 16usize)?;
+    // Refusing stores while the volume still has room keeps the point where
+    // a rewrite fits but an insert does not, the last existence signal under
+    // storage pressure, out of reach. Zero disables the gate.
+    let storage_reserve_mb: u64 = optional_env("STORAGE_RESERVE_MB", 64u64)?;
+    let storage_reserve_bytes = storage_reserve_mb.saturating_mul(1024 * 1024);
     // The capacity bound is derived from a declared whole-process budget, so
     // an over-budget capacity fails at startup instead of being killed by the
     // cgroup once the map fills and a snapshot is built.
@@ -647,6 +655,7 @@ pub fn init() -> Result<ValidatedConfig, String> {
             lookup_rate_limit_burst,
             lookup_rate_limit_refill,
             secret_max_length,
+            storage_reserve_bytes,
         },
         attempts: AttemptsConfig {
             rate_limit_cooldown_minutes: rate_limit_cooldown,

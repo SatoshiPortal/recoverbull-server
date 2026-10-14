@@ -25,6 +25,8 @@ hex = "0.4.3"
 # validates short inputs, so it would add unaudited unsafe code for nothing.
 base64 = { version = "0.23.1", default-features = false, features = ["std"] }
 tracing = "0.1"
+# Free-space probe for the /store pressure gate; std has no statvfs.
+rustix = { version = "1.1.5", default-features = false, features = ["std", "fs"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 flate2 = "1.1"
 

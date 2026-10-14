@@ -145,3 +145,48 @@ async fn test_a_locked_database_does_not_latch_store_closed() {
     assert_eq!(counters.database_busy, 1);
     assert_eq!(counters.store_storage_pressure, 0);
 }
+
+/// Below the free-space reserve every store is refused before any database
+/// work, so the answer depends on free space alone, never on the row.
+#[tokio::test]
+async fn test_store_is_refused_below_the_reserve_whether_or_not_the_row_exists() {
+    let (server, state) = crate::tests::test_server::new_test_server().await;
+    let existing = distinct_authentication_key(1);
+    let fresh = distinct_authentication_key(2);
+    assert_eq!(
+        store(&server, &existing).await.status_code(),
+        StatusCode::CREATED
+    );
+
+    state.recovery.set_free_space_for_test(63 * 1024 * 1024);
+    for key in [&existing, &fresh] {
+        let response = store(&server, key).await;
+        assert_eq!(response.status_code(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.header("retry-after"), "60");
+    }
+    assert!(
+        !state.recovery.storage_pressure_for_test(),
+        "the reserve refuses without latching: stores resume once space is freed"
+    );
+    assert_eq!(state.counters.flush().store_storage_pressure, 2);
+
+    state.recovery.set_free_space_for_test(65 * 1024 * 1024);
+    assert_eq!(
+        store(&server, &fresh).await.status_code(),
+        StatusCode::CREATED
+    );
+}
+
+/// `STORAGE_RESERVE_MB=0` disables the reserve.
+#[tokio::test]
+async fn test_reserve_can_be_disabled() {
+    let (server, state) = crate::tests::test_server::new_test_server().await;
+    state.recovery.set_free_space_for_test(0);
+    state.recovery.set_storage_reserve_for_test(0);
+    assert_eq!(
+        store(&server, &distinct_authentication_key(1))
+            .await
+            .status_code(),
+        StatusCode::CREATED
+    );
+}

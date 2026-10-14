@@ -34,7 +34,7 @@ Every `429` and `503` carries `Retry-After` in seconds:
 
 - from a global bucket (`/store`, lookups, `/attempts`): the server's estimate of its next token, at least 1;
 - busy database, full identifier map, pending duplicate, request timeout: an advisory `1`;
-- **storage pressure**: once a `/store` has failed because storage could not be written (full or unwritable volume), every later `/store` answers `503` with `Retry-After: 60` until an operator restarts the server, whether or not the `secret_id` exists. `/fetch` and `/trash` keep working.
+- **storage pressure**: while the data volume has less free space than the server's reserve (64 MB by default), and once a `/store` has failed because storage could not be written, `/store` answers `503` with `Retry-After: 60` whether or not the `secret_id` exists; after a failure this lasts until an operator restarts the server. `/fetch` and `/trash` keep working.
 
 Framework rejections such as `404`, `405`, `413` and `415` may not be JSON.
 

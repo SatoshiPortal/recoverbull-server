@@ -436,7 +436,7 @@ cmd_status() {
 
   line "version" "$(cat "$APP_DIR/VERSION" 2>/dev/null || echo unknown)"
   line "disk" "$(df -h --output=pcent "$DATA_DIR" | tail -n 1 | tr -d ' ') used"
-  $ok
+  $ok || exit 1
 }
 
 # nginx writes its critical errors to a file, not to the journal.

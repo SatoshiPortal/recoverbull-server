@@ -203,25 +203,26 @@ require_service_owned_database() {
     die "$DB is not owned by recoverbull: refusing to read it"
 }
 
-# Copies an SQLite database with the online backup API, so a -wal file next to
-# the source is included. Any schema is accepted here: check-database adopts or
-# refuses it with the server's own rules. The target is created fresh
-# (O_EXCL: anything already there, a link included, makes it fail) and this
+# Copies a database with the server binary's own `backup`: one consistent
+# snapshot, -wal rows included, any schema, never migrated. The binary
+# refuses to write over or through anything already at the target: this
 # script never removes a database to make room for another.
 copy_database() {
-  [[ $(realpath -m -- "$1") != $(realpath -m -- "$2") ]] ||
-    die "$1 is already the live database: nothing to import"
-  refuse_links "$2"
-  python3 - "$1" "$2" <<'PY'
-import os, sqlite3, sys, urllib.parse
-source_uri = "file:" + urllib.parse.quote(os.path.abspath(sys.argv[1])) + "?mode=ro"
-target = sys.argv[2]
-os.close(os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600))
-source = sqlite3.connect(source_uri, uri=True)
-destination = sqlite3.connect(target)
-source.backup(destination)
-destination.close()
-PY
+  local binary=$1 source=$2 target=$3
+  [[ $(realpath -m -- "$source") != $(realpath -m -- "$target") ]] ||
+    die "$source is already the live database: nothing to import"
+  refuse_links "$target"
+  "$binary" backup "$source" "$target" >/dev/null
+}
+
+# Validates .env with the rules of the given binary, from the data directory
+# as the service would read it, with nothing inherited from this shell.
+check_config() {
+  local binary=$1 output
+  output=$(env -i -C "$DATA_DIR" "$binary" check-config 2>&1) || {
+    printf '%s\n' "$output" >&2
+    die "$ENV_FILE is not valid for this version; fix it and run again"
+  }
 }
 
 own_database() {
@@ -243,7 +244,7 @@ first_install() {
   require_database_or_no_copies
   say "Installing packages"
   apt-get update -qq
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq tor nginx python3 curl unattended-upgrades >/dev/null
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq tor nginx curl unattended-upgrades >/dev/null
 
   getent passwd recoverbull >/dev/null ||
     useradd --system --home-dir "$DATA_DIR" --shell /usr/sbin/nologin recoverbull
@@ -257,6 +258,7 @@ first_install() {
 
   say "Installing RecoverBull $(checkout_version)"
   install_files
+  check_config "$BIN"
   # Debian's default site listens publicly on port 80; this host needs no public listener.
   rm -f /etc/nginx/sites-enabled/default
   validate_config
@@ -265,8 +267,7 @@ first_install() {
     [[ ! -e $DB ]] ||
       die "$DB already exists: move it away yourself before importing another database"
     say "Importing $database"
-    refuse_links "$DB"
-    copy_database "$database" "$DB"
+    copy_database "$BIN" "$database" "$DB"
     own_database
     check_database
   fi
@@ -350,6 +351,7 @@ upgrade() {
     return 0
   fi
   check_env
+  check_config "$REPO/target/release/recoverbull"
   require_service_owned_database
 
   say "Upgrade $from -> $to, replacing:"
@@ -366,7 +368,9 @@ upgrade() {
     mv "$PREVIOUS_DIR" "$PREVIOUS_DIR.$(date -u +%Y%m%dT%H%M%SZ)"
   fi
   install -d -o root -g root -m 0700 "$PREVIOUS_DIR"
-  copy_database "$DB" "$PREVIOUS_DIR/database.sqlite3"
+  # The new binary makes the copy: the installed one may predate `backup`.
+  # It does not migrate, so the copy still opens with the previous version.
+  copy_database "$REPO/target/release/recoverbull" "$DB" "$PREVIOUS_DIR/database.sqlite3"
   # A read-only open after an unclean stop can leave a root-owned -shm.
   own_database
   local entry source destination mode

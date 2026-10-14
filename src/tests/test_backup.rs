@@ -96,6 +96,18 @@ fn test_backup_never_overwrites_or_follows_a_link() {
     assert_eq!(std::fs::read(&target).unwrap(), b"not yours");
     let _ = std::fs::remove_file(&target);
     let _ = std::fs::remove_file(format!("{}-wal", linked.display()));
+
+    // A dangling link planted at the destination itself: O_EXCL refuses it,
+    // so nothing is created at the link's target.
+    let (dangling, _dangling_guard) = fresh_destination();
+    let elsewhere = PathBuf::from(format!("{}-elsewhere", dangling.display()));
+    std::os::unix::fs::symlink(&elsewhere, &dangling).unwrap();
+    assert_eq!(
+        backup_database(&source, &dangling),
+        Err(BackupError::DestinationExists)
+    );
+    assert!(!elsewhere.exists());
+    let _ = std::fs::remove_file(&dangling);
 }
 
 #[test]

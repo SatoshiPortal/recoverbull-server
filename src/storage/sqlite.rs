@@ -208,18 +208,23 @@ impl std::fmt::Display for BackupError {
 /// including rows still in its `-wal` file, and writes a compact,
 /// self-contained database. Any schema is copied as it is: nothing is
 /// migrated, so the copy of an older database still opens with the version
-/// that wrote it; `check_database` is the step that migrates. The copy is
-/// readable by its owner only.
+/// that wrote it; `check_database` is the step that migrates.
+///
+/// The destination is created atomically (`O_EXCL`, so an existing file or a
+/// planted link makes it fail) with mode 0600 before any byte is written, so
+/// it is never readable by others and never overwrites anything. SQLite's own
+/// journal for the copy goes next to it, so the destination directory must be
+/// one only the caller can write to.
 pub(crate) fn backup_database(
     source: &std::path::Path,
     destination: &std::path::Path,
 ) -> Result<(), BackupError> {
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::OpenOptionsExt;
 
     if !source.is_file() {
         return Err(BackupError::SourceMissing);
     }
-    for suffix in ["", "-wal", "-shm", "-journal"] {
+    for suffix in ["-wal", "-shm", "-journal"] {
         let mut candidate = destination.as_os_str().to_owned();
         candidate.push(suffix);
         if std::fs::symlink_metadata(&candidate).is_ok() {
@@ -229,22 +234,38 @@ pub(crate) fn backup_database(
     let source_uri = sqlite_uri_path(source).ok_or(BackupError::Open)?;
     let destination_path = destination.to_str().ok_or(BackupError::Copy)?;
 
-    let mut connection = SqliteConnection::establish(&format!("file:{source_uri}?mode=ro"))
-        .map_err(|_| BackupError::Open)?;
-    sql_query("PRAGMA busy_timeout = 5000;")
-        .execute(&mut connection)
-        .map_err(|_| BackupError::Open)?;
-    let copied = sql_query("VACUUM INTO ?")
-        .bind::<diesel::sql_types::Text, _>(destination_path)
-        .execute(&mut connection);
-    drop(connection);
-    if copied.is_err() {
+    // `VACUUM INTO` accepts an empty existing file, which lets the file be
+    // created here with the right mode and no race with a later link.
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(destination)
+    {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(BackupError::DestinationExists)
+        }
+        Err(_) => return Err(BackupError::Copy),
+    }
+
+    let copied = SqliteConnection::establish(&format!("file:{source_uri}?mode=ro"))
+        .map_err(|_| BackupError::Open)
+        .and_then(|mut connection| {
+            sql_query("PRAGMA busy_timeout = 5000;")
+                .execute(&mut connection)
+                .map_err(|_| BackupError::Open)?;
+            sql_query("VACUUM INTO ?")
+                .bind::<diesel::sql_types::Text, _>(destination_path)
+                .execute(&mut connection)
+                .map_err(|_| BackupError::Copy)?;
+            Ok(())
+        });
+    if let Err(error) = copied {
         // A refused or partial copy must not look like a backup.
         let _ = std::fs::remove_file(destination);
-        return Err(BackupError::Copy);
+        return Err(error);
     }
-    std::fs::set_permissions(destination, std::fs::Permissions::from_mode(0o600))
-        .map_err(|_| BackupError::Copy)?;
 
     #[derive(QueryableByName)]
     struct IntegrityCheck {

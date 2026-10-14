@@ -186,6 +186,22 @@ fn sqlite_uri_path(path: &std::path::Path) -> Option<String> {
     Some(escaped)
 }
 
+impl std::fmt::Display for BackupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::SourceMissing => "the source is not an existing file",
+            Self::DestinationExists => {
+                "the destination, or one of its -wal/-shm/-journal sidecars, already exists"
+            }
+            Self::Open => "the source could not be opened read-only",
+            Self::Copy => {
+                "SQLite could not copy the source (not a database, unreadable, or no space)"
+            }
+            Self::Integrity => "the copy failed SQLite's integrity check",
+        })
+    }
+}
+
 /// Writes a consistent copy of `source` to the new file `destination`, safe
 /// while the server is running. The source is opened read-only and copied
 /// with `VACUUM INTO`, which reads one transaction-consistent snapshot,
@@ -378,6 +394,22 @@ pub enum ConnectionSetupError {
     /// is not an initialized database. Only the check path returns this: normal
     /// startup deliberately creates the schema on a fresh `DATABASE_URL`.
     Uninitialized,
+}
+
+impl std::fmt::Display for ConnectionSetupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Open => "the database file could not be opened",
+            Self::Version => "the bundled SQLite is older than the minimum this server requires",
+            Self::BusyTimeout => "the busy timeout could not be set",
+            Self::SecureDelete => "secure_delete could not be enabled",
+            Self::SecureDeleteVerification => "secure_delete is not in effect",
+            Self::Wal => "the database is not in WAL mode",
+            Self::Migration => "the migrations failed or the secret table does not match them",
+            Self::NotADatabase => "the file is not an SQLite database",
+            Self::Uninitialized => "the file has no secret table: not an initialized database",
+        })
+    }
 }
 
 #[derive(QueryableByName)]

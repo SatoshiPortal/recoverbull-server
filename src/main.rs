@@ -5,6 +5,7 @@
 
 mod app;
 mod attempts;
+mod cli;
 mod config;
 mod digest;
 mod handlers;
@@ -67,36 +68,6 @@ where
     (result, remaining)
 }
 
-/// RecoverBull key server. Without a command, starts the server with the
-/// configuration from `.env` in the working directory and the environment.
-#[derive(clap::Parser)]
-#[command(name = "recoverbull", version)]
-struct Cli {
-    #[command(subcommand)]
-    command: Option<Command>,
-}
-
-#[derive(clap::Subcommand)]
-enum Command {
-    /// Validate the configuration the server would start with, without
-    /// starting it: `.env` in the working directory, then the environment.
-    CheckConfig,
-    /// Validate a database with the server's own startup checks, applying
-    /// pending migrations to it. Run it on a restored or imported copy.
-    CheckDatabase {
-        /// SQLite file to check.
-        database: std::path::PathBuf,
-    },
-    /// Copy a database consistently, even while the server is running.
-    /// The copy is readable by its owner only and is never migrated.
-    Backup {
-        /// SQLite file to copy, with its `-wal` if any.
-        source: std::path::PathBuf,
-        /// New file to write; refused if it, or a sidecar, already exists.
-        destination: std::path::PathBuf,
-    },
-}
-
 /// Starts the runtime, serves, then bounds the wait for detached work.
 ///
 /// The runtime is built explicitly rather than by `#[tokio::main]` because
@@ -112,9 +83,8 @@ enum Command {
 /// blocking tasks are not cancellable, so a thread may still be running when
 /// the process exits.
 fn main() {
-    let cli = <Cli as clap::Parser>::parse();
-    if let Some(command) = cli.command {
-        std::process::exit(run(command));
+    if let Some(command) = cli::parse().command {
+        std::process::exit(cli::run(command));
     }
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -123,57 +93,6 @@ fn main() {
         .expect("failed to build the Tokio runtime");
     let remaining = runtime.block_on(serve());
     runtime.shutdown_timeout(remaining);
-}
-
-/// Runs an operator command and returns the process exit code. None of them
-/// loads more than it needs: `check-database` and `backup` read no
-/// configuration, and no command binds a listener.
-fn run(command: Command) -> i32 {
-    match command {
-        Command::CheckConfig => match crate::config::init() {
-            Ok(_) => {
-                println!("configuration: ok");
-                0
-            }
-            Err(error) => {
-                eprintln!("configuration error: {error}");
-                1
-            }
-        },
-        Command::CheckDatabase { database } => {
-            if !database.is_file() {
-                eprintln!("database check failed: path is not an existing file");
-                return 1;
-            }
-            let Some(database_url) = database.to_str() else {
-                eprintln!("database check failed: path is not valid UTF-8");
-                return 1;
-            };
-            match crate::storage::sqlite::check_database(database_url.to_owned()) {
-                Ok(()) => {
-                    println!("database check: ok");
-                    0
-                }
-                Err(error) => {
-                    eprintln!("database check failed: {error:?}");
-                    1
-                }
-            }
-        }
-        Command::Backup {
-            source,
-            destination,
-        } => match crate::storage::sqlite::backup_database(&source, &destination) {
-            Ok(()) => {
-                println!("backup: ok");
-                0
-            }
-            Err(error) => {
-                eprintln!("backup failed: {error:?}");
-                1
-            }
-        },
-    }
 }
 
 /// Starts the server after configuration and SQLite capability checks, and

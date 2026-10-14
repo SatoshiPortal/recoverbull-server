@@ -33,7 +33,7 @@ Check it with `sudo deploy/recoverbull status` and `sudo deploy/recoverbull logs
 
 ## Develop
 
-Requires Rust 1.98 (pinned in `rust-toolchain.toml`, installed automatically by rustup).
+Requires Rust 1.99 (pinned in `rust-toolchain.toml`, installed automatically by rustup).
 
 ```sh
 cp .env.example .env      # test values, not for production

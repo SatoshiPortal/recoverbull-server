@@ -2,11 +2,11 @@
 name = "recoverbull"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.98"
+rust-version = "1.99"
 license = "MIT"
 
 [dependencies]
-sha2 = "0.10"
+sha2 = "0.11"
 axum = "0.8.9"
 dotenvy = "0.15"
 # Minimal feature set: the server uses the multi-thread runtime, TCP, sync
@@ -21,7 +21,9 @@ diesel_migrations = "2.3"
 chrono = { version = "0.4.38", features = ["serde"] }
 serde_json = "1.0"
 hex = "0.4.3"
-base64 = "0.22.1"
+# The SIMD engine (default `simd-unsafe` feature) is left out: the server only
+# validates short inputs, so it would add unaudited unsafe code for nothing.
+base64 = { version = "0.23.1", default-features = false, features = ["std"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 flate2 = "1.1"

@@ -397,16 +397,19 @@ fn attempt_status(
     }
 }
 
-/// Advances the window to a newly committed distinct secret_id, keeping
-/// `last_secret_id_at` at the latest committed candidate even when detached
-/// finalizations complete out of admission order. The monotonic twin is taken
-/// at commit time and only when the wall-clock timestamp actually moves
-/// forward, so a stale finalization never rewinds expiry.
+/// Advances the window to a newly committed distinct secret_id. The published
+/// `last_secret_id_at` keeps the latest wall-clock value even when detached
+/// finalizations complete out of admission order. The monotonic twin, the
+/// only input of expiry, is renewed on every distinct commit: a commit is a
+/// real attempt whatever the wall clock says, and tying the renewal to the
+/// wall clock let a backward step (X1) spend a slot without extending the
+/// window, so the budget could expire right after a fresh guess. `now` only
+/// ever moves forward, so a stale finalization cannot rewind expiry either.
 fn advance_window(info: &mut RateLimitInfo, requested_at: DateTime<Utc>) {
     if requested_at > info.last_secret_id_at {
         info.last_secret_id_at = requested_at;
-        info.last_secret_id_instant = Instant::now();
     }
+    info.last_secret_id_instant = Instant::now();
 }
 
 fn remove_pending(

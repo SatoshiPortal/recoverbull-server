@@ -808,3 +808,47 @@ fn test_token_bucket_backoff_rounds_up_and_floors_at_one_second() {
         }
     );
 }
+
+/// X1 (release audit 2026-10-14): after a backward wall-clock step, a new
+/// distinct guess must still renew the monotonic window. Expiry reads only
+/// the monotonic instant, so a renewal gated on the wall clock moving
+/// forward let a guess consume a slot while the budget expired a second
+/// later.
+#[tokio::test]
+async fn test_a_backward_wall_clock_step_does_not_shorten_a_new_guess_window() {
+    let (server, state) = crate::tests::test_server::new_test_server().await;
+    let id_hash = identifier_hash(SHA256_111111).unwrap();
+    let cooldown = state.attempts.policy.cooldown().to_std().unwrap();
+    server
+        .post("/fetch")
+        .json(&FetchSecret {
+            identifier: SHA256_111111.to_string(),
+            authentication_key: crate::tests::distinct_authentication_key(1),
+        })
+        .await;
+    {
+        // The wall clock stepped back by an hour since that guess, and the
+        // window is one second from expiring on the monotonic clock.
+        let mut map = state.attempts.ledger.lock_for_test().await;
+        let info = map.get_mut(&id_hash).expect("the entry is present");
+        info.last_secret_id_at += chrono::Duration::hours(1);
+        info.set_monotonic_age_for_test(cooldown - std::time::Duration::from_secs(1));
+    }
+
+    server
+        .post("/fetch")
+        .json(&FetchSecret {
+            identifier: SHA256_111111.to_string(),
+            authentication_key: crate::tests::distinct_authentication_key(2),
+        })
+        .await;
+
+    let map = state.attempts.ledger.lock_for_test().await;
+    let info = map.get(&id_hash).expect("the entry is present");
+    assert_eq!(info.consumed_slots(), 2, "the second guess took a slot");
+    let age = tokio::time::Instant::now().saturating_duration_since(info.last_secret_id_instant);
+    assert!(
+        age < std::time::Duration::from_secs(1),
+        "the window must restart at the new guess, got an age of {age:?}"
+    );
+}

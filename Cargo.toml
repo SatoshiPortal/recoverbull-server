@@ -1,10 +1,13 @@
 [package]
 name = "recoverbull"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.99"
 description = "RecoverBull key server"
 license = "MIT"
+repository = "https://github.com/SatoshiPortal/recoverbull-server"
+# A server, not a library: never on crates.io.
+publish = false
 
 [dependencies]
 sha2 = "0.11"

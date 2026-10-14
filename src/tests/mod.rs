@@ -15,6 +15,7 @@ pub mod test_rate_limit;
 pub mod test_secret_id_budget;
 pub mod test_secure_delete;
 pub mod test_server;
+pub mod test_storage_pressure;
 pub mod test_store;
 pub mod test_timing;
 pub mod test_trash;

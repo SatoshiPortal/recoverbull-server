@@ -47,7 +47,7 @@ pub async fn get_attempts(State(state): State<AppState>, headers: HeaderMap) -> 
 
     let snapshot = match state.attempts_snapshot().await {
         Ok(snapshot) => snapshot,
-        Err(()) => return *internal_error(),
+        Err(()) => return internal_error(),
     };
     let etag = snapshot.etag.clone();
     let body = axum::body::Bytes::from_owner(snapshot.gzip_body.clone());
@@ -57,12 +57,12 @@ pub async fn get_attempts(State(state): State<AppState>, headers: HeaderMap) -> 
         .get(header::IF_NONE_MATCH)
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| {
-            value.split(',').any(|secret_id| {
-                let secret_id = secret_id.trim();
+            value.split(',').any(|tag| {
+                let tag = tag.trim();
                 // RFC 9110: If-None-Match uses the weak comparison function,
                 // so a weak validator W/"…" matches our strong ETag.
-                let secret_id = secret_id.strip_prefix("W/").unwrap_or(secret_id);
-                secret_id == "*" || secret_id == etag
+                let tag = tag.strip_prefix("W/").unwrap_or(tag);
+                tag == "*" || tag == etag
             })
         });
 
@@ -88,12 +88,10 @@ pub async fn get_attempts(State(state): State<AppState>, headers: HeaderMap) -> 
     response
 }
 
-fn internal_error() -> Box<Response> {
-    Box::new(
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(error_body("Internal server error")),
-        )
-            .into_response(),
+fn internal_error() -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(error_body("Internal server error")),
     )
+        .into_response()
 }

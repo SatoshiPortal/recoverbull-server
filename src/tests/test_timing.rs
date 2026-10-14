@@ -102,7 +102,7 @@ async fn production_router_applies_the_500_millisecond_floor() {
         crate::storage::sqlite::establish_connection(app_state.storage.database_url_for_test())
             .unwrap();
     crate::tests::test_server::clear_table_secret(&mut connection).await;
-    let server = axum_test::TestServer::new(app).unwrap();
+    let server = axum_test::TestServer::new(app);
 
     let started = Instant::now();
     let response = server.post("/fetch").json(&fetch_body()).await;

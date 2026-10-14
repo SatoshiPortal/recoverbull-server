@@ -22,8 +22,8 @@ use axum::http::StatusCode;
 #[tokio::test]
 async fn test_audit_f1_store_gives_no_existence_signal() {
     // Dedicated store bucket with no refill: the 12 stores below must not
-    // depend on the environment-provided bucket (burst defaults to 10 in the
-    // README while CI and the repo .env set 10000), otherwise the final
+    // depend on the environment-provided bucket (burst defaults to 10 in
+    // production while CI and the repo .env set 10000), otherwise the final
     // assertion fails on a 503 for a reason unrelated to the oracle.
     let app_state = crate::app::init();
     app_state
@@ -36,7 +36,7 @@ async fn test_audit_f1_store_gives_no_existence_signal() {
         crate::storage::sqlite::establish_connection(app_state.storage.database_url_for_test())
             .unwrap();
     crate::tests::test_server::clear_table_secret(&mut connection).await;
-    let server = axum_test::TestServer::new(app).unwrap();
+    let server = axum_test::TestServer::new(app);
 
     let store = &StoreSecret {
         identifier: SHA256_111111.to_string(),
@@ -184,7 +184,7 @@ async fn test_audit_f9_store_writes_are_token_bucketed() {
         crate::storage::sqlite::establish_connection(app_state.storage.database_url_for_test())
             .unwrap();
     crate::tests::test_server::clear_table_secret(&mut connection).await;
-    let server = axum_test::TestServer::new(app).unwrap();
+    let server = axum_test::TestServer::new(app);
 
     for i in 0..5u32 {
         let store = &StoreSecret {
@@ -213,7 +213,7 @@ async fn test_lookup_flood_is_globally_token_bucketed() {
         .set_lookup_bucket_for_test(crate::rate_limit::TokenBucket::new(1.0, 0.0))
         .await;
     state.storage.initialize().unwrap();
-    let server = axum_test::TestServer::new(crate::router::new_for_tests(state)).unwrap();
+    let server = axum_test::TestServer::new(crate::router::new_for_tests(state));
 
     let first = server
         .post("/fetch")
@@ -325,7 +325,7 @@ fn test_example_nginx_preserves_attempts_proxy_contract() {
 
     // The Tor example must export the per-circuit identifier the nginx real_ip
     // directive consumes, or the per-circuit keying above is inert.
-    let torrc = include_str!("../../deploy/tor/recoverbull.torrc.example");
+    let torrc = include_str!("../../deploy/tor/recoverbull.torrc");
     assert!(
         torrc.contains("HiddenServiceExportCircuitID haproxy"),
         "torrc example must export the per-circuit id as a PROXY header"

@@ -1,0 +1,16 @@
+# Pull requests for dependency updates. Cargo updates are grouped so one PR
+# per week carries every compatible bump; the daily RustSec audit in ci.yml
+# still catches advisories against an unchanged lockfile in between.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      cargo:
+        patterns: ["*"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

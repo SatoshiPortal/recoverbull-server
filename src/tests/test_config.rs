@@ -352,7 +352,7 @@ fn test_store_envelope_constant_matches_the_serialized_body() {
 
 fn unique_temp_path(tag: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!(
-        "keychain-test-{}-{}-{}",
+        "recoverbull-test-{}-{}-{}",
         tag,
         std::process::id(),
         std::time::SystemTime::now()

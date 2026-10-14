@@ -352,7 +352,6 @@ async fn test_old_trash_completion_cannot_update_a_replaced_rate_limit_window() 
         RateLimitInfo {
             window_started_at: fresh_at,
             last_secret_id_at: fresh_at,
-            last_request_at: fresh_at,
             last_secret_id_instant: tokio::time::Instant::now(),
             secret_ids: std::collections::HashMap::new(),
             forgotten_slots: 0,
@@ -379,7 +378,6 @@ async fn test_old_trash_completion_cannot_update_a_replaced_rate_limit_window() 
         .cloned()
         .expect("fresh rate-limit window must remain present");
     assert_eq!(info.window_started_at, fresh_at);
-    assert_eq!(info.last_request_at, fresh_at);
     assert_eq!(info.consumed_slots(), 0);
     assert_eq!(info.failed_secret_ids, 0);
 }

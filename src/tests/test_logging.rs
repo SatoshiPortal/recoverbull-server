@@ -207,7 +207,7 @@ async fn test_only_a_genuine_server_error_is_logged() {
     assert_no_sensitive_values(&logs, state.info.canary_for_test());
 }
 
-/// The `304` of a conditional `GET /attempts` is the caching path the README
+/// The `304` of a conditional `GET /attempts` is the caching path docs/API.md
 /// tells clients to use, and a client may poll it continuously. Pinned on its
 /// own because misfiling exactly this status is what broke the previous
 /// design.
@@ -370,7 +370,7 @@ async fn test_canary_updates_and_wipe_do_not_log_canary_value() {
     ));
     state.info.set_canary_path_for_test(canary_path.clone());
     state.storage.initialize().unwrap();
-    let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone())).unwrap();
+    let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone()));
     let first = "logging-canary-first";
     let second = "logging-canary-second";
 

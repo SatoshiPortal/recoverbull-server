@@ -31,7 +31,6 @@ pub(crate) struct RateLimitInfo {
     /// value a request captured at admission, and clients read it.
     pub(crate) window_started_at: DateTime<Utc>,
     pub(crate) last_secret_id_at: DateTime<Utc>,
-    pub(crate) last_request_at: DateTime<Utc>,
     /// Monotonic twin of `last_secret_id_at`, and the *only* value the expiry
     /// decision reads. `CLOCK_REALTIME` is settable: a forward jump larger
     /// than the cooldown would otherwise expire every entry at once and reset
@@ -60,7 +59,6 @@ impl RateLimitInfo {
         Self {
             window_started_at: now,
             last_secret_id_at: now,
-            last_request_at: now,
             last_secret_id_instant: Instant::now(),
             secret_ids: HashMap::new(),
             forgotten_slots: 0,
@@ -134,7 +132,7 @@ pub(crate) enum Admission {
         generation: DateTime<Utc>,
     },
     Pending,
-    Saturated {},
+    Saturated,
     RateLimited {
         count: u8,
         last_secret_id_at: DateTime<Utc>,
@@ -176,14 +174,13 @@ impl AttemptsLedgerState {
         if !map.contains_key(&id_hash) && map.len() >= max_identifiers {
             map.retain(|_, info| !is_expired(info, now, cooldown));
             if map.len() >= max_identifiers {
-                return Admission::Saturated {};
+                return Admission::Saturated;
             }
         }
         let info = map
             .entry(id_hash.clone())
             .or_insert_with(|| RateLimitInfo::new(requested_at));
         info.total_requests = info.total_requests.saturating_add(1);
-        info.last_request_at = requested_at;
         if info.consumed_slots() >= max {
             return Admission::RateLimited {
                 count: info.consumed_slots(),

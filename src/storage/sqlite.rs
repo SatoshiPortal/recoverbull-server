@@ -4,10 +4,8 @@
 //! retain their permit through blocking work and trash uses an immediate
 //! transaction.
 
-use crate::schema::secret::dsl::*;
-
 use crate::config::StorageConfig;
-use crate::schema::secret::*;
+use crate::schema::secret::dsl::*;
 use std::sync::Arc;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -62,11 +60,36 @@ pub(crate) struct StoredSecret {
     pub(crate) encrypted_secret: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 /// Opaque storage failure categories safe for domain and HTTP mapping.
 pub(crate) enum StorageError {
+    /// No lease before the deadline, or SQLite reported the database locked:
+    /// transient pressure, retry later.
+    Busy,
+    /// The database file could not be opened or checked.
     Connection,
+    /// The operation itself failed: full or unwritable storage, a damaged
+    /// file, or any other non-transient SQLite error.
     Database,
+}
+
+/// SQLite reports contention as an error like any other; it is the one
+/// failure a client should simply retry rather than the operator investigate.
+/// Covers SQLITE_BUSY ("database is locked"), SQLITE_LOCKED ("database table
+/// is locked"), SQLITE_PROTOCOL ("locking protocol", a rare wal-index retry
+/// exhaustion) and SQLITE_INTERRUPT.
+fn classify_database_error(error: &diesel::result::Error) -> StorageError {
+    const TRANSIENT: [&str; 4] = ["locked", "busy", "locking protocol", "interrupted"];
+    match error {
+        diesel::result::Error::DatabaseError(_, info)
+            if TRANSIENT
+                .iter()
+                .any(|needle| info.message().contains(needle)) =>
+        {
+            StorageError::Busy
+        }
+        _ => StorageError::Database,
+    }
 }
 
 impl SqliteStorage {
@@ -80,14 +103,24 @@ impl SqliteStorage {
         }
     }
 
+    /// The directory holding the database, where free space decides whether
+    /// a store may proceed.
+    pub(crate) fn data_directory(&self) -> std::path::PathBuf {
+        let path = std::path::Path::new(&self.database_url);
+        match path.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+            _ => std::path::PathBuf::from("."),
+        }
+    }
+
     pub(crate) async fn acquire(&self) -> Result<SqliteOperation, StorageError> {
         let permit = tokio::time::timeout(
             std::time::Duration::from_secs(1),
             self.database_semaphore.clone().acquire_owned(),
         )
         .await
-        .map_err(|_| StorageError::Connection)?
-        .map_err(|_| StorageError::Connection)?;
+        .map_err(|_| StorageError::Busy)?
+        .map_err(|_| StorageError::Busy)?;
         Ok(SqliteOperation {
             database_url: self.database_url.clone(),
             permit,
@@ -121,7 +154,7 @@ impl SqliteStorage {
 
 /// Validates an already-initialized database for the restore drill.
 ///
-/// A restore drill points `keychain check-database` at a RESTORED copy, which
+/// A restore drill points `recoverbull check-database` at a RESTORED copy, which
 /// already carries the schema of the live database it was backed up from. An
 /// empty or truncated file has no `secret` table; letting the shared
 /// initialization create one would report a brand-new or damaged file as a
@@ -131,9 +164,20 @@ impl SqliteStorage {
 /// initialization afterwards (idempotent migrations, schema postcondition, WAL
 /// setup) on the restored copy, as the drill documents.
 pub(crate) fn check_database(database_url: String) -> Result<(), ConnectionSetupError> {
+    // SQLite opens any file and fails only on first read, at whichever
+    // pragma runs first; the header says up front whether this is a database
+    // at all. An empty file is left to the uninitialized check below.
+    const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
+    let mut header = [0u8; 16];
+    let read = std::fs::File::open(&database_url)
+        .and_then(|mut file| std::io::Read::read(&mut file, &mut header))
+        .map_err(|_| ConnectionSetupError::Open)?;
+    if read > 0 && (read < header.len() || &header != SQLITE_HEADER) {
+        return Err(ConnectionSetupError::NotADatabase);
+    }
     let mut probe = establish_connection_without_wal_check(database_url.clone())?;
     let initialized =
-        table_exists(&mut probe, "secret").map_err(|_| ConnectionSetupError::Migration)?;
+        table_exists(&mut probe, "secret").map_err(|_| ConnectionSetupError::NotADatabase)?;
     drop(probe);
     if !initialized {
         return Err(ConnectionSetupError::Uninitialized);
@@ -143,7 +187,7 @@ pub(crate) fn check_database(database_url: String) -> Result<(), ConnectionSetup
 
 /// Applies the exact database initialization used by server startup.
 ///
-/// The restore drill invokes this through `keychain check-database` on the
+/// The restore drill invokes this through `recoverbull check-database` on the
 /// restored copy, so an independent Python schema approximation cannot be
 /// the final authority on whether this application can open and migrate it.
 pub(crate) fn initialize_database(database_url: String) -> Result<(), ConnectionSetupError> {
@@ -182,7 +226,7 @@ impl SqliteOperation {
                 encrypted_secret: new_secret.encrypted_secret,
             },
         )
-        .map_err(|_| StorageError::Database)
+        .map_err(|error| classify_database_error(&error))
     }
 
     /// Reads without deleting the stored row.
@@ -206,7 +250,7 @@ impl SqliteOperation {
         } else {
             read_secret_by_id(&mut connection, &secret_id)
         }
-        .map_err(|_| StorageError::Database)?;
+        .map_err(|error| classify_database_error(&error))?;
         Ok(row.map(|row| StoredSecret {
             id: row.id,
             created_at: row.created_at,
@@ -219,7 +263,7 @@ impl SqliteOperation {
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!();
 const INITIAL_MIGRATION_VERSION: &str = "0001";
 /// Minimum SQLite runtime version required by the service.
-pub const MINIMUM_SQLITE_VERSION: &str = "3.51.3";
+pub const MINIMUM_SQLITE_VERSION: &str = "3.53.2";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 /// Startup failures for SQLite capability, migration, and journal checks.
@@ -231,6 +275,10 @@ pub enum ConnectionSetupError {
     SecureDeleteVerification,
     Wal,
     Migration,
+    /// The `check-database` target is not an SQLite file (wrong header) or
+    /// its schema cannot be read. Distinct from `Migration` so a restore
+    /// drill on a garbage file is not reported as a schema problem.
+    NotADatabase,
     /// The `check-database` restore-drill target has no `secret` table, so it
     /// is not an initialized database. Only the check path returns this: normal
     /// startup deliberately creates the schema on a fresh `DATABASE_URL`.
@@ -437,15 +485,25 @@ pub fn write(
     connection: &mut SqliteConnection,
     new_secret: &Secret,
 ) -> Result<(), diesel::result::Error> {
-    // ON CONFLICT DO NOTHING: storing is idempotent. The response must not
-    // reveal whether the secret_id already exists, otherwise /store becomes
-    // an unthrottled authentication_key oracle (a 403 would confirm a
-    // correct guess without ever touching the fetch rate-limit).
-    diesel::insert_into(crate::schema::secret::table)
-        .values(new_secret)
-        .on_conflict_do_nothing()
-        .execute(connection)
-        .map(|_| ())
+    connection.immediate_transaction(|connection| {
+        // ON CONFLICT DO NOTHING: storing is idempotent. The response must not
+        // reveal whether the secret_id already exists, otherwise /store becomes
+        // an unthrottled authentication_key oracle (a 403 would confirm a
+        // correct guess without ever touching the fetch rate-limit).
+        diesel::insert_into(crate::schema::secret::table)
+            .values(new_secret)
+            .on_conflict_do_nothing()
+            .execute(connection)?;
+        // AUD-2026-10-01: a no-op insert needs no storage, so when the file
+        // can no longer grow a store for an existing row would still succeed
+        // while a new one fails. Rewriting the row unconditionally makes both
+        // cases a real write that must reach the WAL, so storage pressure
+        // refuses them alike. The values do not change.
+        diesel::update(secret.filter(id.eq(&new_secret.id)))
+            .set((id.eq(&new_secret.id), created_at.eq(created_at)))
+            .execute(connection)?;
+        Ok(())
+    })
 }
 
 /// Reads one row, preserving database errors distinct from a missing row.

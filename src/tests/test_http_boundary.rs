@@ -277,8 +277,7 @@ async fn test_request_timeout_is_a_503_with_retry_after_and_error_body() {
     let server = axum_test::TestServer::new(crate::router::new_for_tests_with_timeout(
         app_state.clone(),
         std::time::Duration::from_millis(100),
-    ))
-    .unwrap();
+    ));
 
     let (response, logs) =
         crate::tests::test_logging::capture(async { server.get("/attempts").await }).await;

@@ -186,7 +186,7 @@ async fn test_full_map_does_not_evict_protected_identifier() {
     let mut state = crate::app::init();
     state.recovery.set_max_identifiers_for_test(1);
     state.storage.initialize().unwrap();
-    let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone())).unwrap();
+    let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone()));
 
     // lock out the first identifier
     for index in 0..state.attempts.policy.max_attempts() as usize {
@@ -566,7 +566,6 @@ async fn test_expired_entry_disappears_from_snapshot() {
             crate::attempts::ledger::RateLimitInfo {
                 window_started_at: expired_at,
                 last_secret_id_at: expired_at,
-                last_request_at: expired_at,
                 // expiry decides on the monotonic clock: back-date it too
                 last_secret_id_instant: crate::tests::monotonic_age(
                     (state.attempts.policy.cooldown() + chrono::Duration::minutes(1))
@@ -1099,7 +1098,7 @@ async fn test_attempts_counter_does_not_overflow_at_u8_max() {
     let mut state = crate::app::init();
     state.recovery.set_max_attempts_for_test(255);
     state.storage.initialize().unwrap();
-    let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone())).unwrap();
+    let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone()));
 
     // seed the map at 254 so only two requests are needed
     {
@@ -1109,7 +1108,6 @@ async fn test_attempts_counter_does_not_overflow_at_u8_max() {
             crate::attempts::ledger::RateLimitInfo {
                 window_started_at: chrono::Utc::now(),
                 last_secret_id_at: chrono::Utc::now(),
-                last_request_at: chrono::Utc::now(),
                 last_secret_id_instant: tokio::time::Instant::now(),
                 secret_ids: (0..254)
                     .map(|i| {
@@ -1253,7 +1251,7 @@ async fn test_map_filling_denies_a_victim_without_creating_its_warning_entry() {
         .snapshot
         .set_ttl_for_test(std::time::Duration::ZERO);
     state.storage.initialize().unwrap();
-    let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone())).unwrap();
+    let server = axum_test::TestServer::new(crate::router::new_for_tests(state.clone()));
 
     // The attacker fills the map with identifiers it chose itself.
     let attacker_key = crate::tests::distinct_authentication_key(0);

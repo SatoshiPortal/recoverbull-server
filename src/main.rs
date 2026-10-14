@@ -100,15 +100,15 @@ fn main() {
 fn database_check_command(mut arguments: impl Iterator<Item = std::ffi::OsString>) -> Option<i32> {
     let command = arguments.next()?;
     if command != "check-database" {
-        eprintln!("usage: keychain check-database DATABASE_PATH");
+        eprintln!("usage: recoverbull check-database DATABASE_PATH");
         return Some(2);
     }
     let Some(database_path) = arguments.next() else {
-        eprintln!("usage: keychain check-database DATABASE_PATH");
+        eprintln!("usage: recoverbull check-database DATABASE_PATH");
         return Some(2);
     };
     if arguments.next().is_some() {
-        eprintln!("usage: keychain check-database DATABASE_PATH");
+        eprintln!("usage: recoverbull check-database DATABASE_PATH");
         return Some(2);
     }
     let database_path = std::path::PathBuf::from(database_path);
@@ -142,7 +142,14 @@ async fn serve() -> Duration {
         )
         .init();
 
-    let app_state = crate::app::build(crate::config::init());
+    let config = match crate::config::init() {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("Error: {error}");
+            std::process::exit(1);
+        }
+    };
+    let app_state = crate::app::build(config);
 
     if let Err(error) = app_state.initialize_storage() {
         eprintln!("Failed to initialize database: {error:?}");
@@ -155,9 +162,16 @@ async fn serve() -> Duration {
 
     let app = router::new(app_state.clone());
 
-    let listener = tokio::net::TcpListener::bind(app_state.server_address())
-        .await
-        .unwrap();
+    let listener = match tokio::net::TcpListener::bind(app_state.server_address()).await {
+        Ok(listener) => listener,
+        Err(error) => {
+            eprintln!(
+                "Error: cannot listen on {}: {error}",
+                app_state.server_address()
+            );
+            std::process::exit(1);
+        }
+    };
     warn_unless_loopback(listener.local_addr());
     let (shutdown_trigger, shutdown_request) = tokio::sync::oneshot::channel();
     let server = axum::serve(listener, app)

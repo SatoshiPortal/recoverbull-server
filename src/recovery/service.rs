@@ -14,6 +14,7 @@ use crate::{
 };
 use base64::Engine;
 use chrono::{DateTime, Utc};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -51,6 +52,9 @@ pub(crate) enum StoreResult {
     /// The global store bucket had no token; the backoff is the bucket's
     /// own estimate of its next token.
     GlobalOverload { retry_after_secs: u64 },
+    /// A previous store failed on storage; every store is refused until an
+    /// operator has looked and restarted the server (AUD-2026-10-01).
+    StoragePressure,
     /// A database lease could not be acquired before its deadline.
     DatabaseBusy,
     /// The detached database operation failed.
@@ -100,6 +104,14 @@ pub(crate) struct RecoveryService {
     storage: SqliteStorage,
     counters: Arc<SecurityCounters>,
     max_secret_length: usize,
+    /// Set once a store fails on storage and never cleared: `/store` then
+    /// refuses uniformly until a restart (AUD-2026-10-01).
+    storage_pressure: Arc<AtomicBool>,
+    /// Free bytes on the data volume below which `/store` is refused before
+    /// any database work; zero disables the check.
+    storage_reserve_bytes: Arc<std::sync::atomic::AtomicU64>,
+    #[cfg(test)]
+    free_space_override: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl RecoveryService {
@@ -123,7 +135,50 @@ impl RecoveryService {
             storage,
             counters,
             max_secret_length: config.secret_max_length,
+            storage_pressure: Arc::new(AtomicBool::new(false)),
+            storage_reserve_bytes: Arc::new(std::sync::atomic::AtomicU64::new(
+                config.storage_reserve_bytes,
+            )),
+            #[cfg(test)]
+            free_space_override: Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX)),
         }
+    }
+
+    /// Free bytes available to this process on the data volume, or `None`
+    /// when the volume cannot be queried. An unqueryable volume is left to
+    /// the write itself: its failure is existence-independent and latches.
+    fn free_space_bytes(&self) -> Option<u64> {
+        #[cfg(test)]
+        {
+            let forced = self.free_space_override.load(Ordering::Relaxed);
+            if forced != u64::MAX {
+                return Some(forced);
+            }
+        }
+        let stats = rustix::fs::statvfs(self.storage.data_directory()).ok()?;
+        Some(stats.f_bavail.saturating_mul(stats.f_frsize))
+    }
+
+    /// Whether the data volume is below the reserve: a refusal that depends
+    /// on free space alone, never on the row being stored.
+    fn storage_below_reserve(&self) -> bool {
+        let reserve = self.storage_reserve_bytes.load(Ordering::Relaxed);
+        reserve > 0 && self.free_space_bytes().is_some_and(|free| free < reserve)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_free_space_for_test(&self, bytes: u64) {
+        self.free_space_override.store(bytes, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_storage_reserve_for_test(&self, bytes: u64) {
+        self.storage_reserve_bytes.store(bytes, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn storage_pressure_for_test(&self) -> bool {
+        self.storage_pressure.load(Ordering::Relaxed)
     }
 
     /// Validates and canonicalizes a store command, applies the global write
@@ -153,6 +208,15 @@ impl RecoveryService {
             self.counters.store_rejected();
             return StoreResult::Invalid("encrypted_secret should be base64 encoded".to_owned());
         }
+        // Uniform refusal while the volume is near full or once storage has
+        // failed: the answer then depends on free space alone, never on
+        // whether the row exists. The reserve keeps the point where a
+        // rewrite still fits but an insert does not from ever being reached
+        // on a filling volume; the latch covers what the reserve cannot see.
+        if self.storage_pressure.load(Ordering::Relaxed) || self.storage_below_reserve() {
+            self.counters.store_storage_pressure();
+            return StoreResult::StoragePressure;
+        }
         if let BucketDecision::Rejected { retry_after_secs } =
             self.store_bucket.lock().await.try_consume()
         {
@@ -175,6 +239,7 @@ impl RecoveryService {
             }
         };
         let counters = self.counters.clone();
+        let storage_pressure = self.storage_pressure.clone();
         // The outer task owns the counter update so dropping the handler future
         // cannot cancel the operation after its permit was transferred.
         let task = tokio::spawn(async move {
@@ -183,7 +248,23 @@ impl RecoveryService {
                     counters.store_accepted();
                     StoreResult::Stored
                 }
-                Ok(Err(_)) => {
+                Ok(Err(StorageError::Busy)) => {
+                    counters.database_busy();
+                    StoreResult::DatabaseBusy
+                }
+                Ok(Err(StorageError::Database)) => {
+                    // Full disk, quota, unwritable or damaged file: from now
+                    // on every store is refused the same way (see the gate
+                    // above). The request that trips the latch keeps its
+                    // `500`, which is the one line the operator sees.
+                    counters.database_error();
+                    if storage_pressure.swap(true, Ordering::Relaxed) {
+                        StoreResult::StoragePressure
+                    } else {
+                        StoreResult::DatabaseError
+                    }
+                }
+                Ok(Err(StorageError::Connection)) => {
                     counters.database_error();
                     StoreResult::DatabaseError
                 }
@@ -193,12 +274,24 @@ impl RecoveryService {
                 }
             }
         });
-        match task.await {
+        let result = match task.await {
             Ok(result) => result,
             Err(_) => {
                 self.counters.database_error();
                 StoreResult::DatabaseError
             }
+        };
+        // A request admitted before the latch but finished after it would
+        // otherwise carry a true `201`/`500` out of the pressure window. A
+        // `503` for a write that did land is harmless: the client retries
+        // an idempotent store later.
+        match result {
+            StoreResult::DatabaseError => result,
+            _ if self.storage_pressure.load(Ordering::Relaxed) => {
+                self.counters.store_storage_pressure();
+                StoreResult::StoragePressure
+            }
+            _ => result,
         }
     }
 
@@ -234,13 +327,6 @@ impl RecoveryService {
         self.storage.database_semaphore_for_test()
     }
     #[cfg(test)]
-    /// Test-only initialization seam; excluded from release builds.
-    pub(crate) fn initialize_for_test(
-        &self,
-    ) -> Result<(), crate::storage::sqlite::ConnectionSetupError> {
-        self.storage.initialize()
-    }
-    #[cfg(test)]
     /// Test-only store-bucket seam; excluded from release builds.
     pub(crate) async fn set_store_bucket_for_test(&self, bucket: TokenBucket) {
         *self.store_bucket.lock().await = bucket;
@@ -262,6 +348,7 @@ impl RecoveryService {
         let identifier = request.identifier.to_lowercase();
         let authentication_key = request.authentication_key.to_lowercase();
         if !is_256bits_hex_hash(&identifier) || !is_256bits_hex_hash(&authentication_key) {
+            self.counters.lookup_rejected();
             return LookupResult::Invalid;
         }
         if let BucketDecision::Rejected { retry_after_secs } =
@@ -288,7 +375,7 @@ impl RecoveryService {
             )
             .await;
         match admission {
-            Admission::Saturated {} => {
+            Admission::Saturated => {
                 self.counters.lookup_map_capacity();
                 LookupResult::Capacity
             }
@@ -380,8 +467,8 @@ impl RecoveryService {
         // generation finalization even if the HTTP handler is cancelled.
         let task = tokio::spawn(async move {
             let database_result = tokio::task::spawn_blocking(move || match kind {
-                LookupKind::Fetch => operation.fetch(operation_secret_id.clone()),
-                LookupKind::Trash => operation.trash(operation_secret_id.clone()),
+                LookupKind::Fetch => operation.fetch(operation_secret_id),
+                LookupKind::Trash => operation.trash(operation_secret_id),
             })
             .await;
             let final_result = match database_result {

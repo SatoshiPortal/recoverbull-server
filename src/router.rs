@@ -83,10 +83,6 @@ pub(crate) fn new_with_limits(
         .layer(from_fn(diagnostic_middleware))
 }
 
-/// Advisory backoff for an expired request: there is no deadline to derive,
-/// only "the server could not finish in time, try again shortly".
-const REQUEST_TIMEOUT_RETRY_AFTER_SECS: u64 = 1;
-
 /// Bounds one request's total duration, body reads included, and answers an
 /// expired request with the contractual service-pressure response.
 ///
@@ -95,7 +91,7 @@ const REQUEST_TIMEOUT_RETRY_AFTER_SECS: u64 = 1;
 /// finish in time is exactly that, whatever the cause (slow storage, a held
 /// lock, a dribbled body), so it must not surface as the framework's bare
 /// `408 Request Timeout` with an empty body: that status is outside the
-/// documented set, and a client following the README is not told to retry
+/// documented set, and a client following docs/API.md is not told to retry
 /// it. Dropping the inner future cancels the handler, which refunds any
 /// reservation not yet transferred to detached storage work. Diagnostics
 /// wrap this layer and therefore record the final `503`.
@@ -112,7 +108,7 @@ async fn request_timeout_middleware(
             counters.request_timeout();
             crate::http::error::retry_after_response(
                 axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                REQUEST_TIMEOUT_RETRY_AFTER_SECS,
+                crate::rate_limit::ADVISORY_RETRY_AFTER_SECS,
                 "Request timed out, retry later",
             )
         }

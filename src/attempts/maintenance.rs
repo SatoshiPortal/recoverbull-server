@@ -65,9 +65,8 @@ pub(crate) fn global_wiper_first_deadline(
     now + period
 }
 
-/// Owns the detached periodic wiper task; the caller must retain its handle
-/// and fail closed if it exits unexpectedly.
 /// Spawns the detached periodic wipe task with the supplied deadline period.
+/// The caller must retain its handle and fail closed if it exits unexpectedly.
 pub(crate) fn spawn_global_wiper(
     ledger: AttemptsLedgerState,
     snapshot: AttemptsSnapshotState,

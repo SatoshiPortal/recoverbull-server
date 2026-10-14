@@ -13,7 +13,7 @@ dotenvy = "0.15"
 # primitives, timers, Unix/ctrl-c signal handling (for graceful shutdown, see
 # main.rs) and (in tests) io traits. "full" would also compile in process
 # spawning and filesystem APIs we never call.
-tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "net", "sync", "time", "io-util", "signal"] }
+tokio = { version = "1.53.3", features = ["macros", "rt-multi-thread", "net", "sync", "time", "io-util", "signal"] }
 serde = { version = "1.0.210", features = ["derive"] }
 diesel = { version = "2.3", features = ["sqlite"] }
 libsqlite3-sys = { version = "=0.38.2", features = ["bundled"] }

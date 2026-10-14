@@ -152,6 +152,101 @@ impl SqliteStorage {
     }
 }
 
+/// Why `recoverbull backup` refused or failed. No variant carries database
+/// content: the message is safe for an operator's terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BackupError {
+    /// The source is not an existing regular file.
+    SourceMissing,
+    /// The destination, or one of its SQLite sidecars, already exists (a
+    /// symlink included): a backup never overwrites or follows a link.
+    DestinationExists,
+    /// The source could not be opened read-only.
+    Open,
+    /// SQLite could not produce the copy (not a database, unreadable, full
+    /// destination volume).
+    Copy,
+    /// The copy was written but fails `PRAGMA integrity_check`.
+    Integrity,
+}
+
+/// SQLite URI path escaping: `%`, `?` and `#` would otherwise be read as an
+/// escape, the query string, or a fragment.
+fn sqlite_uri_path(path: &std::path::Path) -> Option<String> {
+    let path = path.to_str()?;
+    let mut escaped = String::with_capacity(path.len());
+    for character in path.chars() {
+        match character {
+            '%' => escaped.push_str("%25"),
+            '?' => escaped.push_str("%3f"),
+            '#' => escaped.push_str("%23"),
+            other => escaped.push(other),
+        }
+    }
+    Some(escaped)
+}
+
+/// Writes a consistent copy of `source` to the new file `destination`, safe
+/// while the server is running. The source is opened read-only and copied
+/// with `VACUUM INTO`, which reads one transaction-consistent snapshot,
+/// including rows still in its `-wal` file, and writes a compact,
+/// self-contained database. Any schema is copied as it is: nothing is
+/// migrated, so the copy of an older database still opens with the version
+/// that wrote it; `check_database` is the step that migrates. The copy is
+/// readable by its owner only.
+pub(crate) fn backup_database(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> Result<(), BackupError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    if !source.is_file() {
+        return Err(BackupError::SourceMissing);
+    }
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        let mut candidate = destination.as_os_str().to_owned();
+        candidate.push(suffix);
+        if std::fs::symlink_metadata(&candidate).is_ok() {
+            return Err(BackupError::DestinationExists);
+        }
+    }
+    let source_uri = sqlite_uri_path(source).ok_or(BackupError::Open)?;
+    let destination_path = destination.to_str().ok_or(BackupError::Copy)?;
+
+    let mut connection = SqliteConnection::establish(&format!("file:{source_uri}?mode=ro"))
+        .map_err(|_| BackupError::Open)?;
+    sql_query("PRAGMA busy_timeout = 5000;")
+        .execute(&mut connection)
+        .map_err(|_| BackupError::Open)?;
+    let copied = sql_query("VACUUM INTO ?")
+        .bind::<diesel::sql_types::Text, _>(destination_path)
+        .execute(&mut connection);
+    drop(connection);
+    if copied.is_err() {
+        // A refused or partial copy must not look like a backup.
+        let _ = std::fs::remove_file(destination);
+        return Err(BackupError::Copy);
+    }
+    std::fs::set_permissions(destination, std::fs::Permissions::from_mode(0o600))
+        .map_err(|_| BackupError::Copy)?;
+
+    #[derive(QueryableByName)]
+    struct IntegrityCheck {
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        integrity_check: String,
+    }
+    let destination_uri = sqlite_uri_path(destination).ok_or(BackupError::Integrity)?;
+    let mut copy = SqliteConnection::establish(&format!("file:{destination_uri}?mode=ro"))
+        .map_err(|_| BackupError::Integrity)?;
+    let verdict = sql_query("PRAGMA integrity_check")
+        .load::<IntegrityCheck>(&mut copy)
+        .map_err(|_| BackupError::Integrity)?;
+    if verdict.len() != 1 || verdict[0].integrity_check != "ok" {
+        return Err(BackupError::Integrity);
+    }
+    Ok(())
+}
+
 /// Validates an already-initialized database for the restore drill.
 ///
 /// A restore drill points `recoverbull check-database` at a RESTORED copy, which
@@ -188,8 +283,8 @@ pub(crate) fn check_database(database_url: String) -> Result<(), ConnectionSetup
 /// Applies the exact database initialization used by server startup.
 ///
 /// The restore drill invokes this through `recoverbull check-database` on the
-/// restored copy, so an independent Python schema approximation cannot be
-/// the final authority on whether this application can open and migrate it.
+/// restored copy, so the server's own migrations, not a separate schema
+/// approximation, decide whether this application can open and migrate it.
 pub(crate) fn initialize_database(database_url: String) -> Result<(), ConnectionSetupError> {
     let mut connection = establish_connection_without_wal_check(database_url)?;
     verify_sqlite_runtime(&mut connection)?;

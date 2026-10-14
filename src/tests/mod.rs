@@ -1,6 +1,7 @@
 pub mod test_adversarial;
 pub mod test_attempts;
 pub mod test_audit_claims;
+pub mod test_backup;
 pub mod test_concurrency;
 pub mod test_config;
 pub mod test_contract;

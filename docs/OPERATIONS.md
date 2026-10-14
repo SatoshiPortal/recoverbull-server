@@ -71,7 +71,9 @@ sudo deploy/recoverbull install
 
 It lists the files that changed and asks before stopping anything (`--yes` to skip the question). Then it stops Tor and the server, keeps a copy of the current version and database in `/var/lib/recoverbull/previous-version/`, installs the new files, migrates the database, and starts everything again. Once the new version answers, the database copy is deleted (it would keep every secret, including deleted ones, a second time); the previous files stay for reference.
 
-If the new version fails to start, it puts the previous one back, with its database, and tells you. One reason this happens: a new version needs a setting that your `.env` does not have yet. The script never edits `.env`; read the logs, add the setting, and run the install again. If nothing changed, it does nothing.
+If the new version fails to start, it puts the previous one back, with its database, and tells you; the state the new version left behind is moved to `failed-upgrade.<date>/`. One reason this happens: a new version needs a setting that your `.env` does not have yet. The script never edits `.env`; read the logs, add the setting, and run the install again. If nothing changed, it only makes sure everything is running; a server that was stopped on purpose is started only after you confirm (or with `--yes`), since a restart resets every attempt budget.
+
+**The script never deletes your data.** The pre-upgrade copy stays in `previous-version/` after a successful upgrade, an older one is moved to `previous-version.<date>/` by the next upgrade, and a failed upgrade leaves `failed-upgrade.<date>/`. Each of these holds every secret as of that moment, deleted ones included, so delete them yourself once you trust the running version; `status` reminds you how many there are.
 
 ## Backups
 
@@ -147,7 +149,8 @@ sudo grep VmHWM /proc/$(systemctl show -p MainPID --value recoverbull)/status
 
 ## What the script does not do
 
-- Back up anything (see [Backups](#backups)).
+- Delete or overwrite a database, onion keys or a backup: it refuses (`--database` or `--onion-keys` when the live ones exist), or moves things aside with a date.
+- Back up anything off the host (see [Backups](#backups)).
 - Harden SSH, set up a firewall, or update the operating system beyond Debian security updates.
 
 The files under `deploy/` are the reference configuration; the comments in each explain its choices. The reasoning behind the security model and its accepted risks is in [SECURITY.md](../SECURITY.md).

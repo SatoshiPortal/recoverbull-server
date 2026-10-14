@@ -205,8 +205,9 @@ require_service_owned_database() {
 
 # Copies an SQLite database with the online backup API, so a -wal file next to
 # the source is included. Any schema is accepted here: check-database adopts or
-# refuses it with the server's own rules. The target is created fresh and
-# never through a link.
+# refuses it with the server's own rules. The target is created fresh
+# (O_EXCL: anything already there, a link included, makes it fail) and this
+# script never removes a database to make room for another.
 copy_database() {
   [[ $(realpath -m -- "$1") != $(realpath -m -- "$2") ]] ||
     die "$1 is already the live database: nothing to import"
@@ -215,9 +216,6 @@ copy_database() {
 import os, sqlite3, sys, urllib.parse
 source_uri = "file:" + urllib.parse.quote(os.path.abspath(sys.argv[1])) + "?mode=ro"
 target = sys.argv[2]
-for suffix in ("", "-wal", "-shm", "-journal"):
-    if os.path.lexists(target + suffix):
-        os.remove(target + suffix)
 os.close(os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600))
 source = sqlite3.connect(source_uri, uri=True)
 destination = sqlite3.connect(target)
@@ -238,6 +236,11 @@ own_database() {
 
 first_install() {
   local canary=$1 database=$2 onion_keys=$3
+  # Reached when the binary is missing. A server still running from an
+  # unlinked binary would keep writing while this install replaces files.
+  ! systemctl is-active --quiet recoverbull ||
+    die "recoverbull.service is running but $BIN is missing: stop it (systemctl stop recoverbull) and run again"
+  require_database_or_no_copies
   say "Installing packages"
   apt-get update -qq
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq tor nginx python3 curl unattended-upgrades >/dev/null
@@ -259,6 +262,8 @@ first_install() {
   validate_config
 
   if [[ -n $database ]]; then
+    [[ ! -e $DB ]] ||
+      die "$DB already exists: move it away yourself before importing another database"
     say "Importing $database"
     refuse_links "$DB"
     copy_database "$database" "$DB"
@@ -266,6 +271,8 @@ first_install() {
     check_database
   fi
   if [[ -n $onion_keys ]]; then
+    [[ ! -e $TOR_HS_DIR/hs_ed25519_secret_key ]] ||
+      die "$TOR_HS_DIR already holds onion keys: move them away yourself before importing others"
     say "Importing the onion keys from $onion_keys"
     install -d -o debian-tor -g debian-tor -m 0700 "$TOR_HS_DIR"
     local name
@@ -294,10 +301,22 @@ Back up these two now, off this host. Losing the onion keys loses the address:
 EOF
 }
 
+# A missing live database next to a kept copy means a restore did not
+# finish: starting the server would create an empty database and hide it.
+require_database_or_no_copies() {
+  [[ -e $DB ]] && return 0
+  local copy
+  for copy in "$DATA_DIR"/previous-version*/database.sqlite3 "$DATA_DIR"/failed-upgrade.*/database.sqlite3; do
+    [[ -e $copy ]] || continue
+    die "$DB is missing but $copy exists: put the right copy back by hand before starting the server"
+  done
+}
+
 # Enables and starts whatever is not running, in dependency order, without
 # restarting what already is: an upgrade's no-op path and a first install
 # that stopped after the files were in place both end here.
 ensure_running() {
+  require_database_or_no_copies
   systemctl enable --quiet recoverbull nginx "$TOR_SERVICE"
   systemctl start recoverbull
   wait_for_server || die "the server did not start. See: sudo deploy/recoverbull logs"
@@ -314,8 +333,20 @@ upgrade() {
   from=$(cat "$APP_DIR/VERSION" 2>/dev/null || echo unknown)
   to=$(checkout_version)
   if ((${#changed[@]} == 0)); then
+    if systemctl is-active --quiet recoverbull; then
+      ensure_running
+      say "Already up to date ($from) and running"
+      return 0
+    fi
+    # Enabled but stopped: someone stopped it, or it died. Rule 4: look
+    # before restarting, since a restart resets every attempt budget. A
+    # unit that was never enabled is an install that did not get this far.
+    if systemctl is-enabled --quiet recoverbull 2>/dev/null; then
+      warn "recoverbull is installed but stopped; starting it resets every attempt budget (see: sudo deploy/recoverbull logs)"
+      confirm "Start it now?"
+    fi
     ensure_running
-    say "Already up to date ($from) and running"
+    say "Already up to date ($from); services started"
     return 0
   fi
   check_env
@@ -326,12 +357,18 @@ upgrade() {
   warn "the restart resets every in-memory attempt budget"
   confirm "Stop the server and upgrade?"
 
-  trap abort_upgrade ERR
+  trap abort_upgrade ERR INT TERM
   say "Stopping Tor, then the server"
   systemctl stop "$TOR_SERVICE" recoverbull
-  rm -rf "$PREVIOUS_DIR"
+  # Nothing is deleted here: an earlier copy is moved aside with its date,
+  # and the operator decides when to remove it.
+  if [[ -e $PREVIOUS_DIR ]]; then
+    mv "$PREVIOUS_DIR" "$PREVIOUS_DIR.$(date -u +%Y%m%dT%H%M%SZ)"
+  fi
   install -d -o root -g root -m 0700 "$PREVIOUS_DIR"
   copy_database "$DB" "$PREVIOUS_DIR/database.sqlite3"
+  # A read-only open after an unclean stop can leave a root-owned -shm.
+  own_database
   local entry source destination mode
   for entry in "${MANAGED_FILES[@]}"; do
     IFS=: read -r source destination mode <<<"$entry"
@@ -339,7 +376,7 @@ upgrade() {
   done
   cp -p "$APP_DIR/VERSION" "$PREVIOUS_DIR/VERSION"
 
-  trap roll_back ERR
+  trap roll_back ERR INT TERM
   install_files
   validate_config
   check_database
@@ -347,17 +384,15 @@ upgrade() {
   wait_for_server
   systemctl reload-or-restart nginx
   systemctl start "$TOR_SERVICE"
-  trap on_error ERR
+  trap on_error ERR INT TERM
 
-  # The rollback window is over: do not keep a second copy of every secret,
-  # including trashed ones, on the host. The previous files stay for reference.
-  rm -f "$PREVIOUS_DIR/database.sqlite3"
   say "Upgraded to $to. Check it in a few minutes with: sudo deploy/recoverbull status"
+  say "The database as it was before this upgrade is kept in $PREVIOUS_DIR; delete it once you trust the new version (it holds every secret, deleted ones included)"
 }
 
 # Nothing was replaced yet: start the current version again.
 abort_upgrade() {
-  trap - ERR
+  trap - ERR INT TERM
   set +e
   systemctl start recoverbull
   wait_for_server ||
@@ -369,7 +404,7 @@ abort_upgrade() {
 # Puts back the previous files and database. Tor was stopped before the copy,
 # so the copy holds every accepted write.
 roll_back() {
-  trap - ERR
+  trap - ERR INT TERM
   set +e
   warn "the upgrade failed: going back to the previous version"
   systemctl stop recoverbull
@@ -381,7 +416,24 @@ roll_back() {
   done
   cp -p "$PREVIOUS_DIR/VERSION" "$APP_DIR/VERSION"
   systemctl daemon-reload
-  copy_database "$PREVIOUS_DIR/database.sqlite3" "$DB" && own_database
+  # The server is stopped and the copy is one self-contained file: a plain
+  # copy restores it. It is written next to the live path and renamed into
+  # place, so an interruption leaves either the old state or the restored
+  # one, never nothing; the state the new version left behind is moved
+  # aside, and the server is never started without a database.
+  refuse_links "$DB"
+  local failed_dir
+  failed_dir=$DATA_DIR/failed-upgrade.$(date -u +%Y%m%dT%H%M%SZ)
+  if ! install -o recoverbull -g recoverbull -m 0600 "$PREVIOUS_DIR/database.sqlite3" "$DB.restoring"; then
+    die "could not write the restored database; the service is stopped and the copy is in $PREVIOUS_DIR"
+  fi
+  install -d -o root -g root -m 0700 "$failed_dir"
+  for suffix in "" -wal -shm -journal; do
+    [[ -e $DB$suffix ]] && mv "$DB$suffix" "$failed_dir/"
+  done
+  if ! mv "$DB.restoring" "$DB"; then
+    die "could not put the restored database in place; the service is stopped, the copy is in $PREVIOUS_DIR and the failed state in $failed_dir"
+  fi
   systemctl start recoverbull
   wait_for_server ||
     die "the previous version did not start either. Its database is in $PREVIOUS_DIR. See: sudo deploy/recoverbull logs"
@@ -452,6 +504,9 @@ cmd_status() {
   fi
 
   line "version" "$(cat "$APP_DIR/VERSION" 2>/dev/null || echo unknown)"
+  local kept
+  kept=$(find "$DATA_DIR" -maxdepth 1 \( -name 'previous-version*' -o -name 'failed-upgrade.*' \) 2>/dev/null | wc -l)
+  ((kept == 0)) || line "kept copies" "$kept in $DATA_DIR (previous-version*, failed-upgrade.*): delete them once you trust the current version"
   line "disk" "$(df -h --output=pcent "$DATA_DIR" | tail -n 1 | tr -d ' ') used"
   $ok || exit 1
 }
@@ -485,6 +540,10 @@ main() {
       if [[ $EUID -ne 0 ]]; then
         command -v sudo >/dev/null || die "run this as root"
         exec sudo -- "$0" "$command" "$@"
+      fi
+      if [[ $command == install ]]; then
+        exec 9>/run/lock/recoverbull-install.lock
+        flock -n 9 || die "another recoverbull install is running"
       fi
       "cmd_$command" "$@"
       ;;

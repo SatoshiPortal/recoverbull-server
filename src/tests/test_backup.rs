@@ -130,6 +130,29 @@ fn test_backup_refuses_a_missing_or_non_database_source_and_leaves_nothing() {
     );
 }
 
+/// A destination named like a sidecar of another database is refused even
+/// when nothing is there yet: a stopped server's `db-wal` would be read as
+/// its journal on the next start.
+#[test]
+fn test_backup_refuses_a_sidecar_name_as_destination() {
+    let (source, _source_guard, _writer) = source_with_rows_in_wal();
+    let (other, _other_guard) = fresh_destination();
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let destination = PathBuf::from(format!("{}{suffix}", other.display()));
+        assert_eq!(
+            backup_database(&source, &destination),
+            Err(BackupError::DestinationIsASidecar)
+        );
+        assert!(!destination.exists());
+    }
+    // The source's own sidecar, which exists while a writer is open, is
+    // refused as existing, and left alone.
+    let own_wal = PathBuf::from(format!("{}-wal", source.display()));
+    let before = std::fs::read(&own_wal).unwrap();
+    assert!(backup_database(&source, &own_wal).is_err());
+    assert_eq!(std::fs::read(&own_wal).unwrap(), before);
+}
+
 /// The copy keeps the source's schema: a pre-ledger database stays one, so
 /// the copy of an older database still opens with the version that wrote
 /// it. `check-database` is the step that adopts and migrates.

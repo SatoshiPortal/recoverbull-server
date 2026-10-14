@@ -161,6 +161,10 @@ pub(crate) enum BackupError {
     /// The destination, or one of its SQLite sidecars, already exists (a
     /// symlink included): a backup never overwrites or follows a link.
     DestinationExists,
+    /// The destination is named like a SQLite sidecar (`-wal`, `-shm`,
+    /// `-journal`): writing a database there would be read as another
+    /// database's journal.
+    DestinationIsASidecar,
     /// The source could not be opened read-only.
     Open,
     /// SQLite could not produce the copy (not a database, unreadable, full
@@ -193,6 +197,9 @@ impl std::fmt::Display for BackupError {
             Self::DestinationExists => {
                 "the destination, or one of its -wal/-shm/-journal sidecars, already exists"
             }
+            Self::DestinationIsASidecar => {
+                "the destination name ends in -wal, -shm or -journal: that is another database's sidecar"
+            }
             Self::Open => "the source could not be opened read-only",
             Self::Copy => {
                 "SQLite could not copy the source (not a database, unreadable, or no space)"
@@ -223,6 +230,13 @@ pub(crate) fn backup_database(
 
     if !source.is_file() {
         return Err(BackupError::SourceMissing);
+    }
+    let destination_name = destination.to_string_lossy();
+    if ["-wal", "-shm", "-journal"]
+        .iter()
+        .any(|suffix| destination_name.ends_with(suffix))
+    {
+        return Err(BackupError::DestinationIsASidecar);
     }
     for suffix in ["-wal", "-shm", "-journal"] {
         let mut candidate = destination.as_os_str().to_owned();

@@ -122,7 +122,7 @@ write_env() {
     [[ $template_line == CANARY=* ]] && template_line="CANARY='$canary'"
     printf '%s\n' "$template_line"
   done <"$REPO/deploy/recoverbull.env.example" |
-    install -o recoverbull -g recoverbull -m 0600 /dev/stdin "$ENV_FILE"
+    install -o root -g recoverbull -m 0640 /dev/stdin "$ENV_FILE"
 }
 
 wait_for_server() {
@@ -178,24 +178,52 @@ changed_files() {
   done
 }
 
+# /var/lib/recoverbull belongs to the service account, so a compromised
+# server could plant symlinks there and have this root script read or write
+# through them. Nothing below touches the live database or its sidecars
+# through a link, and the live database must belong to the service.
+refuse_links() {
+  local path suffix
+  for path in "$@"; do
+    for suffix in "" -wal -shm -journal; do
+      [[ ! -L $path$suffix ]] || die "$path$suffix is a symlink: refusing to touch it"
+    done
+  done
+}
+
+require_service_owned_database() {
+  refuse_links "$DB"
+  [[ ! -e $DB ]] || [[ $(stat -c %U "$DB") == recoverbull ]] ||
+    die "$DB is not owned by recoverbull: refusing to read it"
+}
+
 # Copies an SQLite database with the online backup API, so a -wal file next to
 # the source is included. Any schema is accepted here: check-database adopts or
-# refuses it with the server's own rules.
+# refuses it with the server's own rules. The target is created fresh and
+# never through a link.
 copy_database() {
+  refuse_links "$2"
   python3 - "$1" "$2" <<'PY'
-import sqlite3, sys
-source = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
-target = sqlite3.connect(sys.argv[2])
-source.backup(target)
-target.close()
+import os, sqlite3, sys, urllib.parse
+source_uri = "file:" + urllib.parse.quote(os.path.abspath(sys.argv[1])) + "?mode=ro"
+target = sys.argv[2]
+for suffix in ("", "-wal", "-shm", "-journal"):
+    if os.path.lexists(target + suffix):
+        os.remove(target + suffix)
+os.close(os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600))
+source = sqlite3.connect(source_uri, uri=True)
+destination = sqlite3.connect(target)
+source.backup(destination)
+destination.close()
 PY
 }
 
 own_database() {
   local suffix
+  refuse_links "$DB"
   for suffix in "" -wal -shm; do
     [[ -e $DB$suffix ]] || continue
-    chown recoverbull:recoverbull "$DB$suffix"
+    chown --no-dereference recoverbull:recoverbull "$DB$suffix"
     chmod 0600 "$DB$suffix"
   done
 }
@@ -224,6 +252,7 @@ first_install() {
 
   if [[ -n $database ]]; then
     say "Importing $database"
+    refuse_links "$DB"
     copy_database "$database" "$DB"
     own_database
     check_database
@@ -269,6 +298,7 @@ upgrade() {
     return 0
   fi
   check_env
+  require_service_owned_database
 
   say "Upgrade $from -> $to, replacing:"
   printf '      %s\n' "${changed[@]}" >&2
@@ -298,6 +328,9 @@ upgrade() {
 
   systemctl reload-or-restart nginx
   systemctl start "$TOR_SERVICE"
+  # The rollback window is over: do not keep a second copy of every secret,
+  # including trashed ones, on the host. The previous files stay for reference.
+  rm -f "$PREVIOUS_DIR/database.sqlite3"
   say "Upgraded to $to. Check it in a few minutes with: sudo deploy/recoverbull status"
 }
 
@@ -327,7 +360,6 @@ roll_back() {
   done
   cp -p "$PREVIOUS_DIR/VERSION" "$APP_DIR/VERSION"
   systemctl daemon-reload
-  for suffix in "" -wal -shm -journal; do rm -f "$DB$suffix"; done
   copy_database "$PREVIOUS_DIR/database.sqlite3" "$DB" && own_database
   systemctl start recoverbull
   wait_for_server ||

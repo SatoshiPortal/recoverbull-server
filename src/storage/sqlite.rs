@@ -75,10 +75,16 @@ pub(crate) enum StorageError {
 
 /// SQLite reports contention as an error like any other; it is the one
 /// failure a client should simply retry rather than the operator investigate.
+/// Covers SQLITE_BUSY ("database is locked"), SQLITE_LOCKED ("database table
+/// is locked"), SQLITE_PROTOCOL ("locking protocol", a rare wal-index retry
+/// exhaustion) and SQLITE_INTERRUPT.
 fn classify_database_error(error: &diesel::result::Error) -> StorageError {
+    const TRANSIENT: [&str; 4] = ["locked", "busy", "locking protocol", "interrupted"];
     match error {
         diesel::result::Error::DatabaseError(_, info)
-            if info.message().contains("locked") || info.message().contains("busy") =>
+            if TRANSIENT
+                .iter()
+                .any(|needle| info.message().contains(needle)) =>
         {
             StorageError::Busy
         }

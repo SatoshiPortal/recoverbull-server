@@ -211,11 +211,14 @@ impl RecoveryService {
                 Ok(Err(StorageError::Database)) => {
                     // Full disk, quota, unwritable or damaged file: from now
                     // on every store is refused the same way (see the gate
-                    // above), so the one `500` here is the last distinguishable
-                    // answer this process gives.
-                    storage_pressure.store(true, Ordering::Relaxed);
+                    // above). The request that trips the latch keeps its
+                    // `500`, which is the one line the operator sees.
                     counters.database_error();
-                    StoreResult::DatabaseError
+                    if storage_pressure.swap(true, Ordering::Relaxed) {
+                        StoreResult::StoragePressure
+                    } else {
+                        StoreResult::DatabaseError
+                    }
                 }
                 Ok(Err(StorageError::Connection)) => {
                     counters.database_error();
@@ -227,12 +230,24 @@ impl RecoveryService {
                 }
             }
         });
-        match task.await {
+        let result = match task.await {
             Ok(result) => result,
             Err(_) => {
                 self.counters.database_error();
                 StoreResult::DatabaseError
             }
+        };
+        // A request admitted before the latch but finished after it would
+        // otherwise carry a true `201`/`500` out of the pressure window. A
+        // `503` for a write that did land is harmless: the client retries
+        // an idempotent store later.
+        match result {
+            StoreResult::DatabaseError => result,
+            _ if self.storage_pressure.load(Ordering::Relaxed) => {
+                self.counters.store_storage_pressure();
+                StoreResult::StoragePressure
+            }
+            _ => result,
         }
     }
 

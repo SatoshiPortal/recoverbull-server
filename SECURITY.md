@@ -601,9 +601,11 @@ code, keep the invariant — and run the guarding test.
   consults the ledger; reproduced on the binary with `RLIMIT_FSIZE`. Fixed
   in two layers: a store for an existing row now rewrites it, so it needs the
   same WAL space as a new row and fails with it; and the first storage
-  failure latches `/store` closed (`503`, `Retry-After: 60`) until a restart,
-  so at most one answer per process can differ, and that one is a `500` the
-  operator sees. SQLite's "database is locked" is classified as contention
+  failure latches `/store` closed (`503`, `Retry-After: 60`) until a restart;
+  a request that finishes after the latch is refused too, so the only true
+  answers that leave the window are those of the requests already in
+  flight when it closed, at most a store burst, and the one `500` that
+  tripped it is what the operator sees. SQLite's "database is locked" is classified as contention
   and does not latch. `/fetch` and `/trash` are unaffected: recovery keeps
   working on a full disk. AUD-02 (medium)
   — the runbook's staged PROXY-protocol upgrade was wrong in both orders;

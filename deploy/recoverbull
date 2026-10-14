@@ -80,6 +80,10 @@ require_debian_13() {
   . /etc/os-release
   [[ ${ID:-} == debian && ${VERSION_ID:-} == 13 ]] ||
     die "Debian 13 is required (found ${PRETTY_NAME:-unknown})"
+  # Everything here is a systemd unit. A plain container has no init, so
+  # say so before installing packages or writing anything.
+  [[ -d /run/systemd/system ]] ||
+    die "systemd is not running here; a container needs an init (podman run --systemd=always with /sbin/init)"
 }
 
 require_build() {

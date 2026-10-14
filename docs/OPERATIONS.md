@@ -23,10 +23,10 @@ nginx is not optional: it bounds slow requests before they reach the server, kee
 
 ## Install
 
-You need a fresh Debian 13 host with 2 GB of RAM (for the Rust build; the server itself is capped at 512 MB), `sudo`, and Rust:
+You need a fresh Debian 13 host with systemd (a plain container has none), 2 GB of RAM (for the Rust build; the server itself is capped at 512 MB), and a user with `sudo`. Install the build tools and Rust once:
 
 ```sh
-sudo apt install build-essential git curl
+sudo apt install build-essential git curl   # build-essential: the `cc` linker the Rust build needs; curl: for rustup
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain none
 . ~/.cargo/env
 ```

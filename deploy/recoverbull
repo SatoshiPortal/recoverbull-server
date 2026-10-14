@@ -109,7 +109,8 @@ check_env() {
   grep -qx 'SERVER_ADDRESS=127.0.0.1:3001' "$ENV_FILE" ||
     die "$ENV_FILE must contain SERVER_ADDRESS=127.0.0.1:3001"
   grep -q '^CANARY=.' "$ENV_FILE" || die "$ENV_FILE has no CANARY"
-  ! grep -q '^CANARY=CHANGE_ME$' "$ENV_FILE" || die "$ENV_FILE still has the placeholder canary"
+  ! grep -Eq "^CANARY=['\"]?CHANGE_ME['\"]?[[:space:]]*$" "$ENV_FILE" ||
+    die "$ENV_FILE still has the placeholder canary"
 }
 
 write_env() {
@@ -118,6 +119,7 @@ write_env() {
     read -r -p "Warrant canary (shown by /info): " canary
   fi
   [[ -n $canary ]] || die "a first install needs a warrant canary: add --canary '<text>'"
+  [[ $canary != CHANGE_ME ]] || die "CHANGE_ME is the placeholder, not a canary"
   [[ $canary != *$'\n'* && $canary != *"'"* ]] ||
     die "the canary cannot contain a newline or a single quote"
   # Single quotes keep every other character literal for dotenvy.
@@ -206,6 +208,8 @@ require_service_owned_database() {
 # refuses it with the server's own rules. The target is created fresh and
 # never through a link.
 copy_database() {
+  [[ $(realpath -m -- "$1") != $(realpath -m -- "$2") ]] ||
+    die "$1 is already the live database: nothing to import"
   refuse_links "$2"
   python3 - "$1" "$2" <<'PY'
 import os, sqlite3, sys, urllib.parse
@@ -272,13 +276,11 @@ first_install() {
   fi
 
   say "Starting the server, nginx, then Tor"
-  systemctl enable --quiet --now recoverbull
-  wait_for_server || die "the server did not start. See: sudo deploy/recoverbull logs"
-  systemctl enable --quiet nginx "$TOR_SERVICE"
-  systemctl restart nginx "$TOR_SERVICE"
-  for _ in $(seq 1 60); do [[ -f $TOR_HS_DIR/hostname ]] && break; sleep 1; done
-  [[ -f $TOR_HS_DIR/hostname ]] ||
-    die "Tor did not create the onion address. See: sudo deploy/recoverbull logs --all"
+  # nginx and Tor were running with their stock configuration: restart them
+  # once so they read ours.
+  systemctl enable --quiet recoverbull nginx "$TOR_SERVICE"
+  systemctl stop nginx "$TOR_SERVICE"
+  ensure_running
 
   cat >&2 <<EOF
 
@@ -292,13 +294,28 @@ Back up these two now, off this host. Losing the onion keys loses the address:
 EOF
 }
 
+# Enables and starts whatever is not running, in dependency order, without
+# restarting what already is: an upgrade's no-op path and a first install
+# that stopped after the files were in place both end here.
+ensure_running() {
+  systemctl enable --quiet recoverbull nginx "$TOR_SERVICE"
+  systemctl start recoverbull
+  wait_for_server || die "the server did not start. See: sudo deploy/recoverbull logs"
+  systemctl start nginx
+  systemctl start "$TOR_SERVICE"
+  for _ in $(seq 1 60); do [[ -f $TOR_HS_DIR/hostname ]] && break; sleep 1; done
+  [[ -f $TOR_HS_DIR/hostname ]] ||
+    die "Tor did not create the onion address. See: sudo deploy/recoverbull logs --all"
+}
+
 upgrade() {
   local changed from to
   mapfile -t changed < <(changed_files)
   from=$(cat "$APP_DIR/VERSION" 2>/dev/null || echo unknown)
   to=$(checkout_version)
   if ((${#changed[@]} == 0)); then
-    say "Already up to date ($from)"
+    ensure_running
+    say "Already up to date ($from) and running"
     return 0
   fi
   check_env
@@ -328,10 +345,10 @@ upgrade() {
   check_database
   systemctl start recoverbull
   wait_for_server
-  trap on_error ERR
-
   systemctl reload-or-restart nginx
   systemctl start "$TOR_SERVICE"
+  trap on_error ERR
+
   # The rollback window is over: do not keep a second copy of every secret,
   # including trashed ones, on the host. The previous files stay for reference.
   rm -f "$PREVIOUS_DIR/database.sqlite3"

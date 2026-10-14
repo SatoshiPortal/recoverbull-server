@@ -42,7 +42,7 @@ sudo deploy/recoverbull install
 
 It asks for the warrant canary (or pass `--canary '<text>'`), then:
 
-- installs `tor`, `nginx`, `python3`, `curl` and `unattended-upgrades` from Debian;
+- installs `tor`, `nginx`, `curl` and `unattended-upgrades` from Debian;
 - creates the `recoverbull` account, installs the binary under `/opt/recoverbull` and the configuration from `deploy/`;
 - disables nginx's default public site;
 - starts the server, nginx and Tor, and prints the onion address.
@@ -69,7 +69,7 @@ cargo build --release --locked
 sudo deploy/recoverbull install
 ```
 
-It lists the files that changed and asks before stopping anything (`--yes` to skip the question). Then it stops Tor and the server, keeps a copy of the current version and database in `/var/lib/recoverbull/previous-version/`, installs the new files, migrates the database, and starts everything again. Once the new version answers, the database copy is deleted (it would keep every secret, including deleted ones, a second time); the previous files stay for reference.
+It checks `.env` against the new version's rules (`recoverbull check-config`), lists the files that changed, and asks before stopping anything (`--yes` to skip the question). Then it stops Tor and the server, keeps a copy of the current version and database in `/var/lib/recoverbull/previous-version/`, installs the new files, migrates the database, and starts everything again. Once the new version answers, the database copy is deleted (it would keep every secret, including deleted ones, a second time); the previous files stay for reference.
 
 If the new version fails to start, it puts the previous one back, with its database, and tells you; the state the new version left behind is moved to `failed-upgrade.<date>/`. One reason this happens: a new version needs a setting that your `.env` does not have yet. The script never edits `.env`; read the logs, add the setting, and run the install again. If nothing changed, it only makes sure everything is running; a server that was stopped on purpose is started only after you confirm (or with `--yes`), since a restart resets every attempt budget.
 
@@ -85,10 +85,10 @@ The script does not make backups. Copy these three things off the host, encrypte
 | Database | `/var/lib/recoverbull/database.sqlite3` | Every stored secret. |
 | Configuration | `/var/lib/recoverbull/.env` | The canary and settings. |
 
-Never copy the database file with `cp` while the server runs: recent writes may still be in `database.sqlite3-wal`. Use SQLite's backup API instead, which is safe while the server runs:
+Never copy the database file with `cp` while the server runs: recent writes may still be in `database.sqlite3-wal`. The server binary makes a consistent copy instead, safe while it runs, readable by its owner only:
 
 ```sh
-sudo python3 deploy/backup/sqlite_backup.py backup /var/lib/recoverbull/database.sqlite3 /root/recoverbull-$(date +%F).sqlite3
+sudo /opt/recoverbull/bin/recoverbull backup /var/lib/recoverbull/database.sqlite3 /root/recoverbull-$(date +%F).sqlite3
 ```
 
 To restore on a new host, use `install --database --onion-keys` as above.
@@ -103,6 +103,8 @@ The database holds encrypted secrets only, but together with a user's Backup Fil
 | Read logs | `sudo deploy/recoverbull logs` (`-f` to follow, `-n 500` for more, `--all` to add nginx and Tor) |
 | Change the canary | Edit `CANARY` in `/var/lib/recoverbull/.env`; served within ten minutes, no restart |
 | Know the onion address | `sudo cat /var/lib/tor/recoverbull/hostname` |
+| Validate `.env` after editing it | `sudo env -C /var/lib/recoverbull /opt/recoverbull/bin/recoverbull check-config` |
+| Every server command | `/opt/recoverbull/bin/recoverbull --help` |
 
 For about ten minutes after Tor starts, `status` reports the onion as `starting` while the address is being published.
 

@@ -152,6 +152,152 @@ impl SqliteStorage {
     }
 }
 
+/// Why `recoverbull backup` refused or failed. No variant carries database
+/// content: the message is safe for an operator's terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BackupError {
+    /// The source is not an existing regular file.
+    SourceMissing,
+    /// The destination, or one of its SQLite sidecars, already exists (a
+    /// symlink included): a backup never overwrites or follows a link.
+    DestinationExists,
+    /// The destination is named like a SQLite sidecar (`-wal`, `-shm`,
+    /// `-journal`): writing a database there would be read as another
+    /// database's journal.
+    DestinationIsASidecar,
+    /// The source could not be opened read-only.
+    Open,
+    /// SQLite could not produce the copy (not a database, unreadable, full
+    /// destination volume).
+    Copy,
+    /// The copy was written but fails `PRAGMA integrity_check`.
+    Integrity,
+}
+
+/// SQLite URI path escaping: `%`, `?` and `#` would otherwise be read as an
+/// escape, the query string, or a fragment.
+fn sqlite_uri_path(path: &std::path::Path) -> Option<String> {
+    let path = path.to_str()?;
+    let mut escaped = String::with_capacity(path.len());
+    for character in path.chars() {
+        match character {
+            '%' => escaped.push_str("%25"),
+            '?' => escaped.push_str("%3f"),
+            '#' => escaped.push_str("%23"),
+            other => escaped.push(other),
+        }
+    }
+    Some(escaped)
+}
+
+impl std::fmt::Display for BackupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::SourceMissing => "the source is not an existing file",
+            Self::DestinationExists => {
+                "the destination, or one of its -wal/-shm/-journal sidecars, already exists"
+            }
+            Self::DestinationIsASidecar => {
+                "the destination name ends in -wal, -shm or -journal: that is another database's sidecar"
+            }
+            Self::Open => "the source could not be opened read-only",
+            Self::Copy => {
+                "SQLite could not copy the source (not a database, unreadable, or no space)"
+            }
+            Self::Integrity => "the copy failed SQLite's integrity check",
+        })
+    }
+}
+
+/// Writes a consistent copy of `source` to the new file `destination`, safe
+/// while the server is running. The source is opened read-only and copied
+/// with `VACUUM INTO`, which reads one transaction-consistent snapshot,
+/// including rows still in its `-wal` file, and writes a compact,
+/// self-contained database. Any schema is copied as it is: nothing is
+/// migrated, so the copy of an older database still opens with the version
+/// that wrote it; `check_database` is the step that migrates.
+///
+/// The destination is created atomically (`O_EXCL`, so an existing file or a
+/// planted link makes it fail) with mode 0600 before any byte is written, so
+/// it is never readable by others and never overwrites anything. SQLite's own
+/// journal for the copy goes next to it, so the destination directory must be
+/// one only the caller can write to.
+pub(crate) fn backup_database(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> Result<(), BackupError> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    if !source.is_file() {
+        return Err(BackupError::SourceMissing);
+    }
+    let destination_name = destination.to_string_lossy();
+    if ["-wal", "-shm", "-journal"]
+        .iter()
+        .any(|suffix| destination_name.ends_with(suffix))
+    {
+        return Err(BackupError::DestinationIsASidecar);
+    }
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let mut candidate = destination.as_os_str().to_owned();
+        candidate.push(suffix);
+        if std::fs::symlink_metadata(&candidate).is_ok() {
+            return Err(BackupError::DestinationExists);
+        }
+    }
+    let source_uri = sqlite_uri_path(source).ok_or(BackupError::Open)?;
+    let destination_path = destination.to_str().ok_or(BackupError::Copy)?;
+
+    // `VACUUM INTO` accepts an empty existing file, which lets the file be
+    // created here with the right mode and no race with a later link.
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(destination)
+    {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(BackupError::DestinationExists)
+        }
+        Err(_) => return Err(BackupError::Copy),
+    }
+
+    let copied = SqliteConnection::establish(&format!("file:{source_uri}?mode=ro"))
+        .map_err(|_| BackupError::Open)
+        .and_then(|mut connection| {
+            sql_query("PRAGMA busy_timeout = 5000;")
+                .execute(&mut connection)
+                .map_err(|_| BackupError::Open)?;
+            sql_query("VACUUM INTO ?")
+                .bind::<diesel::sql_types::Text, _>(destination_path)
+                .execute(&mut connection)
+                .map_err(|_| BackupError::Copy)?;
+            Ok(())
+        });
+    if let Err(error) = copied {
+        // A refused or partial copy must not look like a backup.
+        let _ = std::fs::remove_file(destination);
+        return Err(error);
+    }
+
+    #[derive(QueryableByName)]
+    struct IntegrityCheck {
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        integrity_check: String,
+    }
+    let destination_uri = sqlite_uri_path(destination).ok_or(BackupError::Integrity)?;
+    let mut copy = SqliteConnection::establish(&format!("file:{destination_uri}?mode=ro"))
+        .map_err(|_| BackupError::Integrity)?;
+    let verdict = sql_query("PRAGMA integrity_check")
+        .load::<IntegrityCheck>(&mut copy)
+        .map_err(|_| BackupError::Integrity)?;
+    if verdict.len() != 1 || verdict[0].integrity_check != "ok" {
+        return Err(BackupError::Integrity);
+    }
+    Ok(())
+}
+
 /// Validates an already-initialized database for the restore drill.
 ///
 /// A restore drill points `recoverbull check-database` at a RESTORED copy, which
@@ -188,8 +334,8 @@ pub(crate) fn check_database(database_url: String) -> Result<(), ConnectionSetup
 /// Applies the exact database initialization used by server startup.
 ///
 /// The restore drill invokes this through `recoverbull check-database` on the
-/// restored copy, so an independent Python schema approximation cannot be
-/// the final authority on whether this application can open and migrate it.
+/// restored copy, so the server's own migrations, not a separate schema
+/// approximation, decide whether this application can open and migrate it.
 pub(crate) fn initialize_database(database_url: String) -> Result<(), ConnectionSetupError> {
     let mut connection = establish_connection_without_wal_check(database_url)?;
     verify_sqlite_runtime(&mut connection)?;
@@ -283,6 +429,22 @@ pub enum ConnectionSetupError {
     /// is not an initialized database. Only the check path returns this: normal
     /// startup deliberately creates the schema on a fresh `DATABASE_URL`.
     Uninitialized,
+}
+
+impl std::fmt::Display for ConnectionSetupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Open => "the database file could not be opened",
+            Self::Version => "the bundled SQLite is older than the minimum this server requires",
+            Self::BusyTimeout => "the busy timeout could not be set",
+            Self::SecureDelete => "secure_delete could not be enabled",
+            Self::SecureDeleteVerification => "secure_delete is not in effect",
+            Self::Wal => "the database is not in WAL mode",
+            Self::Migration => "the migrations failed or the secret table does not match them",
+            Self::NotADatabase => "the file is not an SQLite database",
+            Self::Uninitialized => "the file has no secret table: not an initialized database",
+        })
+    }
 }
 
 #[derive(QueryableByName)]

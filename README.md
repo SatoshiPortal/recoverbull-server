@@ -9,14 +9,16 @@ The protocol is described in the [RecoverBull whitepaper and specification](http
 | You want to… | Read |
 |---|---|
 | Run a server, upgrade it, back it up | [docs/OPERATIONS.md](docs/OPERATIONS.md) |
-| Write a client | [docs/API.md](docs/API.md) |
+| Write a client | [recoverbull-client-dart](https://github.com/SatoshiPortal/recoverbull-client-dart) and the [specification](https://github.com/SatoshiPortal/recoverbull-whitepaper/blob/master/SPECIFICATION.md); [docs/API.md](docs/API.md) for what this server adds |
 | Review or audit the security model | [SECURITY.md](SECURITY.md) |
 
 ## Run a server in short
 
-On a fresh Debian 13 host with Rust installed, as your user:
+On a fresh Debian 13 host, as a user with `sudo`:
 
 ```sh
+sudo apt install build-essential git curl   # linker for the Rust build, git, and curl for rustup
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain none && . ~/.cargo/env
 git clone https://github.com/SatoshiPortal/recoverbull-server.git
 cd recoverbull-server
 cargo build --release --locked

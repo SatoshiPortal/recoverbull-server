@@ -30,6 +30,16 @@ async fn test_duplicate_store_is_indistinguishable_and_does_not_overwrite() {
         encrypted_secret: BASE64_ENCRYPTED_SECRET.to_string(),
     };
     let first = server.post("/store").json(store).await;
+    let fetch = FetchSecret {
+        identifier: SHA256_111111.to_string(),
+        authentication_key: SHA256_222222.to_string(),
+    };
+    let before = server
+        .post("/fetch")
+        .json(&fetch)
+        .expect_success()
+        .await
+        .json::<serde_json::Value>();
 
     let duplicate = &StoreSecret {
         identifier: SHA256_111111.to_string(),
@@ -43,17 +53,18 @@ async fn test_duplicate_store_is_indistinguishable_and_does_not_overwrite() {
     assert_eq!(first.status_code(), StatusCode::CREATED);
     assert_eq!(second.status_code(), first.status_code());
 
-    // Idempotency must not turn into an overwrite primitive.
-    let fetched = server
+    // Idempotency must not turn into an overwrite primitive, and the row
+    // rewrite that makes a duplicate store a real write (AUD-2026-10-01)
+    // must not refresh `created_at`: the owner would otherwise see the
+    // timestamp of a planted re-store.
+    let after = server
         .post("/fetch")
-        .json(&FetchSecret {
-            identifier: SHA256_111111.to_string(),
-            authentication_key: SHA256_222222.to_string(),
-        })
+        .json(&fetch)
         .expect_success()
         .await
         .json::<serde_json::Value>();
-    assert_eq!(fetched["encrypted_secret"], BASE64_ENCRYPTED_SECRET);
+    assert_eq!(after["encrypted_secret"], BASE64_ENCRYPTED_SECRET);
+    assert_eq!(after["created_at"], before["created_at"]);
 }
 
 #[tokio::test]

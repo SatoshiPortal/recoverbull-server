@@ -1,7 +1,7 @@
 # Debian 13 with systemd, to try the deployment in a container instead of a
 # VM. The install script drives systemd units, so a plain debian image
-# cannot run it. Build and run with podman, as root inside (privileged: the
-# hardened unit needs namespaces and device isolation):
+# cannot run it. Build and run with podman; inside, work as the sudo user
+# `op` (privileged: the hardened unit needs namespaces and device isolation):
 #
 #   podman build -t recoverbull-debian13 -f deploy/test/Containerfile .
 #   podman run -d --name recoverbull-test --privileged --systemd=always \

@@ -17,7 +17,7 @@ block of the `test` job in `.github/workflows/ci.yml`.
 3. `src/recovery/identifiers.rs` — identifier and `secret_id` derivation; `src/recovery/service.rs` — recovery orchestration.
 4. `src/attempts/ledger.rs` — admission and finalization FSM; `src/attempts/snapshot.rs` — deterministic public snapshot; `src/attempts/maintenance.rs` — expiry and global wipe.
 5. `src/storage/sqlite.rs` — Diesel/SQLite transactions and connection checks; `src/observability/diagnostic.rs` and `src/observability/counters.rs` — privacy-safe diagnostics and aggregate counters.
-6. Read tests by category: `src/tests/test_contract.rs`, `test_concurrency.rs`, `test_privacy.rs`, `test_http_boundary.rs`, `test_config.rs`, `test_rate_limit.rs`, `test_secret_id_budget.rs`, `test_attempts.rs`, `test_secure_delete.rs`, `test_db_errors.rs`, `test_logging.rs`, `test_fetch.rs`, `test_store.rs`, `test_trash.rs`, `test_info.rs`, `test_timing.rs`, `test_migrations.rs`, `test_adversarial.rs`, `test_audit_claims.rs`, and `test_server.rs`.
+6. Read tests by category: `src/tests/test_contract.rs`, `test_backup.rs`, `test_cli.rs`, `test_storage_pressure.rs`, `test_concurrency.rs`, `test_privacy.rs`, `test_http_boundary.rs`, `test_config.rs`, `test_rate_limit.rs`, `test_secret_id_budget.rs`, `test_attempts.rs`, `test_secure_delete.rs`, `test_db_errors.rs`, `test_logging.rs`, `test_fetch.rs`, `test_store.rs`, `test_trash.rs`, `test_info.rs`, `test_timing.rs`, `test_migrations.rs`, `test_adversarial.rs`, `test_audit_claims.rs`, and `test_server.rs`.
 
 ## Vocabulary
 
@@ -91,9 +91,10 @@ risks that are **accepted by design** (do not re-report them), the
 **invariants** the code must keep (each guarded by tests), the traps already
 stepped into, and a checklist for future reviews.
 
-Application log guarantees do not cover nginx, journald, or Tor logs unless the
-operator runbook is applied: those logs may contain request metadata and require
-strict levels, private permissions, and short retention. Five-minute global
+Application log guarantees do not cover nginx, journald, or Tor logs: those
+may contain request metadata. The shipped nginx configuration keeps no access
+log and writes only critical errors; Tor logs to the journal; the journald
+drop-in in [docs/OPERATIONS.md](docs/OPERATIONS.md) bounds the volume. Five-minute global
 counters retain coarse activity metadata and require the same access controls.
 
 For deployment guardrails (single-instance, a validated reverse proxy, and Tor
@@ -432,7 +433,7 @@ under podman:
 
 ## Invariants (each guarded by tests)
 
-The table below is the minimal primary-guard index for the security invariants; it is not an exhaustive index of every test. Supplemental tests are classified here by module so an auditor can locate evidence without listing all 224 tests individually.
+The table below is the minimal primary-guard index for the security invariants; it is not an exhaustive index of every test. Supplemental tests are classified here by module so an auditor can locate evidence without listing every test individually.
 
 ### Additional evidence by test module
 
@@ -440,6 +441,8 @@ The table below is the minimal primary-guard index for the security invariants; 
 |---|---|
 | `test_adversarial` | malformed input and hostile sequencing |
 | `test_attempts` | snapshot contract and telemetry values |
+| `test_backup` | `recoverbull backup`: consistent, owner-only, never overwriting, never migrating |
+| `test_cli` | exit codes of the operator commands |
 | `test_audit_claims` | historical audit findings and claim-level regressions |
 | `test_concurrency` | concurrent admission and storage operations |
 | `test_config` | fail-closed configuration validation |
@@ -456,6 +459,7 @@ The table below is the minimal primary-guard index for the security invariants; 
 | `test_secure_delete` | SQLite secure deletion and WAL behavior |
 | `test_server` | shared isolated server and database fixtures |
 | `test_store` | store validation and idempotency |
+| `test_storage_pressure` | the `/store` oracle under storage pressure: reserve, rewrite, latch |
 | `test_timing` | sensitive POST response floor |
 | `test_trash` | atomic destructive lookup behavior |
 
@@ -530,15 +534,15 @@ code, keep the invariant — and run the guarding test.
 | Identifier-map capacity is validated against the lower of the declared budget and the enforced cgroup limit, accounting for the `secret_id` budget, and refuses at startup rather than deferring to the OOM killer | `config::{validate_capacity,estimated_peak_memory_bytes}` | The former fixed 10,000,000-entry ceiling rested on a per-entry cost an order of magnitude too low, so it admitted exactly the silent memory-exhaustion kill it claimed to prevent (~14.4 GiB of peak against `MemoryMax=512M`) | `test_validate_capacity_rejects_the_former_ten_million_ceiling`, `test_validate_capacity_tracks_the_secret_id_budget`, `test_validate_capacity_boundary_is_exact`, `test_capacity_model_is_not_optimistic_against_the_measurement`, `test_estimated_peak_memory_does_not_wrap`, `test_effective_budget_takes_the_enforced_limit_when_lower`, `test_capacity_is_refused_against_a_lower_enforced_limit`, `test_parse_memory_limit_recognizes_unlimited_forms` |
 | A server error produces one `WARN` line; a `503` is pressure and produces none; nothing else is logged per request, and the line carries only the request ID, a static route enum and the status. There is deliberately no application quota: the operator must install and verify the documented journald rate and retention policy | `observability::diagnostic::record`, `docs/OPERATIONS.md` | `WARN` is live under the default filter, so a client-triggerable status routed into it becomes a disk-fill vector and crowds out a genuine `500` — the previous two-class quota misfiled `304` and did exactly that. Journald may suppress the aggregate line too, so durable counters require an independently bounded sink | `test_only_a_genuine_server_error_is_logged`, `test_conditional_polling_is_never_logged`, `test_global_lookup_rejections_are_counted_not_logged`, `test_database_error_logs_are_diagnostic_without_sensitive_details`, `test_user_controlled_path_and_header_never_reach_the_logs` |
 | The dotenv CANARY is re-read at most once every ten minutes and single-flight; `/info` resolves the value and remaining freshness in one cache transaction; process-env CANARY is authoritative, a missing CANARY is empty, and an unavailable file uses the startup fallback | `config::canary_file_state`, `InfoState::current_canary` | The signal must never be masked by a fallback, its staleness must be bounded by one interval rather than stacked with a cache, and an expiry-time request burst must not turn the only unbucketed public route into concurrent filesystem work | `test_info_rereads_canary_from_file_with_startup_fallback`, `test_info_rereads_same_length_canary_when_file_metadata_is_restored`, `test_info_serves_a_cached_canary_and_advertises_its_freshness`, `test_info_env_canary_is_authoritative_over_file`, `test_info_advertises_no_freshness_for_an_env_canary`, `test_concurrent_info_refresh_reads_the_canary_once` |
-| The CI-tested nginx example streams request bodies into Axum's total timeout, gives `GET /attempts` one Host/query-independent cache key, keeps other methods outside the edge bucket, holds one cache-fill lock for the whole request bound, and maps nginx-generated pressure to JSON `503` with `Retry-After` without intercepting upstream statuses | `deploy/nginx/{recoverbull.conf,smoke.py}`, `.github/workflows/ci.yml` | nginx otherwise buffers the whole body while applying only an inactivity timeout, so drip-fed requests can occupy the global connection cap without entering Axum's 30-second bound. Request-controlled cache-key variants or the five-second cache-lock defaults can also multiply expensive upstream builds; applying the GET bucket to other methods changes Axum's contract. This proves the committed configuration, which `deploy/recoverbull` installs unchanged | `test_example_nginx_preserves_attempts_proxy_contract`, `deploy/nginx/smoke.py`, CI `nginx` job |
+| The CI-tested nginx configuration streams request bodies into Axum's total timeout, gives `GET /attempts` one Host/query-independent cache key, keeps other methods outside the edge bucket, holds one cache-fill lock for the whole request bound, and maps nginx-generated pressure to JSON `503` with `Retry-After` without intercepting upstream statuses | `deploy/nginx/{recoverbull.conf,smoke.py}`, `.github/workflows/ci.yml` | nginx otherwise buffers the whole body while applying only an inactivity timeout, so drip-fed requests can occupy the global connection cap without entering Axum's 30-second bound. Request-controlled cache-key variants or the five-second cache-lock defaults can also multiply expensive upstream builds; applying the GET bucket to other methods changes Axum's contract. This proves the committed configuration, which `deploy/recoverbull` installs unchanged | `test_example_nginx_preserves_attempts_proxy_contract`, `deploy/nginx/smoke.py`, CI `nginx` job |
 | SQLite files created in the repository and all of their WAL/shared-memory/rollback sidecars are ignored | `.gitignore` | A crash can leave committed database state in a sidecar; ignoring only the main `*.sqlite3` file makes that state eligible for an accidental commit | `test_repository_ignores_sqlite_sidecars` |
-| The systemd example starts the unprivileged service with no capability in its bounding set and a private minimal device namespace | `deploy/systemd/recoverbull.service` | A compromised process has no legitimate need to acquire capabilities or access host device nodes | `test_systemd_example_drops_capabilities_and_privatises_devices` |
+| The systemd unit starts the unprivileged service with no capability in its bounding set and a private minimal device namespace | `deploy/systemd/recoverbull.service` | A compromised process has no legitimate need to acquire capabilities or access host device nodes | `test_systemd_example_drops_capabilities_and_privatises_devices` |
 
 ## Final path and verification checklist
 
 - [ ] `src/main.rs`, `src/app.rs`, `src/config.rs`, `src/router.rs`, `src/http/`, `src/handlers/`, `src/recovery/`, `src/attempts/`, `src/storage/sqlite.rs`, and `src/observability/` exist at the paths in the reading map.
 - [ ] `src/schema.rs` remains the Diesel schema path imposed by `diesel.toml`.
-- [ ] The final test listing contains every Rust test named in the invariant table: verify with `cargo test --locked -- --list` (the local listing contains 224 tests; no listing is checked in). The backup invariant additionally names its standalone CI oracle.
+- [ ] The final test listing contains every Rust test named in the invariant table: verify with `cargo test --locked -- --list` (no listing is checked in).
 - [ ] CI compiles rustdocs with `cargo doc --no-deps --document-private-items --locked`; this proves only that rustdoc compiles, not that an invariant is correct or tested.
 - [ ] For a documentation-only change, the local static checks are `git diff --check`, path existence checks, and exact-name checks against the final `cargo test --locked -- --list` output; do not substitute `cargo doc` for executable invariant evidence.
 
@@ -623,7 +627,8 @@ code, keep the invariant — and run the guarding test.
   single-flight and returned its value/freshness atomically; removed the
   misleading public Python backup-verification command, validated Diesel's
   ledger exactly, and made the restore drill run the application's own
-  initialization; documented `deploy/` as operator-adapted examples and kept
+  initialization; documented `deploy/` as operator-adapted examples (since
+  superseded: `deploy/recoverbull` installs them unchanged) and kept
   the one-WARN-per-`500`, no-per-request-`503` policy with explicit journald
   responsibility. The final full-tree audit found no critical or high issue;
   it corrected nginx's buffered slow-body gap, excluded SQLite sidecars from

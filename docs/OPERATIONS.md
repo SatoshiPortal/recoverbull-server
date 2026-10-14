@@ -69,7 +69,7 @@ cargo build --release --locked
 sudo deploy/recoverbull install
 ```
 
-It checks `.env` against the new version's rules (`recoverbull check-config`), lists the files that changed, and asks before stopping anything (`--yes` to skip the question). Then it stops Tor and the server, keeps a copy of the current version and database in `/var/lib/recoverbull/previous-version/`, installs the new files, migrates the database, and starts everything again. Once the new version answers, the database copy is deleted (it would keep every secret, including deleted ones, a second time); the previous files stay for reference.
+It checks `.env` against the new version's rules (`recoverbull check-config`), lists the files that changed, and asks before stopping anything (`--yes` to skip the question). Then it stops Tor and the server, keeps a copy of the current version and database in `/var/lib/recoverbull/previous-version/`, installs the new files, migrates the database, and starts everything again.
 
 If the new version fails to start, it puts the previous one back, with its database, and tells you; the state the new version left behind is moved to `failed-upgrade.<date>/`. One reason this happens: a new version needs a setting that your `.env` does not have yet. The script never edits `.env`; read the logs, add the setting, and run the install again. If nothing changed, it only makes sure everything is running; a server that was stopped on purpose is started only after you confirm (or with `--yes`), since a restart resets every attempt budget.
 
@@ -101,6 +101,7 @@ The database holds encrypted secrets only, but together with a user's Backup Fil
 |---|---|
 | Check health | `sudo deploy/recoverbull status` (exits non-zero when something is wrong) |
 | Read logs | `sudo deploy/recoverbull logs` (`-f` to follow, `-n 500` for more, `--all` to add nginx and Tor) |
+| Keep nginx and Tor logs short | nginx keeps no access log and writes only critical errors (`deploy/nginx/recoverbull.conf`); Tor logs to the journal; the journald drop-in below bounds the volume |
 | Change the canary | Edit `CANARY` in `/var/lib/recoverbull/.env`; served within ten minutes, no restart |
 | Know the onion address | `sudo cat /var/lib/tor/recoverbull/hostname` |
 | Validate `.env` after editing it | `sudo env -C /var/lib/recoverbull /opt/recoverbull/bin/recoverbull check-config` |
@@ -113,7 +114,7 @@ What to watch:
 - **Disk.** Each stored secret is a few hundred bytes, but a sustained `/store` flood can grow the database by up to about 90 MB per day. Alert at 70% use and never let the disk fill up: the server must keep accepting writes. A dedicated volume for `/var/lib/recoverbull` keeps a flood from filling the system disk.
 - **The five-minute counter line** in the logs (`sudo deploy/recoverbull logs`). `lookup_rate_limited`, `database_busy`, `database_error` and `request_timeout` should stay near zero.
 - **The service being down.** It does not restart on its own (rule 4).
-- **`store_storage_pressure` in the counter line, or clients reporting `503` on `/store` only.** Either the data volume is below `STORAGE_RESERVE_MB` of free space (stores resume by themselves once space is freed), or a store failed on storage (quota, unwritable or damaged file) and the server refuses every store until restarted, on purpose: answering some of them would reveal which backups exist. Fix the cause, check the database with `check-database`, then restart.
+- **`store_storage_pressure` in the counter line, or clients reporting `503` on `/store` only.** Either the data volume is below `STORAGE_RESERVE_MB` of free space (stores resume by themselves once space is freed), or a store failed on storage (quota, unwritable or damaged file) and the server refuses every store until restarted, on purpose: answering some of them would reveal which backups exist. Fix the cause, then: `sudo systemctl stop recoverbull && sudo runuser -u recoverbull -- /opt/recoverbull/bin/recoverbull check-database /var/lib/recoverbull/database.sqlite3`, and `sudo deploy/recoverbull install` to start it again (it asks first).
 
 The server logs one line per server error and one summary every five minutes, never request contents. journald limits each service to 10,000 lines per 30 seconds by default; to tighten it, add a drop-in and restart the service:
 

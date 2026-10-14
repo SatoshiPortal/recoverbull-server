@@ -22,7 +22,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-t
 git clone https://github.com/SatoshiPortal/recoverbull-server.git
 cd recoverbull-server
 cargo build --release --locked
-sudo deploy/recoverbull install     # asks for the warrant canary, prints the onion address
+sudo deploy/recoverbull install     # asks for the warrant canary (or --canary '<text>' for a scripted install), prints the onion address
 ```
 
 To upgrade, keeping the database, run the same command after updating the checkout:
@@ -31,7 +31,19 @@ To upgrade, keeping the database, run the same command after updating the checko
 git pull && cargo build --release --locked && sudo deploy/recoverbull install
 ```
 
-Check it with `sudo deploy/recoverbull status` and `sudo deploy/recoverbull logs`. To move an existing server here with its data and onion address, add `--database <file> --onion-keys <dir>` to the first install. Before going live, read the six rules at the top of [docs/OPERATIONS.md](docs/OPERATIONS.md). The one that costs the most to forget: **back up the onion keys off the host**, they are the server address.
+Check it with `sudo deploy/recoverbull status` (the onion shows as `starting` for up to ten minutes after Tor starts) and `sudo deploy/recoverbull logs`. To move an existing server here with its data and onion address, add `--database <file> --onion-keys <dir>` to the first install. Before going live, read the six rules at the top of [docs/OPERATIONS.md](docs/OPERATIONS.md). The one that costs the most to forget: **back up the onion keys off the host**, they are the server address.
+
+## Try it in a container
+
+[`deploy/test/Containerfile`](deploy/test/Containerfile) builds a Debian 13 image with systemd, which the install script needs. Build it, start it privileged (the hardened unit needs device and namespace isolation), and follow the install steps inside, cloning the repository in the container:
+
+```sh
+podman build -t recoverbull-debian13 -f deploy/test/Containerfile .
+podman run -d --name recoverbull-test --privileged --systemd=always --memory 2g recoverbull-debian13
+podman exec -it -u op -w /home/op recoverbull-test bash -l
+```
+
+The onion becomes reachable a few minutes after Tor starts. This is a test bench; a production host is a real Debian 13 machine.
 
 ## Develop
 

@@ -52,11 +52,11 @@ Commands:
   status     Health of the server, nginx and Tor, and the onion address.
   logs       Recent server logs.
 
-Options for install:
-  --canary <text>     Warrant canary for a first install (asked if omitted).
-  --database <file>   Existing SQLite database to start from (first install only).
+Options for install (the first three apply to a first install only):
+  --canary <text>     Warrant canary (asked if omitted; required without a terminal).
+  --database <file>   Existing SQLite database to start from.
   --onion-keys <dir>  Existing Tor HiddenServiceDir to keep the onion address.
-  -y, --yes           Do not ask for confirmation before an upgrade.
+  -y, --yes           Do not ask for confirmation before an upgrade or a restart.
 
 Options for logs:
   -f, --follow        Keep printing new lines.
@@ -398,10 +398,12 @@ upgrade() {
 abort_upgrade() {
   trap - ERR INT TERM
   set +e
-  systemctl start recoverbull
+  systemctl start recoverbull ||
+    die "the upgrade stopped early and the server could not restart. See: sudo deploy/recoverbull logs"
   wait_for_server ||
     die "the upgrade stopped early and the server did not restart. See: sudo deploy/recoverbull logs"
-  systemctl start "$TOR_SERVICE"
+  systemctl start "$TOR_SERVICE" ||
+    die "the upgrade stopped early; the server is running but Tor could not restart. See: sudo deploy/recoverbull logs --all"
   die "the upgrade stopped before changing anything; the current version is running again"
 }
 
@@ -411,15 +413,20 @@ roll_back() {
   trap - ERR INT TERM
   set +e
   warn "the upgrade failed: going back to the previous version"
-  systemctl stop recoverbull
+  systemctl stop "$TOR_SERVICE" recoverbull ||
+    die "could not stop Tor and recoverbull; no live files were restored. The pre-upgrade copy is in $PREVIOUS_DIR"
   local entry source destination mode suffix
   for entry in "${MANAGED_FILES[@]}"; do
     IFS=: read -r source destination mode <<<"$entry"
-    [[ -f $PREVIOUS_DIR/files$destination ]] &&
-      install -o root -g root -m "$mode" "$PREVIOUS_DIR/files$destination" "$destination"
+    if [[ -f $PREVIOUS_DIR/files$destination ]]; then
+      install -o root -g root -m "$mode" "$PREVIOUS_DIR/files$destination" "$destination" ||
+        die "could not restore $destination; services remain stopped and the copy is in $PREVIOUS_DIR"
+    fi
   done
-  cp -p "$PREVIOUS_DIR/VERSION" "$APP_DIR/VERSION"
-  systemctl daemon-reload
+  cp -p "$PREVIOUS_DIR/VERSION" "$APP_DIR/VERSION" ||
+    die "could not restore the version marker; services remain stopped and the copy is in $PREVIOUS_DIR"
+  systemctl daemon-reload ||
+    die "could not reload restored units; services remain stopped and the copy is in $PREVIOUS_DIR"
   # The server is stopped and the copy is one self-contained file: a plain
   # copy restores it. It is written next to the live path and renamed into
   # place, so an interruption leaves either the old state or the restored
@@ -431,18 +438,25 @@ roll_back() {
   if ! install -o recoverbull -g recoverbull -m 0600 "$PREVIOUS_DIR/database.sqlite3" "$DB.restoring"; then
     die "could not write the restored database; the service is stopped and the copy is in $PREVIOUS_DIR"
   fi
-  install -d -o root -g root -m 0700 "$failed_dir"
+  install -d -o root -g root -m 0700 "$failed_dir" ||
+    die "could not create the failed-state directory; the live database is unchanged and services remain stopped"
   for suffix in "" -wal -shm -journal; do
-    [[ -e $DB$suffix ]] && mv "$DB$suffix" "$failed_dir/"
+    if [[ -e $DB$suffix ]]; then
+      mv "$DB$suffix" "$failed_dir/" ||
+        die "could not preserve $DB$suffix; services remain stopped, with copies in $PREVIOUS_DIR and $failed_dir"
+    fi
   done
   if ! mv "$DB.restoring" "$DB"; then
     die "could not put the restored database in place; the service is stopped, the copy is in $PREVIOUS_DIR and the failed state in $failed_dir"
   fi
-  systemctl start recoverbull
+  systemctl start recoverbull ||
+    die "the restored service could not start; its database copy is in $PREVIOUS_DIR"
   wait_for_server ||
     die "the previous version did not start either. Its database is in $PREVIOUS_DIR. See: sudo deploy/recoverbull logs"
-  systemctl reload-or-restart nginx
-  systemctl start "$TOR_SERVICE"
+  systemctl reload-or-restart nginx ||
+    die "the previous server is restored but nginx failed; Tor has not been restarted. See: sudo deploy/recoverbull logs --all"
+  systemctl start "$TOR_SERVICE" ||
+    die "the previous server and nginx are restored but Tor failed. See: sudo deploy/recoverbull logs --all"
   die "the upgrade failed and the previous version is running again. See: sudo deploy/recoverbull logs"
 }
 

@@ -4,7 +4,8 @@
 use std::path::PathBuf;
 
 /// RecoverBull key server. Without a command, starts the server with the
-/// configuration from `.env` in the working directory and the environment.
+/// configuration from `.env` (in the working directory or a parent of it)
+/// and the environment.
 #[derive(clap::Parser)]
 #[command(name = "recoverbull", version)]
 pub(crate) struct Cli {
@@ -16,9 +17,9 @@ pub(crate) struct Cli {
 pub(crate) enum Command {
     /// Validate the configuration the server would start with.
     ///
-    /// Reads `.env` from the working directory, then the environment, and
-    /// applies every startup check without starting anything. Run it from
-    /// the data directory, as the service does. The memory limit it compares
+    /// Reads `.env` from the working directory or a parent of it, then the
+    /// environment, and applies every startup check without starting
+    /// anything. Run it from the data directory, as the service does. The memory limit it compares
     /// the identifier capacity against is this process's cgroup, not the
     /// service unit's.
     CheckConfig,

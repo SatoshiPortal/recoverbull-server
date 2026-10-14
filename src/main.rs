@@ -115,7 +115,7 @@ async fn serve() -> Duration {
     let app_state = crate::app::build(config);
 
     if let Err(error) = app_state.initialize_storage() {
-        eprintln!("Failed to initialize database: {error:?}");
+        eprintln!("Error: cannot initialize the database: {error}");
         std::process::exit(1);
     }
     tracing::info!(target: "security", secure_delete = true, counter_window_seconds = 300, "security controls enabled");

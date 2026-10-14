@@ -29,6 +29,8 @@ jobs:
         run: cargo clippy --all-targets --locked -- -D warnings
       - name: Shellcheck the deploy script
         run: shellcheck deploy/recoverbull
+      - name: Test deployment recovery failures
+        run: python3 deploy/test/test_rollback.py
 
   build:
     runs-on: ubuntu-latest

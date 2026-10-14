@@ -158,6 +158,12 @@ impl SqliteStorage {
 pub(crate) enum BackupError {
     /// The source is not an existing regular file.
     SourceMissing,
+    /// The source does not carry the SQLite header: an empty file (which
+    /// SQLite would copy as an empty database) or some other file.
+    SourceNotADatabase,
+    /// The destination could not be created: missing directory, no
+    /// permission, or a name that is not valid UTF-8.
+    DestinationCreate,
     /// The destination, or one of its SQLite sidecars, already exists (a
     /// symlink included): a backup never overwrites or follows a link.
     DestinationExists,
@@ -174,8 +180,23 @@ pub(crate) enum BackupError {
     Integrity,
 }
 
+/// The 16 bytes every SQLite database starts with.
+const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
+
+/// Whether the file starts with the SQLite header. `Ok(false)` for an empty
+/// file, which SQLite would silently treat as a new database.
+fn has_sqlite_header(path: &std::path::Path) -> std::io::Result<bool> {
+    let mut header = [0u8; 16];
+    let read = std::fs::File::open(path)
+        .and_then(|mut file| std::io::Read::read(&mut file, &mut header))?;
+    Ok(read == header.len() && &header == SQLITE_HEADER)
+}
+
 /// SQLite URI path escaping: `%`, `?` and `#` would otherwise be read as an
-/// escape, the query string, or a fragment.
+/// escape, the query string, or a fragment. Every connection diesel opens
+/// has `SQLITE_OPEN_URI` set, so a bare path starting with `file:` would be
+/// parsed as a URI too; passing every path through this keeps SQLite on the
+/// file this code checked.
 fn sqlite_uri_path(path: &std::path::Path) -> Option<String> {
     let path = path.to_str()?;
     let mut escaped = String::with_capacity(path.len());
@@ -194,6 +215,8 @@ impl std::fmt::Display for BackupError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::SourceMissing => "the source is not an existing file",
+            Self::SourceNotADatabase => "the source is empty or is not an SQLite database",
+            Self::DestinationCreate => "the destination could not be created",
             Self::DestinationExists => {
                 "the destination, or one of its -wal/-shm/-journal sidecars, already exists"
             }
@@ -231,6 +254,9 @@ pub(crate) fn backup_database(
     if !source.is_file() {
         return Err(BackupError::SourceMissing);
     }
+    if !has_sqlite_header(source).map_err(|_| BackupError::Open)? {
+        return Err(BackupError::SourceNotADatabase);
+    }
     let destination_name = destination.to_string_lossy();
     if ["-wal", "-shm", "-journal"]
         .iter()
@@ -246,7 +272,7 @@ pub(crate) fn backup_database(
         }
     }
     let source_uri = sqlite_uri_path(source).ok_or(BackupError::Open)?;
-    let destination_path = destination.to_str().ok_or(BackupError::Copy)?;
+    let destination_uri = sqlite_uri_path(destination).ok_or(BackupError::DestinationCreate)?;
 
     // `VACUUM INTO` accepts an empty existing file, which lets the file be
     // created here with the right mode and no race with a later link.
@@ -260,7 +286,7 @@ pub(crate) fn backup_database(
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             return Err(BackupError::DestinationExists)
         }
-        Err(_) => return Err(BackupError::Copy),
+        Err(_) => return Err(BackupError::DestinationCreate),
     }
 
     let copied = SqliteConnection::establish(&format!("file:{source_uri}?mode=ro"))
@@ -270,7 +296,7 @@ pub(crate) fn backup_database(
                 .execute(&mut connection)
                 .map_err(|_| BackupError::Open)?;
             sql_query("VACUUM INTO ?")
-                .bind::<diesel::sql_types::Text, _>(destination_path)
+                .bind::<diesel::sql_types::Text, _>(format!("file:{destination_uri}"))
                 .execute(&mut connection)
                 .map_err(|_| BackupError::Copy)?;
             Ok(())
@@ -286,7 +312,6 @@ pub(crate) fn backup_database(
         #[diesel(sql_type = diesel::sql_types::Text)]
         integrity_check: String,
     }
-    let destination_uri = sqlite_uri_path(destination).ok_or(BackupError::Integrity)?;
     let mut copy = SqliteConnection::establish(&format!("file:{destination_uri}?mode=ro"))
         .map_err(|_| BackupError::Integrity)?;
     let verdict = sql_query("PRAGMA integrity_check")
@@ -313,12 +338,9 @@ pub(crate) fn check_database(database_url: String) -> Result<(), ConnectionSetup
     // SQLite opens any file and fails only on first read, at whichever
     // pragma runs first; the header says up front whether this is a database
     // at all. An empty file is left to the uninitialized check below.
-    const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
-    let mut header = [0u8; 16];
-    let read = std::fs::File::open(&database_url)
-        .and_then(|mut file| std::io::Read::read(&mut file, &mut header))
-        .map_err(|_| ConnectionSetupError::Open)?;
-    if read > 0 && (read < header.len() || &header != SQLITE_HEADER) {
+    let path = std::path::Path::new(&database_url);
+    let is_empty = path.metadata().map(|m| m.len() == 0).unwrap_or(false);
+    if !is_empty && !has_sqlite_header(path).map_err(|_| ConnectionSetupError::Open)? {
         return Err(ConnectionSetupError::NotADatabase);
     }
     let mut probe = establish_connection_without_wal_check(database_url.clone())?;

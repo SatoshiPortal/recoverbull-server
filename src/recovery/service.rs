@@ -564,6 +564,15 @@ mod tests {
 
     #[tokio::test]
     async fn sqlite_writer_contention_on_trash_is_retryable_and_refunds_attempt() {
+        assert_sqlite_contention_is_retryable("/trash", false).await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_exclusive_contention_on_fetch_is_retryable_and_refunds_attempt() {
+        assert_sqlite_contention_is_retryable("/fetch", true).await;
+    }
+
+    async fn assert_sqlite_contention_is_retryable(path: &str, exclusive: bool) {
         let (server, state) = crate::tests::test_server::new_test_server().await;
         let identifier = "11".repeat(32);
         let authentication_key = "22".repeat(32);
@@ -583,16 +592,28 @@ mod tests {
         let mut writer =
             crate::storage::sqlite::establish_connection(state.storage.database_url_for_test())
                 .unwrap();
-        sql_query("BEGIN IMMEDIATE").execute(&mut writer).unwrap();
+        if exclusive {
+            sql_query("PRAGMA locking_mode = EXCLUSIVE")
+                .execute(&mut writer)
+                .unwrap();
+            sql_query("BEGIN EXCLUSIVE").execute(&mut writer).unwrap();
+        } else {
+            sql_query("BEGIN IMMEDIATE").execute(&mut writer).unwrap();
+        }
 
         // Let the actual SQLite busy timeout elapse: semaphore exhaustion
         // alone does not exercise mapping a detached operation's Busy error.
+        // The exclusive connection also blocks the new worker's connection
+        // checks, before its SELECT or DELETE can start.
         let blocked = tokio::time::timeout(
             std::time::Duration::from_secs(10),
-            server.post("/trash").json(&lookup),
+            server.post(path).json(&lookup),
         )
         .await;
         sql_query("ROLLBACK").execute(&mut writer).unwrap();
+        // EXCLUSIVE locking mode retains its lock after ROLLBACK. Close the
+        // connection before assertions or retries, including on a timeout.
+        drop(writer);
         let blocked = blocked.expect("SQLite contention must finish within its busy timeout");
         assert_eq!(blocked.status_code(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(blocked.header("retry-after"), "1");
@@ -608,14 +629,19 @@ mod tests {
                 .lock_for_test()
                 .await
                 .contains_key(&id_hash),
-            "a failed delete must refund its pending reservation"
+            "a lookup blocked by SQLite must refund its pending reservation"
         );
         let counters = state.counters.flush();
         assert_eq!(counters.database_busy, 1);
         assert_eq!(counters.database_error, 0);
 
-        let retried = server.post("/trash").json(&lookup).await;
-        assert_eq!(retried.status_code(), StatusCode::ACCEPTED);
+        let retried = server.post(path).json(&lookup).await;
+        let expected_status = if path == "/trash" {
+            StatusCode::ACCEPTED
+        } else {
+            StatusCode::OK
+        };
+        assert_eq!(retried.status_code(), expected_status);
         assert_eq!(
             retried.json::<serde_json::Value>()["attempt_status"]["total_attempts"],
             1,

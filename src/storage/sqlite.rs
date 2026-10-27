@@ -79,16 +79,32 @@ pub(crate) enum StorageError {
 /// is locked"), SQLITE_PROTOCOL ("locking protocol", a rare wal-index retry
 /// exhaustion) and SQLITE_INTERRUPT.
 fn classify_database_error(error: &diesel::result::Error) -> StorageError {
-    const TRANSIENT: [&str; 4] = ["locked", "busy", "locking protocol", "interrupted"];
     match error {
         diesel::result::Error::DatabaseError(_, info)
-            if TRANSIENT
-                .iter()
-                .any(|needle| info.message().contains(needle)) =>
+            if is_transient_sqlite_error(info.message()) =>
         {
             StorageError::Busy
         }
         _ => StorageError::Database,
+    }
+}
+
+fn is_transient_sqlite_error(message: &str) -> bool {
+    ["locked", "busy", "locking protocol", "interrupted"]
+        .iter()
+        .any(|needle| message.contains(needle))
+}
+
+/// Preserve contention before the worker reaches its SELECT or transaction,
+/// while keeping all other connection-check failure categories intact.
+fn classify_setup_error(
+    error: &diesel::result::Error,
+    otherwise: ConnectionSetupError,
+) -> ConnectionSetupError {
+    if classify_database_error(error) == StorageError::Busy {
+        ConnectionSetupError::Busy
+    } else {
+        otherwise
     }
 }
 
@@ -384,8 +400,7 @@ impl SqliteOperation {
         let _permit = self.permit;
         #[cfg(test)]
         let _test_database_guard = self.test_database_guard;
-        let mut connection =
-            establish_connection(self.database_url).map_err(|_| StorageError::Connection)?;
+        let mut connection = establish_connection(self.database_url).map_err(StorageError::from)?;
         write(
             &mut connection,
             &Secret {
@@ -411,8 +426,7 @@ impl SqliteOperation {
         let _permit = self.permit;
         #[cfg(test)]
         let _test_database_guard = self.test_database_guard;
-        let mut connection =
-            establish_connection(self.database_url).map_err(|_| StorageError::Connection)?;
+        let mut connection = establish_connection(self.database_url).map_err(StorageError::from)?;
         let row = if trash {
             read_and_trash_secret_by_id(&mut connection, &secret_id)
         } else {
@@ -437,6 +451,8 @@ pub const MINIMUM_SQLITE_VERSION: &str = "3.53.2";
 /// Startup failures for SQLite capability, migration, and journal checks.
 pub enum ConnectionSetupError {
     Open,
+    /// A connection or its capability checks encountered transient SQLite contention.
+    Busy,
     Version,
     BusyTimeout,
     SecureDelete,
@@ -457,6 +473,7 @@ impl std::fmt::Display for ConnectionSetupError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::Open => "the database file could not be opened",
+            Self::Busy => "the database is busy, retry later",
             Self::Version => "the bundled SQLite is older than the minimum this server requires",
             Self::BusyTimeout => "the busy timeout could not be set",
             Self::SecureDelete => "secure_delete could not be enabled",
@@ -466,6 +483,15 @@ impl std::fmt::Display for ConnectionSetupError {
             Self::NotADatabase => "the file is not an SQLite database",
             Self::Uninitialized => "the file has no secret table: not an initialized database",
         })
+    }
+}
+
+impl From<ConnectionSetupError> for StorageError {
+    fn from(error: ConnectionSetupError) -> Self {
+        match error {
+            ConnectionSetupError::Busy => Self::Busy,
+            _ => Self::Connection,
+        }
     }
 }
 
@@ -624,15 +650,25 @@ fn establish_connection_without_wal_check(
     database_url: String,
 ) -> Result<SqliteConnection, ConnectionSetupError> {
     let mut connection =
-        SqliteConnection::establish(&database_url).map_err(|_| ConnectionSetupError::Open)?;
+        SqliteConnection::establish(&database_url).map_err(|error| match error {
+            diesel::result::ConnectionError::BadConnection(message)
+                if is_transient_sqlite_error(&message) =>
+            {
+                ConnectionSetupError::Busy
+            }
+            diesel::result::ConnectionError::CouldntSetupConfiguration(error) => {
+                classify_setup_error(&error, ConnectionSetupError::Open)
+            }
+            _ => ConnectionSetupError::Open,
+        })?;
     // busy_timeout is per-connection: without it, concurrent writers in WAL
     // mode fail immediately with SQLITE_BUSY instead of waiting.
     sql_query("PRAGMA busy_timeout = 5000;")
         .execute(&mut connection)
-        .map_err(|_| ConnectionSetupError::BusyTimeout)?;
+        .map_err(|error| classify_setup_error(&error, ConnectionSetupError::BusyTimeout))?;
     sql_query("PRAGMA secure_delete = ON;")
         .execute(&mut connection)
-        .map_err(|_| ConnectionSetupError::SecureDelete)?;
+        .map_err(|error| classify_setup_error(&error, ConnectionSetupError::SecureDelete))?;
     #[derive(QueryableByName)]
     struct PragmaValue {
         #[diesel(sql_type = diesel::sql_types::Integer)]
@@ -640,7 +676,9 @@ fn establish_connection_without_wal_check(
     }
     let secure_delete = sql_query("SELECT secure_delete AS value FROM pragma_secure_delete")
         .get_result::<PragmaValue>(&mut connection)
-        .map_err(|_| ConnectionSetupError::SecureDeleteVerification)?;
+        .map_err(|error| {
+            classify_setup_error(&error, ConnectionSetupError::SecureDeleteVerification)
+        })?;
     if secure_delete.value != 1 {
         return Err(ConnectionSetupError::SecureDeleteVerification);
     }
@@ -654,7 +692,7 @@ pub fn establish_connection(
     let mut connection = establish_connection_without_wal_check(database_url)?;
     let journal_mode = sql_query("SELECT journal_mode AS value FROM pragma_journal_mode")
         .load::<PragmaText>(&mut connection)
-        .map_err(|_| ConnectionSetupError::Wal)?
+        .map_err(|error| classify_setup_error(&error, ConnectionSetupError::Wal))?
         .into_iter()
         .next()
         .ok_or(ConnectionSetupError::Wal)?;

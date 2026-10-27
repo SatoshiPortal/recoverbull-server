@@ -30,6 +30,19 @@ where
     }
 }
 
+/// Checks listener syntax without resolving hostnames or binding a socket.
+fn validate_server_address(address: &str) -> Result<(), String> {
+    if address.parse::<std::net::SocketAddr>().is_ok() {
+        return Ok(());
+    }
+    if let Some((host, port)) = address.rsplit_once(':') {
+        if !host.is_empty() && !host.contains([':', '[', ']']) && port.parse::<u16>().is_ok() {
+            return Ok(());
+        }
+    }
+    Err("SERVER_ADDRESS must be IP:port or hostname:port with a port between 0 and 65535; IPv6 addresses must use brackets".to_owned())
+}
+
 #[cfg(test)]
 /// Test-only lifetime guard for an isolated SQLite database and its sidecars;
 /// `cfg(test)` excludes this parallel-test seam from release builds.
@@ -518,9 +531,16 @@ pub fn init() -> Result<ValidatedConfig, String> {
     let canary_from_env = env::var("CANARY").is_ok();
     // dotenv() returns the path of the file it loaded, which may be in a
     // parent directory: keep it as the live canary source.
-    let dotenv_path = dotenv().ok();
+    let dotenv_path = match dotenv() {
+        Ok(path) => Some(path),
+        Err(error) if error.not_found() => None,
+        // dotenvy's Display implementation includes the offending line,
+        // which may contain credentials. Report the failure without its data.
+        Err(_) => return Err("cannot load .env: check its syntax and readability".to_owned()),
+    };
 
     let server_addr = required_env("SERVER_ADDRESS")?;
+    validate_server_address(&server_addr)?;
     let rate_limit_cooldown = required_env("RATE_LIMIT_COOLDOWN")?;
     let secret_max_length = required_env("SECRET_MAX_LENGTH")?;
     let canary = required_env("CANARY")?;

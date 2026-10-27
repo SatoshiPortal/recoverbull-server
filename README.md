@@ -47,15 +47,19 @@ The onion becomes reachable a few minutes after Tor starts. This is a test bench
 
 ## Develop
 
-Requires Rust 1.99 (pinned in `rust-toolchain.toml`, installed automatically by rustup).
+Requires Rust 1.99 (pinned in `rust-toolchain.toml`, installed automatically by rustup). For a new local configuration, copy [`.env.example`](.env.example) to `.env`, uncomment `CANARY` and set its value before starting. Keep an existing `.env`. An unset canary prevents startup; an explicitly empty value signals that the server is compromised. The template uses `production_db.sqlite3` in the working directory and production limits.
 
 ```sh
-cp .env.example .env      # test values, not for production
-cargo run                 # serves on 127.0.0.1:3000
-cargo test --locked       # same as CI; safe to run in parallel
+cargo run # serves on 127.0.0.1:3001
 ```
 
-`.env.example` holds the values CI uses. Production values are in [deploy/recoverbull.env.example](deploy/recoverbull.env.example).
+Run tests with the same explicit fixture as CI, scoped to a subshell so its permissive limits never replace `.env` or remain in your shell:
+
+```sh
+( set -a; . ./tests/fixtures/server.env; set +a; cargo test --locked )
+```
+
+Tests remain safe to run in parallel. Updating the template does not update an existing `.env`: review its values and any process-environment overrides, especially if it came from an older test-oriented example.
 
 The database schema is migrated automatically at startup from the embedded migrations in `migrations/`.
 

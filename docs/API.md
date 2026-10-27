@@ -69,30 +69,30 @@ Every response carries a server-generated `X-Request-ID`; a client-provided one 
 
 ## Example requests
 
-Against a local development server (`cp .env.example .env && cargo run`, listening on `127.0.0.1:3000`):
+For a new local configuration, copy [`.env.example`](../.env.example) to `.env`, uncomment `CANARY` and set your value, then run `cargo run`. Keep an existing configuration and check its listener before using these examples. The template uses production limits, a new `production_db.sqlite3` in the working directory and `127.0.0.1:3001`:
 
 ```sh
 # Info
-curl -X GET http://127.0.0.1:3000/info
+curl -X GET http://127.0.0.1:3001/info
 
 # Store
-curl -i -X POST http://127.0.0.1:3000/store \
+curl -i -X POST http://127.0.0.1:3001/store \
 -H "Content-Type: application/json" \
 -d '{"identifier":"bcb15f821479b4d5772bd0ca866c00ad5f926e3580720659cc80d39c9d09802a","authentication_key":"4cc8f4d609b717356701c57a03e737e5ac8fe885da8c7163d3de47e01849c635", "encrypted_secret": "4a1dl1T8cxcP2pnvxwYWDwm/I68vVd9oWMY0nTOmBSNbonEN/mfBjkPWkSNlxjWacsS2lRVzoGUQ4guZArKf415dLvbObReqWNtzmA4vaB9/feJapmgWAssVI9EbhJFf"}'
 
 # Fetch
-curl -i -X POST http://127.0.0.1:3000/fetch \
+curl -i -X POST http://127.0.0.1:3001/fetch \
 -H "Content-Type: application/json" \
 -d '{"identifier":"bcb15f821479b4d5772bd0ca866c00ad5f926e3580720659cc80d39c9d09802a","authentication_key":"4cc8f4d609b717356701c57a03e737e5ac8fe885da8c7163d3de47e01849c635"}'
 
 # Trash
-curl -i -X POST http://127.0.0.1:3000/trash \
+curl -i -X POST http://127.0.0.1:3001/trash \
 -H "Content-Type: application/json" \
 -d '{"identifier":"bcb15f821479b4d5772bd0ca866c00ad5f926e3580720659cc80d39c9d09802a","authentication_key":"4cc8f4d609b717356701c57a03e737e5ac8fe885da8c7163d3de47e01849c635"}'
 
 # Attempts (gzip-compressed; identifiers are SHA-256 hashed)
-curl --compressed -X GET http://127.0.0.1:3000/attempts
+curl --compressed -X GET http://127.0.0.1:3001/attempts
 
 # Attempts, conditional revalidation (304 when unchanged)
-curl --compressed -X GET http://127.0.0.1:3000/attempts -H 'If-None-Match: "<etag>"'
+curl --compressed -X GET http://127.0.0.1:3001/attempts -H 'If-None-Match: "<etag>"'
 ```

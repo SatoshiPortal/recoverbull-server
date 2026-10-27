@@ -57,22 +57,11 @@ jobs:
         # The suite must stay safe to run with the default (parallel) test
         # runner: per-test database isolation is handled elsewhere, do not
         # reintroduce --test-threads=1 here.
-        run: cargo test --locked
-        env:
-          DATABASE_URL: test_db.sqlite3
-          TEST_DATABASE_URL: test_db.sqlite3
-          SERVER_ADDRESS: 127.0.0.1:3000
-          SECRET_MAX_LENGTH: 128
-          CANARY: 🐦
-          RATE_LIMIT_COOLDOWN: 1
-          RATE_LIMIT_MAX_ATTEMPTS: 3
-          STORE_RATE_LIMIT_BURST: 10000
-          STORE_RATE_LIMIT_REFILL_PER_SECOND: 10000
-          LOOKUP_RATE_LIMIT_BURST: 10000
-          LOOKUP_RATE_LIMIT_REFILL_PER_SECOND: 10000
-          RATE_LIMIT_MAX_IDENTIFIERS: 100000
-          DATABASE_MAX_CONCURRENCY: 16
-          ATTEMPTS_SNAPSHOT_TTL_SECONDS: 30
+        run: |
+          set -a
+          . ./tests/fixtures/server.env
+          set +a
+          cargo test --locked
 
   audit:
     runs-on: ubuntu-latest

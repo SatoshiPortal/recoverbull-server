@@ -46,7 +46,13 @@ The binary is `target/release/recoverbull`. Keep the running binary in place unt
 
 ## 4. Edit the production configuration
 
-For a **new installation**, copy [`.env.example`](../.env.example) to `.env` in the server's working directory and edit it. It is the single production template. For an **existing installation**, edit the active file without overwriting it with a template. Updating the template does not correct existing files or process-environment overrides: review their actual values, especially if you previously copied a test-oriented example with a one-minute cooldown and global limits of `10000`.
+Choose the service account and working data directory first. For a **new installation**, create the account if needed, then create the directory owned by that account with mode `0700`. For an **existing installation**, preserve the current data directory and service account. The service needs write access to the directory for SQLite's WAL files.
+
+Keep the database and any existing SQLite sidecars (`-wal`, `-shm`, `-journal`) owned by the service account with mode `0600`; restrict backups to their required owner too. Use `umask 077` when creating configuration files or launching manually, or the equivalent in your process manager, so newly created files stay private. The reference systemd unit sets `UMask=0077`; a restrictive umask does not repair existing ownership or permissions.
+
+For a **new installation**, copy [`.env.example`](../.env.example) to `.env` in that directory and edit it. It is the single production template. For an **existing installation**, edit the active file without overwriting it with a template. Updating the template does not correct existing files or process-environment overrides: review their actual values, especially if you previously copied a test-oriented example with a one-minute cooldown and global limits of `10000`.
+
+Keep `.env` readable by the service account: use service account ownership with mode `0600`, or `root` ownership with the service's private group and mode `0640`. The removed installer used the latter layout; preserve it when appropriate instead of changing only the mode.
 
 Uncomment `CANARY` and set your current warrant canary. The copied template leaves it unset, so startup refuses to proceed unless you define it in the file or process environment. An explicitly empty `CANARY=` signals that the server is compromised.
 
@@ -75,9 +81,7 @@ cd /path/to/data
 
 This does not start the server or open the database. It checks this command's memory limit, so also verify the service's limit. A malformed or unreadable `.env` is an error; a missing file is allowed when the process environment supplies the required settings.
 
-Create the data directory before the first start, owned by the service account with mode `0700`. Keep the database and any existing SQLite sidecars (`-wal`, `-shm`, `-journal`) owned by the service account with mode `0600`; restrict backups to their required owner too. The service needs write access to the directory for SQLite's WAL files. Use `umask 077` when launching manually, or the equivalent in your process manager, so newly created files stay private. The reference systemd unit sets `UMask=0077`; a restrictive umask does not repair existing ownership or permissions.
-
-Keep `.env` readable by the service account: use service account ownership with mode `0600`, or `root` ownership with the service's private group and mode `0640`. The removed installer used the latter layout; preserve it when appropriate instead of changing only the mode. After any ownership or permission change, run `check-config` again under the actual service user, working directory and environment before starting the service.
+After any later ownership, permission or configuration change, run `check-config` again under the actual service user, working directory and environment before starting the service.
 
 ## 5. Pause onion traffic and configure nginx
 
@@ -112,9 +116,11 @@ Keep your other Tor hardening settings. `HiddenServiceExportCircuitID haproxy` m
 
 ## 7. Install and start the server
 
-Use your existing process manager. For a new systemd service, adapt [`deploy/systemd/recoverbull.service`](../deploy/systemd/recoverbull.service): `User`, `Group`, `WorkingDirectory`, `ExecStart`, `ReadWritePaths` and `MemoryMax` must match your layout and configuration. Check its filesystem restrictions too: `ProtectHome=true` blocks paths under `/home`, and `PrivateTmp=true` isolates `/tmp`. Keep `Restart=no`; each restart resets attempt budgets. Install the binary and unit, then run `systemctl daemon-reload` if the unit changed.
+Use your existing process manager. For a new systemd service, adapt [`deploy/systemd/recoverbull.service`](../deploy/systemd/recoverbull.service): `User`, `Group`, `WorkingDirectory`, `ExecStart`, `ReadWritePaths` and `MemoryMax` must match your layout and configuration. Check its filesystem restrictions too: `ProtectHome=true` blocks paths under `/home`, and `PrivateTmp=true` isolates `/tmp`. Keep `Restart=no`; each restart resets attempt budgets.
 
-For an upgrade, stop the old server while Tor remains stopped. Take a final consistent backup with a new filename for recovery, preserving writes received since step 2, before replacing the binary or starting the new server. Start under the service account; startup applies embedded database migrations. Reload or start nginx after validation, then the actual Tor instance. The reference Debian service names are `recoverbull`, `nginx` and `tor@default`; use yours.
+For an upgrade, stop the old server while Tor remains stopped. Take a final consistent backup with a new filename for recovery, preserving writes received since step 2, before replacing the binary or starting the new server.
+
+Install the new binary and your adapted service definition. For systemd, run `systemctl daemon-reload` if the unit changed. Start one server under the service account; startup applies embedded database migrations. Reload or start nginx after validation, then the actual Tor instance. The reference Debian service names are `recoverbull`, `nginx` and `tor@default`; use yours.
 
 To test a restore or migration first, run `recoverbull check-database /path/to/restored.sqlite3` on a **disposable restored copy**. The argument is a literal filesystem path, not a SQLite URI. It checks integrity and applies migrations: keep the backup archive untouched. For recovery, stop the server and any other database users, including Litestream, then move the failed database and its sidecars aside. Restore the final snapshot with the matching old binary, configuration and ownership; verify the server and replication again.
 
@@ -135,7 +141,7 @@ curl --fail --show-error --compressed --socks5-hostname 127.0.0.1:9050 http://YO
 
 Allow a few minutes for a newly started onion. Verify both application listeners are on loopback and an existing onion address stayed the same.
 
-**If you use Litestream**, its configured database path must match `DATABASE_URL`, including the filename. After changing that path or replacing the database, restart your actual Litestream service and check its logs for successful replication. Use the [configuration documentation](https://litestream.io/reference/config/) for your installed version; never run two producers against one replica destination. Verify backups by restoring to a separate new file.
+**If you use Litestream**, configure it to replicate the same actual SQLite file the server opens, including the filename. Use the absolute filesystem path in Litestream; resolve relative `DATABASE_URL` values from the server's working directory, and do not copy SQLite URI prefixes or query parameters into a filesystem path. After changing that path or replacing the database, restart your actual Litestream service and check its logs for successful replication. Use the [configuration documentation](https://litestream.io/reference/config/) for your installed version; never run two producers against one replica destination. Verify backups by restoring to a separate new file.
 
 ## Day to day
 

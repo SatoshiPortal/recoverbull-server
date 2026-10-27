@@ -75,7 +75,9 @@ cd /path/to/data
 
 This does not start the server or open the database. It checks this command's memory limit, so also verify the service's limit. A malformed or unreadable `.env` is an error; a missing file is allowed when the process environment supplies the required settings.
 
-Create the data directory before the first start, owned by the service account with mode `0700`. Keep `.env`, the database and any existing SQLite sidecars (`-wal`, `-shm`, `-journal`) readable only by their owner (`0600`); restrict backups the same way. The service needs write access to the directory for SQLite's WAL files. Use `umask 077` when launching manually, or the equivalent in your process manager, so newly created files stay private. The reference systemd unit sets `UMask=0077`; a restrictive umask does not repair existing file permissions.
+Create the data directory before the first start, owned by the service account with mode `0700`. Keep the database and any existing SQLite sidecars (`-wal`, `-shm`, `-journal`) owned by the service account with mode `0600`; restrict backups to their required owner too. The service needs write access to the directory for SQLite's WAL files. Use `umask 077` when launching manually, or the equivalent in your process manager, so newly created files stay private. The reference systemd unit sets `UMask=0077`; a restrictive umask does not repair existing ownership or permissions.
+
+Keep `.env` readable by the service account: use service account ownership with mode `0600`, or `root` ownership with the service's private group and mode `0640`. The removed installer used the latter layout; preserve it when appropriate instead of changing only the mode. After any ownership or permission change, run `check-config` again under the actual service user, working directory and environment before starting the service.
 
 ## 5. Pause onion traffic and configure nginx
 

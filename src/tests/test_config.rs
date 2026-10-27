@@ -195,6 +195,20 @@ fn test_capacity_model_is_not_optimistic_against_the_measurement() {
 }
 
 #[test]
+fn test_production_example_preserves_standard_client_canary() {
+    // KeyServer.infos() compares this public marker exactly, rather than
+    // accepting any nonempty value (recoverbull-client-dart 293b0d7, key_server.dart).
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".env.example");
+    match canary_file_state(&path) {
+        CanaryFileState::Value(value) => assert_eq!(
+            value, "🐦",
+            "the production example must match the standard RecoverBull client's canary"
+        ),
+        _ => panic!("the production example must define the standard client's CANARY=🐦"),
+    }
+}
+
+#[test]
 fn test_canary_file_state_reads_and_unquotes() {
     let path = unique_temp_path("canary_reads");
     std::fs::write(&path, "OTHER=value\nCANARY='🐦‍⬛'\n").unwrap();

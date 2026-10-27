@@ -69,7 +69,7 @@ Every response carries a server-generated `X-Request-ID`; a client-provided one 
 
 ## Example requests
 
-For a new local configuration, copy [`.env.example`](../.env.example) to `.env`, uncomment `CANARY` and set your value, then run `cargo run`. Keep an existing configuration and check its listener before using these examples. The template uses production limits, a new `production_db.sqlite3` in the working directory and `127.0.0.1:3001`:
+For a new local configuration, copy [`.env.example`](../.env.example) to `.env`, review its database path, then run `cargo run`. The template supplies the public compatibility value `CANARY=🐦` expected by standard RecoverBull clients; another value requires clients explicitly configured to expect it. Keep an existing configuration and check its listener before using these examples. The template uses production limits, a new `production_db.sqlite3` in the working directory and `127.0.0.1:3001`:
 
 ```sh
 # Info

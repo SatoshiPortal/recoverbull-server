@@ -22,11 +22,11 @@ cd recoverbull-server
 cargo build --release --locked
 ```
 
-Follow the [manual deployment guide](docs/OPERATIONS.md) to configure the server, nginx and Tor, using your own paths, ports and services. [`.env.example`](.env.example) is the production configuration template; edit its database path and set your warrant canary before starting. Back up both the database and the onion keys before changing an existing installation.
+Follow the [manual deployment guide](docs/OPERATIONS.md) to configure the server, nginx and Tor, using your own paths, ports and services. [`.env.example`](.env.example) is the production configuration template; review its database path before starting. It supplies the public compatibility value `CANARY=🐦` expected by standard RecoverBull clients. Back up both the database and the onion keys before changing an existing installation.
 
 ## Develop
 
-Requires Rust 1.99 (pinned in `rust-toolchain.toml`, installed automatically by rustup). For a new local configuration, copy [`.env.example`](.env.example) to `.env`, uncomment `CANARY` and set its value before starting. Keep an existing `.env`. An unset canary prevents startup; an explicitly empty value signals that the server is compromised. The template uses `production_db.sqlite3` in the working directory and production limits.
+Requires Rust 1.99 (pinned in `rust-toolchain.toml`, installed automatically by rustup). For a new local configuration, copy [`.env.example`](.env.example) to `.env` and review its database path before starting. Keep an existing `.env`. Normal operation with standard clients requires `CANARY=🐦`; this is a public value, not a secret. Another value requires clients explicitly configured to expect it. An unset canary prevents startup; an explicitly empty value signals that the server is compromised. The template uses `production_db.sqlite3` in the working directory and production limits.
 
 ```sh
 cargo run # serves on 127.0.0.1:3001

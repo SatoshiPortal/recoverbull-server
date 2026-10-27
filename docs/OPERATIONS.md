@@ -54,13 +54,13 @@ For a **new installation**, copy [`.env.example`](../.env.example) to `.env` in 
 
 Keep `.env` readable by the service account: use service account ownership with mode `0600`, or `root` ownership with the service's private group and mode `0640`. The removed installer used the latter layout; preserve it when appropriate instead of changing only the mode.
 
-Uncomment `CANARY` and set your current warrant canary. The copied template leaves it unset, so startup refuses to proceed unless you define it in the file or process environment. An explicitly empty `CANARY=` signals that the server is compromised.
+For normal operation with standard RecoverBull clients, keep `CANARY=🐦` supplied by the template. This public compatibility value is not a secret: the [Dart client checks an exact match](https://github.com/SatoshiPortal/recoverbull-client-dart/blob/293b0d709f6c7775180f775c6a5fe99a39f175ce/lib/src/services/key_server.dart#L88). Use another value only with clients explicitly configured to expect it; older clients always require `🐦`. An unset `CANARY` prevents startup, while an explicitly empty `CANARY=` signals that the server is compromised.
 
 | Setting | Production value or choice |
 |---|---|
 | `DATABASE_URL` | Absolute path to the actual database, for example `/path/to/production_db.sqlite3`. The template's relative `production_db.sqlite3` is for a new local database; preserve an existing database's path. |
 | `SERVER_ADDRESS` | `127.0.0.1:3001`, matching nginx's upstream |
-| `CANARY` | Your current warrant canary; uncomment and set the line |
+| `CANARY` | `🐦`, the public compatibility value expected by standard clients |
 | `SECRET_MAX_LENGTH` | `128` Base64 characters, or your existing choice within `128`–`832` |
 | `RATE_LIMIT_COOLDOWN` | `1440` **minutes** (24 hours), rather than the test value `1` |
 | `RATE_LIMIT_MAX_ATTEMPTS` | `3` distinct passwords per identifier and cooldown |
@@ -170,4 +170,4 @@ LogRateLimitBurst=200
 
 Apply unit changes with `systemctl daemon-reload`; they take effect on the next deliberate service start. Suppression can discard the five-minute summaries too. Review the host's journal size and retention settings (`SystemMaxUse`, `RuntimeMaxUse`, `MaxRetentionSec`) and current usage with `journalctl --disk-usage`; those limits affect other services sharing the journal. See [systemd's service logging settings](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html#LogRateLimitIntervalSec=) and [journal retention settings](https://www.freedesktop.org/software/systemd/man/latest/journald.conf.html#SystemMaxUse=).
 
-Keep the canary current: file edits take effect within ten minutes without a restart, unless a `CANARY` process-environment override takes precedence. Never use `RUST_LOG=trace`, which can expose request bodies. See [SECURITY.md](../SECURITY.md) and the [API response contracts](API.md).
+Canary file edits take effect within ten minutes without a restart, unless a `CANARY` process-environment override takes precedence. Keep the normal value aligned with what clients expect. Never use `RUST_LOG=trace`, which can expose request bodies. See [SECURITY.md](../SECURITY.md) and the [API response contracts](API.md).

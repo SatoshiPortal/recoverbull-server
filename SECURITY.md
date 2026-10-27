@@ -6,10 +6,7 @@ The documentation hierarchy is explicit. The [RecoverBull whitepaper repository]
 
 ## Reviewer reading map
 
-Start with the production template `.env.example`, then read the implementation
-in the order below. It leaves `CANARY` unset until the operator defines it;
-an explicitly empty value is the compromise signal. Existing `.env` files and
-process-environment overrides are not corrected by a template update.
+Start with the production template `.env.example`, then read the implementation in the order below. It sets `CANARY=🐦`, the public compatibility value standard RecoverBull clients require; it is not a secret. Another value requires clients explicitly configured to expect it. An unset value prevents startup; an explicitly empty value is the compromise signal. Existing `.env` files and process-environment overrides are not corrected by a template update.
 
 Tests require the explicit fixture `tests/fixtures/server.env`, also used by
 CI. Scope its permissive values to a subshell; never copy it over `.env`:

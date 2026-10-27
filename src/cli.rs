@@ -23,12 +23,12 @@ pub(crate) enum Command {
     /// the identifier capacity against is this process's cgroup, not the
     /// service unit's.
     CheckConfig,
-    /// Validate a database with the server's own startup checks.
+    /// Check database integrity and compatibility with the server.
     ///
     /// Applies pending migrations to it, so run it on a restored or imported
     /// copy, never on an archived backup.
     CheckDatabase {
-        /// SQLite file to check.
+        /// Literal SQLite file path to check (not a SQLite URI).
         database: PathBuf,
     },
     /// Copy a database consistently, even while the server is running.

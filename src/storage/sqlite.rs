@@ -208,6 +208,12 @@ fn sqlite_uri_path(path: &std::path::Path) -> Option<String> {
             other => escaped.push(other),
         }
     }
+    // Leading `//` is a literal filesystem path, not a URI authority.
+    // Encode the second slash so SQLite decodes the same path without
+    // interpreting its first directory as a hostname.
+    if escaped.starts_with("//") {
+        escaped.replace_range(1..2, "%2f");
+    }
     Some(escaped)
 }
 
@@ -301,26 +307,28 @@ pub(crate) fn backup_database(
                 .map_err(|_| BackupError::Copy)?;
             Ok(())
         });
-    if let Err(error) = copied {
-        // A refused or partial copy must not look like a backup.
+    let verified = copied.and_then(|()| {
+        #[derive(QueryableByName)]
+        struct IntegrityCheck {
+            #[diesel(sql_type = diesel::sql_types::Text)]
+            integrity_check: String,
+        }
+        let mut copy = SqliteConnection::establish(&format!("file:{destination_uri}?mode=ro"))
+            .map_err(|_| BackupError::Integrity)?;
+        let verdict = sql_query("PRAGMA integrity_check")
+            .load::<IntegrityCheck>(&mut copy)
+            .map_err(|_| BackupError::Integrity)?;
+        if verdict.len() != 1 || verdict[0].integrity_check != "ok" {
+            return Err(BackupError::Integrity);
+        }
+        Ok(())
+    });
+    if verified.is_err() {
+        // Both connections have closed. Neither a partial copy nor a rejected
+        // integrity check may leave a file looking like a usable backup.
         let _ = std::fs::remove_file(destination);
-        return Err(error);
     }
-
-    #[derive(QueryableByName)]
-    struct IntegrityCheck {
-        #[diesel(sql_type = diesel::sql_types::Text)]
-        integrity_check: String,
-    }
-    let mut copy = SqliteConnection::establish(&format!("file:{destination_uri}?mode=ro"))
-        .map_err(|_| BackupError::Integrity)?;
-    let verdict = sql_query("PRAGMA integrity_check")
-        .load::<IntegrityCheck>(&mut copy)
-        .map_err(|_| BackupError::Integrity)?;
-    if verdict.len() != 1 || verdict[0].integrity_check != "ok" {
-        return Err(BackupError::Integrity);
-    }
-    Ok(())
+    verified
 }
 
 /// Validates an already-initialized database for the restore drill.
@@ -333,23 +341,33 @@ pub(crate) fn backup_database(
 /// before any migration runs, so the check can only ever validate a real
 /// database and never manufacture one. It still runs the full startup
 /// initialization afterwards (idempotent migrations, schema postcondition, WAL
-/// setup) on the restored copy, as the drill documents.
-pub(crate) fn check_database(database_url: String) -> Result<(), ConnectionSetupError> {
+/// setup) on the restored copy, as the drill documents. The input is a literal
+/// filename, unlike the server's `DATABASE_URL`, and every data page must pass
+/// SQLite's integrity check before migrations are allowed to run.
+pub(crate) fn check_database(database_path: String) -> Result<(), ConnectionSetupError> {
     // SQLite opens any file and fails only on first read, at whichever
     // pragma runs first; the header says up front whether this is a database
     // at all. An empty file is left to the uninitialized check below.
-    let path = std::path::Path::new(&database_url);
+    let path = std::path::Path::new(&database_path);
     let is_empty = path.metadata().map(|m| m.len() == 0).unwrap_or(false);
     if !is_empty && !has_sqlite_header(path).map_err(|_| ConnectionSetupError::Open)? {
         return Err(ConnectionSetupError::NotADatabase);
     }
+    let escaped_path = sqlite_uri_path(path).ok_or(ConnectionSetupError::Open)?;
+    let database_url = format!("file:{escaped_path}?mode=rw");
     let mut probe = establish_connection_without_wal_check(database_url.clone())?;
     let initialized =
         table_exists(&mut probe, "secret").map_err(|_| ConnectionSetupError::NotADatabase)?;
-    drop(probe);
     if !initialized {
         return Err(ConnectionSetupError::Uninitialized);
     }
+    let integrity = sql_query("SELECT integrity_check AS value FROM pragma_integrity_check")
+        .load::<PragmaText>(&mut probe)
+        .map_err(|_| ConnectionSetupError::Integrity)?;
+    if integrity.len() != 1 || integrity[0].value != "ok" {
+        return Err(ConnectionSetupError::Integrity);
+    }
+    drop(probe);
     initialize_database(database_url)
 }
 
@@ -451,6 +469,8 @@ pub enum ConnectionSetupError {
     /// is not an initialized database. Only the check path returns this: normal
     /// startup deliberately creates the schema on a fresh `DATABASE_URL`.
     Uninitialized,
+    /// SQLite found damaged data or index pages in a restored database.
+    Integrity,
 }
 
 impl std::fmt::Display for ConnectionSetupError {
@@ -465,6 +485,7 @@ impl std::fmt::Display for ConnectionSetupError {
             Self::Migration => "the migrations failed or the secret table does not match them",
             Self::NotADatabase => "the file is not an SQLite database",
             Self::Uninitialized => "the file has no secret table: not an initialized database",
+            Self::Integrity => "the database failed SQLite's integrity check",
         })
     }
 }

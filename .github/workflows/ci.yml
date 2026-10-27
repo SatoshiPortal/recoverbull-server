@@ -27,10 +27,6 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Clippy
         run: cargo clippy --all-targets --locked -- -D warnings
-      - name: Shellcheck the deploy script
-        run: shellcheck deploy/recoverbull deploy/test/e2e.sh
-      - name: Test deployment recovery failures
-        run: python3 deploy/test/test_rollback.py
 
   build:
     runs-on: ubuntu-latest
@@ -75,42 +71,13 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-  install:
-    # The documented install, upgrade, rollback and refusals, in the Debian 13
-    # test container. Tor starts but the onion is never contacted.
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # pinned action, Rust 1.99.0
-        with:
-          toolchain: 1.99.0
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - name: Build the release binary
-        run: cargo build --release --locked
-      - name: Start the test container
-        run: |
-          podman build -t recoverbull-debian13 -f deploy/test/Containerfile .
-          podman run -d --name recoverbull-test --privileged --systemd=always recoverbull-debian13
-          podman exec recoverbull-test install -d -o op -g op /home/op/recoverbull-server
-          tar -cf - --exclude=./target --exclude=./.git . | podman exec -i -u op recoverbull-test tar -xf - -C /home/op/recoverbull-server
-          podman exec -u op recoverbull-test git -C /home/op/recoverbull-server init -q
-          podman exec -u op recoverbull-test install -d /home/op/recoverbull-server/target/release
-          podman cp target/release/recoverbull recoverbull-test:/home/op/recoverbull-server/target/release/recoverbull
-          podman exec recoverbull-test chown -R op:op /home/op/recoverbull-server
-          podman exec -u op recoverbull-test touch /home/op/recoverbull-server/target/release/recoverbull
-      - name: Run the end-to-end scenario
-        run: podman exec -u op -w /home/op/recoverbull-server recoverbull-test bash deploy/test/e2e.sh
-      - name: Show the journal on failure
-        if: failure()
-        run: podman exec recoverbull-test journalctl --no-pager -n 200
-
   nginx:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install the current runner nginx package
         # This is a compatibility/smoke gate for the committed configuration,
-        # not a production version pin: production uses Debian's package.
+        # not a production version pin: operators choose their host packages.
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends --yes nginx

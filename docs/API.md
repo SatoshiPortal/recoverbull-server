@@ -27,14 +27,14 @@ Clients classify **by HTTP status only**. Error bodies are JSON with an `error` 
 | `400` | Invalid request data. | Fix the request. |
 | `401` | Invalid credentials. | An authentication failure. |
 | `429` | The identifier's attempt budget is spent. The only security alarm. | Surface the lockout; honor `Retry-After`. |
-| `503` | Pressure or unavailability: a global bucket, a full identifier map, a busy database, storage that stopped accepting writes, or the 30-second timeout. | Back off per `Retry-After`, then retry. |
+| `503` | Pressure or unavailability: a global bucket, a full identifier map, a busy database, storage pressure on `/store`, or the 30-second timeout. | Back off per `Retry-After`, then retry. |
 | `500` | Server failure. | Report; retrying will not help. |
 
 Every `429` and `503` carries `Retry-After` in seconds:
 
 - from a global bucket (`/store`, lookups, `/attempts`): the server's estimate of its next token, at least 1;
 - busy database, full identifier map, pending duplicate, request timeout: an advisory `1`;
-- **storage pressure**: while the data volume has less free space than the server's reserve (64 MB by default), and once a `/store` has failed because storage could not be written, `/store` answers `503` with `Retry-After: 60` whether or not the `secret_id` exists; after a failure this lasts until an operator restarts the server. `/fetch` and `/trash` keep working.
+- **storage pressure**: while the data volume has less free space than the server's reserve (64 MB by default), and once a `/store` has failed because storage could not be written, `/store` answers `503` with `Retry-After: 60` whether or not the `secret_id` exists; after a failure this lasts until an operator restarts the server. This gate leaves `/fetch` and `/trash` available to try, but they still need a functioning database and can fail on full, unwritable or damaged storage.
 
 Framework rejections such as `404`, `405`, `413` and `415` may not be JSON.
 

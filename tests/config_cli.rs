@@ -152,3 +152,51 @@ fn process_environment_still_takes_precedence_over_dotenv() {
     assert!(result.status.success(), "{result:?}");
     directory.assert_no_database();
 }
+
+#[test]
+fn check_config_rejects_invalid_listener_syntax() {
+    let directory = TestDirectory::new();
+    for address in [
+        "127.0.0.1:70000",
+        "127.0.0.1:not-a-port",
+        "127.0.0.1:",
+        ":3001",
+        "[::1]:70000",
+        "[not-an-ipv6-address]:3001",
+        "::1:3001",
+    ] {
+        let result = environment_only_command(&directory, address)
+            .arg("check-config")
+            .output()
+            .unwrap();
+        assert_configuration_error(&result, "SERVER_ADDRESS");
+    }
+    directory.assert_no_database();
+}
+
+#[test]
+fn invalid_listener_is_rejected_before_database_initialization() {
+    let directory = TestDirectory::new();
+    let result = environment_only_command(&directory, "127.0.0.1:70000")
+        .output()
+        .unwrap();
+    assert_configuration_error(&result, "SERVER_ADDRESS");
+    directory.assert_no_database();
+}
+
+#[test]
+fn check_config_preserves_hostnames_and_bracketed_ipv6_without_dns() {
+    let directory = TestDirectory::new();
+    for address in [
+        "synthetic-unresolvable.invalid:3001",
+        "[::1]:3001",
+        "0.0.0.0:0",
+    ] {
+        let result = environment_only_command(&directory, address)
+            .arg("check-config")
+            .output()
+            .unwrap();
+        assert!(result.status.success(), "{address}: {result:?}");
+    }
+    directory.assert_no_database();
+}

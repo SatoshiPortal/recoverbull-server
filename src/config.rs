@@ -30,6 +30,19 @@ where
     }
 }
 
+/// Checks listener syntax without resolving hostnames or binding a socket.
+fn validate_server_address(address: &str) -> Result<(), String> {
+    if address.parse::<std::net::SocketAddr>().is_ok() {
+        return Ok(());
+    }
+    if let Some((host, port)) = address.rsplit_once(':') {
+        if !host.is_empty() && !host.contains([':', '[', ']']) && port.parse::<u16>().is_ok() {
+            return Ok(());
+        }
+    }
+    Err("SERVER_ADDRESS must be IP:port or hostname:port with a port between 0 and 65535; IPv6 addresses must use brackets".to_owned())
+}
+
 #[cfg(test)]
 /// Test-only lifetime guard for an isolated SQLite database and its sidecars;
 /// `cfg(test)` excludes this parallel-test seam from release builds.
@@ -527,6 +540,7 @@ pub fn init() -> Result<ValidatedConfig, String> {
     };
 
     let server_addr = required_env("SERVER_ADDRESS")?;
+    validate_server_address(&server_addr)?;
     let rate_limit_cooldown = required_env("RATE_LIMIT_COOLDOWN")?;
     let secret_max_length = required_env("SECRET_MAX_LENGTH")?;
     let canary = required_env("CANARY")?;

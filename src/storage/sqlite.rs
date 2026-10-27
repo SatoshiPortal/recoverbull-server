@@ -334,7 +334,8 @@ pub(crate) fn backup_database(
 /// database and never manufacture one. It still runs the full startup
 /// initialization afterwards (idempotent migrations, schema postcondition, WAL
 /// setup) on the restored copy, as the drill documents. The input is a literal
-/// filename, unlike the server's `DATABASE_URL`.
+/// filename, unlike the server's `DATABASE_URL`, and every data page must pass
+/// SQLite's integrity check before migrations are allowed to run.
 pub(crate) fn check_database(database_path: String) -> Result<(), ConnectionSetupError> {
     // SQLite opens any file and fails only on first read, at whichever
     // pragma runs first; the header says up front whether this is a database
@@ -351,6 +352,12 @@ pub(crate) fn check_database(database_path: String) -> Result<(), ConnectionSetu
         table_exists(&mut probe, "secret").map_err(|_| ConnectionSetupError::NotADatabase)?;
     if !initialized {
         return Err(ConnectionSetupError::Uninitialized);
+    }
+    let integrity = sql_query("SELECT integrity_check AS value FROM pragma_integrity_check")
+        .load::<PragmaText>(&mut probe)
+        .map_err(|_| ConnectionSetupError::Integrity)?;
+    if integrity.len() != 1 || integrity[0].value != "ok" {
+        return Err(ConnectionSetupError::Integrity);
     }
     drop(probe);
     initialize_database(database_url)
@@ -454,6 +461,8 @@ pub enum ConnectionSetupError {
     /// is not an initialized database. Only the check path returns this: normal
     /// startup deliberately creates the schema on a fresh `DATABASE_URL`.
     Uninitialized,
+    /// SQLite found damaged data or index pages in a restored database.
+    Integrity,
 }
 
 impl std::fmt::Display for ConnectionSetupError {
@@ -468,6 +477,7 @@ impl std::fmt::Display for ConnectionSetupError {
             Self::Migration => "the migrations failed or the secret table does not match them",
             Self::NotADatabase => "the file is not an SQLite database",
             Self::Uninitialized => "the file has no secret table: not an initialized database",
+            Self::Integrity => "the database failed SQLite's integrity check",
         })
     }
 }

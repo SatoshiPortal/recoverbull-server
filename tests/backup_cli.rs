@@ -139,3 +139,54 @@ fn check_database_accepts_an_initialized_literal_file_colon_name() {
         b"unrelated non-database"
     );
 }
+
+#[test]
+fn check_database_rejects_a_corrupt_secret_data_page() {
+    use std::io::{Seek, SeekFrom, Write};
+
+    let directory = TestDirectory::new();
+    let database = directory.0.join("restored.sqlite3");
+    initialized_database(&database);
+    let valid = check_database(&directory, "restored.sqlite3");
+    assert!(
+        valid.status.success(),
+        "the intact fixture must pass: {valid:?}"
+    );
+
+    #[derive(QueryableByName)]
+    struct Page {
+        #[diesel(sql_type = diesel::sql_types::Integer)]
+        page_size: i32,
+        #[diesel(sql_type = diesel::sql_types::Integer)]
+        root_page: i32,
+    }
+    let mut connection = SqliteConnection::establish(database.to_str().unwrap()).unwrap();
+    let page = sql_query(
+        "SELECT page_size, rootpage AS root_page FROM pragma_page_size, sqlite_master \
+         WHERE name = 'secret'",
+    )
+    .get_result::<Page>(&mut connection)
+    .unwrap();
+    assert!(page.root_page > 1, "keep the schema page intact");
+    sql_query("PRAGMA wal_checkpoint(TRUNCATE)")
+        .execute(&mut connection)
+        .unwrap();
+    drop(connection);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&database)
+        .unwrap();
+    file.seek(SeekFrom::Start(
+        (page.root_page as u64 - 1) * page.page_size as u64,
+    ))
+    .unwrap();
+    file.write_all(&[0]).unwrap();
+    drop(file);
+
+    let corrupt = check_database(&directory, "restored.sqlite3");
+    assert!(
+        !corrupt.status.success(),
+        "a valid header and schema must not hide a damaged secret page: {corrupt:?}"
+    );
+    assert!(String::from_utf8_lossy(&corrupt.stderr).contains("integrity"));
+}

@@ -28,7 +28,7 @@ pub(crate) enum Command {
     /// Applies pending migrations to it, so run it on a restored or imported
     /// copy, never on an archived backup.
     CheckDatabase {
-        /// SQLite file to check.
+        /// Literal SQLite file path to check (not a SQLite URI).
         database: PathBuf,
     },
     /// Copy a database consistently, even while the server is running.

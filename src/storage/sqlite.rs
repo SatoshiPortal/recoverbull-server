@@ -333,23 +333,26 @@ pub(crate) fn backup_database(
 /// before any migration runs, so the check can only ever validate a real
 /// database and never manufacture one. It still runs the full startup
 /// initialization afterwards (idempotent migrations, schema postcondition, WAL
-/// setup) on the restored copy, as the drill documents.
-pub(crate) fn check_database(database_url: String) -> Result<(), ConnectionSetupError> {
+/// setup) on the restored copy, as the drill documents. The input is a literal
+/// filename, unlike the server's `DATABASE_URL`.
+pub(crate) fn check_database(database_path: String) -> Result<(), ConnectionSetupError> {
     // SQLite opens any file and fails only on first read, at whichever
     // pragma runs first; the header says up front whether this is a database
     // at all. An empty file is left to the uninitialized check below.
-    let path = std::path::Path::new(&database_url);
+    let path = std::path::Path::new(&database_path);
     let is_empty = path.metadata().map(|m| m.len() == 0).unwrap_or(false);
     if !is_empty && !has_sqlite_header(path).map_err(|_| ConnectionSetupError::Open)? {
         return Err(ConnectionSetupError::NotADatabase);
     }
+    let escaped_path = sqlite_uri_path(path).ok_or(ConnectionSetupError::Open)?;
+    let database_url = format!("file:{escaped_path}?mode=rw");
     let mut probe = establish_connection_without_wal_check(database_url.clone())?;
     let initialized =
         table_exists(&mut probe, "secret").map_err(|_| ConnectionSetupError::NotADatabase)?;
-    drop(probe);
     if !initialized {
         return Err(ConnectionSetupError::Uninitialized);
     }
+    drop(probe);
     initialize_database(database_url)
 }
 

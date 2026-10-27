@@ -515,6 +515,7 @@ impl RecoveryService {
                         task_counters.fetch_miss();
                     }
                 }
+                Err(StorageError::Busy) => task_counters.database_busy(),
                 Err(_) => task_counters.database_error(),
             }
             final_result
@@ -542,6 +543,7 @@ impl RecoveryService {
                 requested_at,
                 cooldown_minutes: self.attempts.policy.cooldown().num_minutes(),
             },
+            Err(StorageError::Busy) => LookupResult::DatabaseBusy,
             Err(_) => LookupResult::DatabaseError,
         }
     }
@@ -552,4 +554,72 @@ fn is_base64(input: &str) -> bool {
         return false;
     }
     base64::prelude::BASE64_STANDARD.decode(input).is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::identifier_hash;
+    use axum::http::StatusCode;
+    use diesel::{sql_query, RunQueryDsl};
+
+    #[tokio::test]
+    async fn sqlite_writer_contention_on_trash_is_retryable_and_refunds_attempt() {
+        let (server, state) = crate::tests::test_server::new_test_server().await;
+        let identifier = "11".repeat(32);
+        let authentication_key = "22".repeat(32);
+        let lookup = serde_json::json!({
+            "identifier": identifier,
+            "authentication_key": authentication_key,
+        });
+        let stored = server
+            .post("/store")
+            .json(&serde_json::json!({
+                "identifier": identifier,
+                "authentication_key": authentication_key,
+                "encrypted_secret": "dGVzdA==",
+            }))
+            .await;
+        assert_eq!(stored.status_code(), StatusCode::CREATED);
+        let mut writer =
+            crate::storage::sqlite::establish_connection(state.storage.database_url_for_test())
+                .unwrap();
+        sql_query("BEGIN IMMEDIATE").execute(&mut writer).unwrap();
+
+        // Let the actual SQLite busy timeout elapse: semaphore exhaustion
+        // alone does not exercise mapping a detached operation's Busy error.
+        let blocked = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            server.post("/trash").json(&lookup),
+        )
+        .await;
+        sql_query("ROLLBACK").execute(&mut writer).unwrap();
+        let blocked = blocked.expect("SQLite contention must finish within its busy timeout");
+        assert_eq!(blocked.status_code(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(blocked.header("retry-after"), "1");
+        assert_eq!(
+            blocked.json::<serde_json::Value>()["error"],
+            "Database busy, retry later"
+        );
+        let id_hash = identifier_hash(&identifier).unwrap();
+        assert!(
+            !state
+                .attempts
+                .ledger
+                .lock_for_test()
+                .await
+                .contains_key(&id_hash),
+            "a failed delete must refund its pending reservation"
+        );
+        let counters = state.counters.flush();
+        assert_eq!(counters.database_busy, 1);
+        assert_eq!(counters.database_error, 0);
+
+        let retried = server.post("/trash").json(&lookup).await;
+        assert_eq!(retried.status_code(), StatusCode::ACCEPTED);
+        assert_eq!(
+            retried.json::<serde_json::Value>()["attempt_status"]["total_attempts"],
+            1,
+            "only the successful retry consumes an attempt"
+        );
+    }
 }

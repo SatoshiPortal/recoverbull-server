@@ -6,7 +6,7 @@
 
 use crate::config::StorageConfig;
 use crate::schema::secret::dsl::*;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use diesel::prelude::*;
@@ -31,6 +31,7 @@ pub(crate) struct Secret {
 pub(crate) struct SqliteStorage {
     database_url: String,
     database_semaphore: Arc<Semaphore>,
+    data_directory: Arc<OnceLock<std::path::PathBuf>>,
     #[cfg(test)]
     test_database_guard: Arc<crate::config::TestDatabaseGuard>,
 }
@@ -98,19 +99,17 @@ impl SqliteStorage {
         Self {
             database_url: config.database_url,
             database_semaphore: Arc::new(Semaphore::new(config.database_max_concurrency)),
+            data_directory: Arc::new(OnceLock::new()),
             #[cfg(test)]
             test_database_guard: config.test_database_guard,
         }
     }
 
-    /// The directory holding the database, where free space decides whether
-    /// a store may proceed.
-    pub(crate) fn data_directory(&self) -> std::path::PathBuf {
-        let path = std::path::Path::new(&self.database_url);
-        match path.parent() {
-            Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
-            _ => std::path::PathBuf::from("."),
-        }
+    /// The actual database directory resolved at startup, including SQLite
+    /// URI decoding and filesystem links. The URL's textual parent may be on
+    /// a different volume, so it must never select the free-space probe.
+    pub(crate) fn data_directory(&self) -> Option<std::path::PathBuf> {
+        self.data_directory.get().cloned()
     }
 
     pub(crate) async fn acquire(&self) -> Result<SqliteOperation, StorageError> {
@@ -130,7 +129,18 @@ impl SqliteStorage {
     }
 
     pub(crate) fn initialize(&self) -> Result<(), ConnectionSetupError> {
-        initialize_database(self.database_url.clone())
+        let mut connection = initialize_connection(self.database_url.clone())?;
+        let database =
+            sql_query("SELECT file AS value FROM pragma_database_list WHERE name = 'main'")
+                .get_result::<PragmaText>(&mut connection)
+                .map_err(|_| ConnectionSetupError::Open)?;
+        let database =
+            std::fs::canonicalize(database.value).map_err(|_| ConnectionSetupError::Open)?;
+        let directory = database.parent().ok_or(ConnectionSetupError::Open)?;
+        // Clones used by recovery share this startup result. No extra
+        // connection or pathname parsing runs on the request path.
+        let _ = self.data_directory.set(directory.to_path_buf());
+        Ok(())
     }
 
     #[cfg(test)]
@@ -141,6 +151,7 @@ impl SqliteStorage {
     #[cfg(test)]
     pub(crate) fn set_database_url_for_test(&mut self, database_url: String) {
         self.database_url = database_url;
+        self.data_directory = Arc::new(OnceLock::new());
     }
     #[cfg(test)]
     pub(crate) fn database_url_for_test(&self) -> String {
@@ -359,6 +370,10 @@ pub(crate) fn check_database(database_url: String) -> Result<(), ConnectionSetup
 /// restored copy, so the server's own migrations, not a separate schema
 /// approximation, decide whether this application can open and migrate it.
 pub(crate) fn initialize_database(database_url: String) -> Result<(), ConnectionSetupError> {
+    initialize_connection(database_url).map(|_| ())
+}
+
+fn initialize_connection(database_url: String) -> Result<SqliteConnection, ConnectionSetupError> {
     let mut connection = establish_connection_without_wal_check(database_url)?;
     verify_sqlite_runtime(&mut connection)?;
     run_migrations(&mut connection).map_err(|_| ConnectionSetupError::Migration)?;
@@ -375,7 +390,7 @@ pub(crate) fn initialize_database(database_url: String) -> Result<(), Connection
         return Err(ConnectionSetupError::Wal);
     }
     tracing::info!(target: "security", "database initialized");
-    Ok(())
+    Ok(connection)
 }
 
 impl SqliteOperation {
@@ -722,4 +737,93 @@ pub fn read_and_trash_secret_by_id(
 
         Ok(Some(stored_secret))
     })
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    struct Directory(std::path::PathBuf);
+
+    impl Directory {
+        fn new() -> Self {
+            let (name, _guard) = crate::config::unique_test_database();
+            let directory = Self(std::path::PathBuf::from(name));
+            std::fs::create_dir(&directory.0).unwrap();
+            directory
+        }
+    }
+
+    impl Drop for Directory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn storage(database_url: String) -> SqliteStorage {
+        let (_, test_database_guard) = crate::config::unique_test_database();
+        SqliteStorage::from_config(StorageConfig {
+            database_url,
+            database_max_concurrency: 1,
+            test_database_guard,
+        })
+    }
+
+    #[test]
+    fn data_directory_follows_the_database_file_symlink() {
+        let directory = Directory::new();
+        let actual = directory.0.join("actual");
+        std::fs::create_dir(&actual).unwrap();
+        let database = actual.join("database.sqlite3");
+        initialize_database(database.to_str().unwrap().to_owned()).unwrap();
+        let link = directory.0.join("linked.sqlite3");
+        std::os::unix::fs::symlink(&database, &link).unwrap();
+        let storage = storage(link.to_str().unwrap().to_owned());
+
+        storage.initialize().unwrap();
+
+        assert_eq!(
+            storage.data_directory(),
+            Some(actual.canonicalize().unwrap())
+        );
+    }
+
+    #[test]
+    fn data_directory_uses_the_actual_sqlite_uri_filename() {
+        let directory = Directory::new();
+        let actual = directory.0.join("actual");
+        std::fs::create_dir(&actual).unwrap();
+        let database = actual.join("database% #?.sqlite3");
+        let storage = storage(format!(
+            "file:{}?mode=rwc",
+            sqlite_uri_path(&database).unwrap()
+        ));
+
+        storage.initialize().unwrap();
+
+        assert!(
+            database.is_file(),
+            "the escaped SQLite URI must be supported"
+        );
+        assert_eq!(
+            storage.data_directory(),
+            Some(actual.canonicalize().unwrap())
+        );
+    }
+
+    #[test]
+    fn data_directory_uses_the_actual_diesel_sqlite_url_filename() {
+        let directory = Directory::new();
+        let actual = directory.0.join("actual");
+        std::fs::create_dir(&actual).unwrap();
+        let database = actual.join("database.sqlite3");
+        let storage = storage(format!("sqlite://{}", database.display()));
+
+        storage.initialize().unwrap();
+
+        assert_eq!(
+            storage.data_directory(),
+            Some(actual.canonicalize().unwrap())
+        );
+    }
 }

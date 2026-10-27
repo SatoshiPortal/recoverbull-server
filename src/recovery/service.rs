@@ -155,7 +155,7 @@ impl RecoveryService {
                 return Some(forced);
             }
         }
-        let stats = rustix::fs::statvfs(self.storage.data_directory()).ok()?;
+        let stats = rustix::fs::statvfs(self.storage.data_directory()?).ok()?;
         Some(stats.f_bavail.saturating_mul(stats.f_frsize))
     }
 

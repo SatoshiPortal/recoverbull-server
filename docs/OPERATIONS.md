@@ -120,9 +120,17 @@ Use your existing process manager. For a new systemd service, adapt [`deploy/sys
 
 For an upgrade, stop the old server while Tor remains stopped. Take a final consistent backup with a new filename for recovery, preserving writes received since step 2, before replacing the binary or starting the new server.
 
+For an upgrade, restore the final backup to a **disposable copy** as the database owner and validate it with the new binary before proceeding:
+
+```sh
+/path/to/new/recoverbull check-database /path/to/disposable-restored.sqlite3
+```
+
+The argument is a literal filesystem path, not a SQLite URI. The command checks integrity and applies migrations to the copy; keep the backup archive untouched. Continue only if the check succeeds.
+
 Install the new binary and your adapted service definition. For systemd, run `systemctl daemon-reload` if the unit changed. Start one server under the service account; startup applies embedded database migrations. Reload or start nginx after validation, then the actual Tor instance. The reference Debian service names are `recoverbull`, `nginx` and `tor@default`; use yours.
 
-To test a restore or migration first, run `recoverbull check-database /path/to/restored.sqlite3` on a **disposable restored copy**. The argument is a literal filesystem path, not a SQLite URI. It checks integrity and applies migrations: keep the backup archive untouched. For recovery, stop the server and any other database users, including Litestream, then move the failed database and its sidecars aside. Restore the final snapshot with the matching old binary, configuration and ownership; verify the server and replication again.
+For recovery, stop the server and any other database users, including Litestream, then move the failed database and its sidecars aside. Restore the final snapshot with the matching old binary, configuration and ownership; verify the server and replication again.
 
 ## 8. Check the result and Litestream
 

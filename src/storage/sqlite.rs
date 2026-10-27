@@ -208,6 +208,12 @@ fn sqlite_uri_path(path: &std::path::Path) -> Option<String> {
             other => escaped.push(other),
         }
     }
+    // Leading `//` is a literal filesystem path, not a URI authority.
+    // Encode the second slash so SQLite decodes the same path without
+    // interpreting its first directory as a hostname.
+    if escaped.starts_with("//") {
+        escaped.replace_range(1..2, "%2f");
+    }
     Some(escaped)
 }
 

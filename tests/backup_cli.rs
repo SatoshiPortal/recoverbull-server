@@ -253,3 +253,59 @@ fn backup_removes_a_copy_that_fails_its_integrity_check() {
         "a rejected copy must not remain under the backup filename"
     );
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn backup_accepts_a_source_path_with_two_leading_slashes() {
+    let directory = TestDirectory::new();
+    let source = directory.0.join("source.sqlite3");
+    let destination = directory.0.join("copy.sqlite3");
+    initialized_database(&source);
+
+    let result = Command::new(env!("CARGO_BIN_EXE_recoverbull"))
+        .current_dir(&directory.0)
+        .arg("backup")
+        .arg(format!("/{}", source.display()))
+        .arg(&destination)
+        .output()
+        .unwrap();
+
+    assert!(result.status.success(), "{result:?}");
+    assert!(destination.is_file());
+    let checked = check_database(&directory, "copy.sqlite3");
+    assert!(checked.status.success(), "{checked:?}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn backup_accepts_a_destination_path_with_two_leading_slashes() {
+    let directory = TestDirectory::new();
+    let source = directory.0.join("source.sqlite3");
+    let destination = directory.0.join("copy.sqlite3");
+    initialized_database(&source);
+
+    let result = Command::new(env!("CARGO_BIN_EXE_recoverbull"))
+        .current_dir(&directory.0)
+        .arg("backup")
+        .arg(&source)
+        .arg(format!("/{}", destination.display()))
+        .output()
+        .unwrap();
+
+    assert!(result.status.success(), "{result:?}");
+    assert!(destination.is_file());
+    let checked = check_database(&directory, "copy.sqlite3");
+    assert!(checked.status.success(), "{checked:?}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn check_database_accepts_a_literal_path_with_two_leading_slashes() {
+    let directory = TestDirectory::new();
+    let database = directory.0.join("restored.sqlite3");
+    initialized_database(&database);
+
+    let result = check_database(&directory, &format!("/{}", database.display()));
+
+    assert!(result.status.success(), "{result:?}");
+}

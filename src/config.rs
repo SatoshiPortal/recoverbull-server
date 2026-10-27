@@ -518,7 +518,13 @@ pub fn init() -> Result<ValidatedConfig, String> {
     let canary_from_env = env::var("CANARY").is_ok();
     // dotenv() returns the path of the file it loaded, which may be in a
     // parent directory: keep it as the live canary source.
-    let dotenv_path = dotenv().ok();
+    let dotenv_path = match dotenv() {
+        Ok(path) => Some(path),
+        Err(error) if error.not_found() => None,
+        // dotenvy's Display implementation includes the offending line,
+        // which may contain credentials. Report the failure without its data.
+        Err(_) => return Err("cannot load .env: check its syntax and readability".to_owned()),
+    };
 
     let server_addr = required_env("SERVER_ADDRESS")?;
     let rate_limit_cooldown = required_env("RATE_LIMIT_COOLDOWN")?;

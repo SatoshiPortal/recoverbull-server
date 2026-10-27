@@ -1,4 +1,4 @@
-# RecoverBull server unit. Installed by `deploy/recoverbull`; see docs/OPERATIONS.md.
+# Example RecoverBull server unit. Adapt to your host; see docs/OPERATIONS.md.
 # Restart=no is deliberate: every restart resets the in-memory attempt budgets.
 [Unit]
 Description=RecoverBull server

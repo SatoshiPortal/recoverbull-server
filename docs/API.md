@@ -27,14 +27,14 @@ Clients classify **by HTTP status only**. Error bodies are JSON with an `error` 
 | `400` | Invalid request data. | Fix the request. |
 | `401` | Invalid credentials. | An authentication failure. |
 | `429` | The identifier's attempt budget is spent. The only security alarm. | Surface the lockout; honor `Retry-After`. |
-| `503` | Pressure or unavailability: a global bucket, a full identifier map, a busy database, storage that stopped accepting writes, or the 30-second timeout. | Back off per `Retry-After`, then retry. |
+| `503` | Pressure or unavailability: a global bucket, a full identifier map, a busy database, storage pressure on `/store`, or the 30-second timeout. | Back off per `Retry-After`, then retry. |
 | `500` | Server failure. | Report; retrying will not help. |
 
 Every `429` and `503` carries `Retry-After` in seconds:
 
 - from a global bucket (`/store`, lookups, `/attempts`): the server's estimate of its next token, at least 1;
 - busy database, full identifier map, pending duplicate, request timeout: an advisory `1`;
-- **storage pressure**: while the data volume has less free space than the server's reserve (64 MB by default), and once a `/store` has failed because storage could not be written, `/store` answers `503` with `Retry-After: 60` whether or not the `secret_id` exists; after a failure this lasts until an operator restarts the server. `/fetch` and `/trash` keep working.
+- **storage pressure**: while the data volume has less free space than the server's reserve (64 MB by default), and once a `/store` has failed because storage could not be written, `/store` answers `503` with `Retry-After: 60` whether or not the `secret_id` exists; after a failure this lasts until an operator restarts the server. This gate leaves `/fetch` and `/trash` available to try, but they still need a functioning database and can fail on full, unwritable or damaged storage.
 
 Framework rejections such as `404`, `405`, `413` and `415` may not be JSON.
 
@@ -69,30 +69,30 @@ Every response carries a server-generated `X-Request-ID`; a client-provided one 
 
 ## Example requests
 
-Against a local development server (`cp .env.example .env && cargo run`, listening on `127.0.0.1:3000`):
+For a new local configuration, copy [`.env.example`](../.env.example) to `.env`, review its database path, then run `cargo run`. The template supplies the public compatibility value `CANARY=🐦` expected by standard RecoverBull clients; another value requires clients explicitly configured to expect it. Keep an existing configuration and check its listener before using these examples. The template uses production limits, a new `production_db.sqlite3` in the working directory and `127.0.0.1:3001`:
 
 ```sh
 # Info
-curl -X GET http://127.0.0.1:3000/info
+curl -X GET http://127.0.0.1:3001/info
 
 # Store
-curl -i -X POST http://127.0.0.1:3000/store \
+curl -i -X POST http://127.0.0.1:3001/store \
 -H "Content-Type: application/json" \
 -d '{"identifier":"bcb15f821479b4d5772bd0ca866c00ad5f926e3580720659cc80d39c9d09802a","authentication_key":"4cc8f4d609b717356701c57a03e737e5ac8fe885da8c7163d3de47e01849c635", "encrypted_secret": "4a1dl1T8cxcP2pnvxwYWDwm/I68vVd9oWMY0nTOmBSNbonEN/mfBjkPWkSNlxjWacsS2lRVzoGUQ4guZArKf415dLvbObReqWNtzmA4vaB9/feJapmgWAssVI9EbhJFf"}'
 
 # Fetch
-curl -i -X POST http://127.0.0.1:3000/fetch \
+curl -i -X POST http://127.0.0.1:3001/fetch \
 -H "Content-Type: application/json" \
 -d '{"identifier":"bcb15f821479b4d5772bd0ca866c00ad5f926e3580720659cc80d39c9d09802a","authentication_key":"4cc8f4d609b717356701c57a03e737e5ac8fe885da8c7163d3de47e01849c635"}'
 
 # Trash
-curl -i -X POST http://127.0.0.1:3000/trash \
+curl -i -X POST http://127.0.0.1:3001/trash \
 -H "Content-Type: application/json" \
 -d '{"identifier":"bcb15f821479b4d5772bd0ca866c00ad5f926e3580720659cc80d39c9d09802a","authentication_key":"4cc8f4d609b717356701c57a03e737e5ac8fe885da8c7163d3de47e01849c635"}'
 
 # Attempts (gzip-compressed; identifiers are SHA-256 hashed)
-curl --compressed -X GET http://127.0.0.1:3000/attempts
+curl --compressed -X GET http://127.0.0.1:3001/attempts
 
 # Attempts, conditional revalidation (304 when unchanged)
-curl --compressed -X GET http://127.0.0.1:3000/attempts -H 'If-None-Match: "<etag>"'
+curl --compressed -X GET http://127.0.0.1:3001/attempts -H 'If-None-Match: "<etag>"'
 ```

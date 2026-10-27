@@ -1,5 +1,5 @@
-# Onion service for RecoverBull. Installed by `deploy/recoverbull` at
-# /etc/tor/torrc.d/recoverbull.conf; requires Tor >= 0.4.8.
+# Reference onion service for RecoverBull; requires Tor >= 0.4.8.
+# Merge into your instance's loaded configuration; see docs/OPERATIONS.md.
 HiddenServiceDir /var/lib/tor/recoverbull/
 HiddenServicePort 80 127.0.0.1:3000
 HiddenServiceEnableIntroDoSDefense 1

@@ -326,6 +326,42 @@ fn test_example_nginx_preserves_attempts_proxy_contract() {
     // The Tor example must export the per-circuit identifier the nginx real_ip
     // directive consumes, or the per-circuit keying above is inert.
     let torrc = include_str!("../../deploy/tor/recoverbull.torrc");
+    let server_address = include_str!("../../.env.example")
+        .lines()
+        .find_map(|line| line.strip_prefix("SERVER_ADDRESS="))
+        .expect("environment example must define SERVER_ADDRESS")
+        .parse::<std::net::SocketAddr>()
+        .expect("example server address must be valid");
+    let nginx_address = nginx
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("listen "))
+        .and_then(|value| value.split_whitespace().next())
+        .expect("nginx example must define a listener")
+        .parse::<std::net::SocketAddr>()
+        .expect("example nginx address must be valid");
+    assert!(server_address.ip().is_loopback());
+    assert_ne!(
+        server_address, nginx_address,
+        "nginx and the application must use separate listeners"
+    );
+    let expected_backend = format!("proxy_pass http://{server_address};");
+    let backends: Vec<_> = nginx
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("proxy_pass "))
+        .collect();
+    assert_eq!(
+        backends,
+        vec![expected_backend.as_str(); 2],
+        "both nginx locations must target SERVER_ADDRESS"
+    );
+    let expected_onion_target = format!("HiddenServicePort 80 {nginx_address}");
+    assert!(
+        torrc
+            .lines()
+            .any(|line| line.trim() == expected_onion_target),
+        "Tor must forward to the nginx listener"
+    );
     assert!(
         torrc.contains("HiddenServiceExportCircuitID haproxy"),
         "torrc example must export the per-circuit id as a PROXY header"

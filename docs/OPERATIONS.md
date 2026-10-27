@@ -1,122 +1,165 @@
-# Operating a RecoverBull server
+# Deploying and operating RecoverBull
 
-One Debian 13 host runs three services. Clients only ever reach it through Tor:
+Configure the binary, nginx and Tor separately, keeping your own directories, service user, process manager and backup setup. The Debian/systemd commands below are examples to adapt to your host.
 
-```
-Tor onion service ──► nginx 127.0.0.1:3000 ──► recoverbull 127.0.0.1:3001 ──► SQLite
-  (tor@default)        per-circuit limits,       (recoverbull.service)     /var/lib/recoverbull
-                       /attempts cache
+```text
+Tor onion :80 → nginx 127.0.0.1:3000 → RecoverBull 127.0.0.1:3001 → SQLite
 ```
 
-nginx is not optional: it bounds slow requests before they reach the server, keeps a single cached copy of `/attempts`, and applies rate limits per Tor circuit (Tor passes a circuit id with the PROXY protocol, which is also why `curl 127.0.0.1:3000` gets no answer).
+nginx is required: it bounds slow requests, caches `/attempts` and applies limits per Tor circuit. Keep both listeners on loopback. Run **one server instance only**; attempt budgets live in memory and reset on every restart. Schedule restarts deliberately.
 
-`deploy/recoverbull` installs and upgrades all of it. Backups stay yours: this page says what to copy and how.
+## 1. Check versions and packages
 
-## Six rules
-
-1. **One instance, ever.** Attempt budgets live in memory: two copies, or two hosts sharing the same onion keys, would double every budget. Never run a second copy, even briefly.
-2. **Never expose ports 3000 or 3001.** Only Tor talks to nginx, only nginx talks to the server. The host needs no inbound port except SSH.
-3. **Back up the onion keys, not only the database.** The keys in `/var/lib/tor/recoverbull/` *are* the server address, and the Bull app has it built in. Lose them and every user loses this server.
-4. **Restart only when you must.** Each restart resets every attempt budget. The service never restarts by itself (`Restart=no`): if it stops, find out why before starting it again.
-5. **Keep the canary current.** An empty canary tells clients the server is compromised.
-6. **Never set `RUST_LOG=trace`.** At that level request bodies can reach the logs.
-
-## Install
-
-You need a fresh Debian 13 host with systemd (a plain container has none), 2 GB of RAM (for the Rust build; the server itself is capped at 512 MB), and a user with `sudo`. Install the build tools and Rust once:
+Review installed versions and available security updates for Rust, nginx, Tor, SQLite and the other host packages. Install missing build tools and services with your package manager; for example, on Debian:
 
 ```sh
-sudo apt install build-essential git curl   # build-essential: the `cc` linker the Rust build needs; curl: for rustup
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain none
-. ~/.cargo/env
+sudo apt update
+apt-cache policy nginx tor sqlite3
+sudo apt install build-essential git curl nginx tor sqlite3
 ```
 
-Then, as your own user:
+If Rust is missing, install it with [rustup](https://rust-lang.org/learn/get-started/). Use the version pinned in [`rust-toolchain.toml`](../rust-toolchain.toml) and keep `Cargo.lock`. Review newer releases separately. SQLite is bundled into the server: updating the system `sqlite3` command does not update the server's SQLite library.
+
+## 2. Back up an existing installation
+
+Identify the active binary, service user, working directory, `.env`, database file and Tor `HiddenServiceDir`. Record the current revision and keep the old binary and configuration. **Preserve the actual database path and onion keys**: a new database filename can silently create an empty database; new onion keys change the server address.
+
+As the database owner, make a consistent backup in a private directory writable by that owner, using a new destination filename:
 
 ```sh
-git clone https://github.com/SatoshiPortal/recoverbull-server.git
-cd recoverbull-server
+/path/to/recoverbull backup /path/to/production_db.sqlite3 /private/backups/before-upgrade.sqlite3
+```
+
+This includes the WAL, checks integrity and refuses to overwrite an existing backup. If the old binary lacks this command, use [SQLite's `.backup`](https://sqlite.org/cli.html) with a new destination. Do not copy just the live `.sqlite3` file with `cp`.
+
+Back up `.env` and the entire existing `HiddenServiceDir` too, preserving ownership and permissions. Store backups encrypted off the host. Database backups retain deleted secrets; together with a user's Backup File, they allow offline password guessing.
+
+## 3. Build
+
+Select the revision you intend to deploy, then build as your normal user:
+
+```sh
 cargo build --release --locked
-sudo deploy/recoverbull install
 ```
 
-It asks for the warrant canary (or pass `--canary '<text>'`), then:
+The binary is `target/release/recoverbull`. Keep the running binary in place until the configuration and backups are ready.
 
-- installs `tor`, `nginx`, `curl` and `unattended-upgrades` from Debian;
-- creates the `recoverbull` account, installs the binary under `/opt/recoverbull` and the configuration from `deploy/`;
-- disables nginx's default public site;
-- starts the server, nginx and Tor, and prints the onion address.
+## 4. Edit the production configuration
 
-**Then back up the onion keys** (see [Backups](#backups)).
+Choose the service account and working data directory first. For a **new installation**, create the account if needed, then create the directory owned by that account with mode `0700`. For an **existing installation**, preserve the current data directory and service account. The service needs write access to the directory for SQLite's WAL files.
 
-### Redeploying an existing server
+Keep the database and any existing SQLite sidecars (`-wal`, `-shm`, `-journal`) owned by the service account with mode `0600`; restrict backups to their required owner too. Use `umask 077` when creating configuration files or launching manually, or the equivalent in your process manager, so newly created files stay private. The reference systemd unit sets `UMask=0077`; a restrictive umask does not repair existing ownership or permissions.
 
-To move a server to a new host with the same data and onion address, stop it first (Tor, then the server), copy its SQLite database and its Tor `HiddenServiceDir` to the new host, and install from them:
+For a **new installation**, copy [`.env.example`](../.env.example) to `.env` in that directory and edit it. It is the single production template. For an **existing installation**, edit the active file without overwriting it with a template. Updating the template does not correct existing files or process-environment overrides: review their actual values, especially if you previously copied a test-oriented example with a one-minute cooldown and global limits of `10000`.
+
+Keep `.env` readable by the service account: use service account ownership with mode `0600`, or `root` ownership with the service's private group and mode `0640`. The removed installer used the latter layout; preserve it when appropriate instead of changing only the mode.
+
+For normal operation with standard RecoverBull clients, keep `CANARY=🐦` supplied by the template. This public compatibility value is not a secret: the [Dart client checks an exact match](https://github.com/SatoshiPortal/recoverbull-client-dart/blob/293b0d709f6c7775180f775c6a5fe99a39f175ce/lib/src/services/key_server.dart#L88). Use another value only with clients explicitly configured to expect it; older clients always require `🐦`. An unset `CANARY` prevents startup, while an explicitly empty `CANARY=` signals that the server is compromised.
+
+| Setting | Production value or choice |
+|---|---|
+| `DATABASE_URL` | Absolute path to the actual database, for example `/path/to/production_db.sqlite3`. The template's relative `production_db.sqlite3` is for a new local database; preserve an existing database's path. |
+| `SERVER_ADDRESS` | `127.0.0.1:3001`, matching nginx's upstream |
+| `CANARY` | `🐦`, the public compatibility value expected by standard clients |
+| `SECRET_MAX_LENGTH` | `128` Base64 characters, or your existing choice within `128`–`832` |
+| `RATE_LIMIT_COOLDOWN` | `1440` **minutes** (24 hours), rather than the test value `1` |
+| `RATE_LIMIT_MAX_ATTEMPTS` | `3` distinct passwords per identifier and cooldown |
+| `STORE_RATE_LIMIT_BURST` / `STORE_RATE_LIMIT_REFILL_PER_SECOND` | `10` / `2`, global limit on new backups |
+| `LOOKUP_RATE_LIMIT_BURST` / `LOOKUP_RATE_LIMIT_REFILL_PER_SECOND` | `100` / `5`, global limit on `/fetch` and `/trash` |
+| `ATTEMPTS_RATE_LIMIT_BURST` / `ATTEMPTS_RATE_LIMIT_REFILL_PER_SECOND` | `20` / `2`, global limit on uncached `/attempts` |
+| `STORAGE_RESERVE_MB` | `64`; refuses `/store` below this much free space. `0` disables the reserve. |
+| `RATE_LIMIT_MEMORY_BUDGET_MB` | `512`, matching the service's actual memory limit |
+
+The template lists every supported setting, including the snapshot TTL of `60` seconds, identifier capacity and database concurrency. `STORAGE_RESERVE_MB` also defaults to `64` in code when absent. Test values live separately in `tests/fixtures/server.env`; never copy that fixture to the server's `.env`.
+
+The server reads `.env` from its working directory or a parent; process environment variables take precedence. Validate under the same user, directory and environment as the service:
 
 ```sh
-sudo deploy/recoverbull install --database /path/to/old.sqlite3 --onion-keys /path/to/old-hidden-service/
+cd /path/to/data
+/path/to/new/recoverbull check-config
 ```
 
-The database can have any file name, and a `-wal` file next to it is included. A database from before the migration ledger is adopted automatically. Once `status` is green, shut the old host down for good (rule 1).
+This does not start the server or open the database. It checks this command's memory limit, so also verify the service's limit. A malformed or unreadable `.env` is an error; a missing file is allowed when the process environment supplies the required settings.
 
-## Upgrade
+After any later ownership, permission or configuration change, run `check-config` again under the actual service user, working directory and environment before starting the service.
 
-Run the same command again after updating the checkout:
+## 5. Pause onion traffic and configure nginx
+
+Stop the actual Tor instance serving RecoverBull **before editing either active nginx or Tor configuration**, and keep it stopped through steps 5–7. This also pauses any other onions served by that instance. The PROXY protocol settings must change as a pair; if either validation fails, keep Tor stopped until matching configurations have been restored and validated.
+
+Create `/var/cache/nginx/recoverbull` with the worker user/group from your nginx configuration. For a Debian host using `www-data`:
 
 ```sh
-git pull
-cargo build --release --locked
-sudo deploy/recoverbull install
+sudo install -d -o www-data -g www-data -m 0700 /var/cache/nginx/recoverbull
 ```
 
-It checks `.env` against the new version's rules (`recoverbull check-config`), lists the files that changed, and asks before stopping anything (`--yes` to skip the question). Then it stops Tor and the server, keeps a copy of the current version and database in `/var/lib/recoverbull/previous-version/`, installs the new files, migrates the database, and starts everything again.
+Copy [`deploy/nginx/recoverbull.conf`](../deploy/nginx/recoverbull.conf) to a file included in nginx's **`http` context**, for example `/etc/nginx/conf.d/recoverbull.conf`. Do not paste it inside a `server` block. Review existing listeners and disable an unused public default site on a dedicated onion-only host.
 
-If the new version fails to start, it puts the previous one back, with its database, and tells you; the state the new version left behind is moved to `failed-upgrade.<date>/`. One reason this happens: a new version needs a setting that your `.env` does not have yet. The script never edits `.env`; read the logs, add the setting, and run the install again. If nothing changed, it only makes sure everything is running; a server that was stopped on purpose is started only after you confirm (or with `--yes`), since a restart resets every attempt budget.
+nginx listens on `127.0.0.1:3000`; both `proxy_pass` directives target `127.0.0.1:3001`. To change ports, update the nginx listener and Tor target together, and both nginx upstreams and `SERVER_ADDRESS` together. Keep the PROXY protocol settings and loopback-only trusted forwarder.
 
-**The script never deletes your data.** The pre-upgrade copy stays in `previous-version/` after a successful upgrade, an older one is moved to `previous-version.<date>/` by the next upgrade, and a failed upgrade leaves `failed-upgrade.<date>/`. Each of these holds every secret as of that moment, deleted ones included, so delete them yourself once you trust the running version; `status` reminds you how many there are.
+Validate with `sudo nginx -t`, using the same configuration options as the running nginx instance.
 
-## Backups
+## 6. Edit the Tor configuration
 
-The script does not make backups. Copy these three things off the host, encrypted, on your own schedule:
+With Tor still stopped, merge [`deploy/tor/recoverbull.torrc`](../deploy/tor/recoverbull.torrc) into the configuration your Tor instance actually loads. Preserve an existing `HiddenServiceDir`; for a new service, choose a private directory owned by Tor. Define this onion service once and check that any separate file is included.
 
-| What | Where | Why |
-|---|---|---|
-| Onion keys | `/var/lib/tor/recoverbull/` | They are the server address. Copy them once; they never change. |
-| Database | `/var/lib/recoverbull/database.sqlite3` | Every stored secret. |
-| Configuration | `/var/lib/recoverbull/.env` | The canary and settings. |
+The template requires Tor **0.4.8 or newer**, with these directives in the RecoverBull service block:
 
-Never copy the database file with `cp` while the server runs: recent writes may still be in `database.sqlite3-wal`. The server binary makes a consistent copy instead, safe while it runs, readable by its owner only:
+```text
+HiddenServicePort 80 127.0.0.1:3000
+HiddenServiceEnableIntroDoSDefense 1
+HiddenServicePoWDefensesEnabled 1
+HiddenServiceExportCircuitID haproxy
+```
+
+Keep your other Tor hardening settings. `HiddenServiceExportCircuitID haproxy` must stay paired with nginx's PROXY protocol settings so its limits count per circuit. Validate with `tor --verify-config`, using your instance's actual torrc, defaults and user/options.
+
+## 7. Install and start the server
+
+Use your existing process manager. For a new systemd service, adapt [`deploy/systemd/recoverbull.service`](../deploy/systemd/recoverbull.service): `User`, `Group`, `WorkingDirectory`, `ExecStart`, `ReadWritePaths` and `MemoryMax` must match your layout and configuration. Check its filesystem restrictions too: `ProtectHome=true` blocks paths under `/home`, and `PrivateTmp=true` isolates `/tmp`. Keep `Restart=no`; each restart resets attempt budgets.
+
+For an upgrade, stop the old server while Tor remains stopped. Take a final consistent backup with a new filename for recovery, preserving writes received since step 2, before replacing the binary or starting the new server.
+
+For an upgrade, restore the final backup to a **disposable copy** as the database owner and validate it with the new binary before proceeding:
 
 ```sh
-sudo /opt/recoverbull/bin/recoverbull backup /var/lib/recoverbull/database.sqlite3 /root/recoverbull-$(date +%F).sqlite3
+/path/to/new/recoverbull check-database /path/to/disposable-restored.sqlite3
 ```
 
-To restore on a new host, use `install --database --onion-keys` as above.
+The argument is a literal filesystem path, not a SQLite URI. The command checks integrity and applies migrations to the copy; keep the backup archive untouched. Continue only if the check succeeds.
 
-The database holds encrypted secrets only, but together with a user's Backup File it allows offline password guessing. Keep backups encrypted and limit how long you keep them: deleting a secret with `/trash` does not remove it from older backups.
+Install the new binary and your adapted service definition. For systemd, run `systemctl daemon-reload` if the unit changed. Start one server under the service account; startup applies embedded database migrations. Reload or start nginx after validation, then the actual Tor instance. The reference Debian service names are `recoverbull`, `nginx` and `tor@default`; use yours.
+
+For recovery, stop the server and any other database users, including Litestream, then move the failed database and its sidecars aside. Restore the final snapshot with the matching old binary, configuration and ownership; verify the server and replication again.
+
+## 8. Check the result and Litestream
+
+Check service logs and the backend:
+
+```sh
+curl --fail --show-error http://127.0.0.1:3001/info
+```
+
+Confirm the canary and cooldown. A plain HTTP request to nginx's port `3000` fails because it expects Tor's PROXY header. Check the onion next, using your actual SOCKS endpoint; for example, if it is `127.0.0.1:9050`:
+
+```sh
+curl --fail --show-error --socks5-hostname 127.0.0.1:9050 http://YOUR_ADDRESS.onion/info
+curl --fail --show-error --compressed --socks5-hostname 127.0.0.1:9050 http://YOUR_ADDRESS.onion/attempts
+```
+
+Allow a few minutes for a newly started onion. Verify both application listeners are on loopback and an existing onion address stayed the same.
+
+**If you use Litestream**, configure it to replicate the same actual SQLite file the server opens, including the filename. Use the absolute filesystem path in Litestream; resolve relative `DATABASE_URL` values from the server's working directory, and do not copy SQLite URI prefixes or query parameters into a filesystem path. After changing that path or replacing the database, restart your actual Litestream service and check its logs for successful replication. Use the [configuration documentation](https://litestream.io/reference/config/) for your installed version; never run two producers against one replica destination. Verify backups by restoring to a separate new file.
 
 ## Day to day
 
-| Task | How |
-|---|---|
-| Check health | `sudo deploy/recoverbull status` (exits non-zero when something is wrong) |
-| Read logs | `sudo deploy/recoverbull logs` (`-f` to follow, `-n 500` for more, `--all` to add nginx and Tor) |
-| Keep nginx and Tor logs short | nginx keeps no access log and writes only critical errors (`deploy/nginx/recoverbull.conf`); Tor logs to the journal; the journald drop-in below bounds the volume |
-| Change the canary | Edit `CANARY` in `/var/lib/recoverbull/.env`; served within ten minutes, no restart |
-| Know the onion address | `sudo cat /var/lib/tor/recoverbull/hostname` |
-| Validate `.env` after editing it | `sudo env -C /var/lib/recoverbull /opt/recoverbull/bin/recoverbull check-config` |
-| Every server command | `/opt/recoverbull/bin/recoverbull --help` |
+Keep security updates current and monitor free space, service status and the five-minute counter summaries. `store_storage_pressure` or `/store` returning `503` can mean the reserve was reached or a storage write failed. Freeing space resumes stores in the first case; after a write failure, fix the cause before deliberately restarting.
 
-For about ten minutes after Tor starts, `status` reports the onion as `starting` while the address is being published.
+The store pressure gate does not block `/fetch` or `/trash`. They still depend on SQLite: a full, unwritable or damaged volume can make recovery fail too. Keep free-space alerts and test restores independently of the gate.
 
-What to watch:
+After changing `RATE_LIMIT_MAX_IDENTIFIERS`, `RATE_LIMIT_MAX_ATTEMPTS`, the allocator or dependencies, measure memory on an isolated deployment with representative traffic: fill the ledger to the configured identifier and candidate limits, request a fresh `/attempts` snapshot, and compare peak RSS with the actual process memory limit. On Linux, `VmHWM` in `/proc/<PID>/status` reports peak RSS in kB. For systemd, obtain the PID and limit with `systemctl show --property=MainPID --property=MemoryMax recoverbull`, using your service name. Leave headroom for SQLite, worker stacks and concurrent requests; a startup capacity check does not replace this measurement.
 
-- **Disk.** Each stored secret is a few hundred bytes, but a sustained `/store` flood can grow the database by up to about 90 MB per day. Alert at 70% use and never let the disk fill up: the server must keep accepting writes. A dedicated volume for `/var/lib/recoverbull` keeps a flood from filling the system disk.
-- **The five-minute counter line** in the logs (`sudo deploy/recoverbull logs`). `lookup_rate_limited`, `database_busy`, `database_error` and `request_timeout` should stay near zero.
-- **The service being down.** It does not restart on its own (rule 4).
-- **`store_storage_pressure` in the counter line, or clients reporting `503` on `/store` only.** Either the data volume is below `STORAGE_RESERVE_MB` of free space (stores resume by themselves once space is freed), or a store failed on storage (quota, unwritable or damaged file) and the server refuses every store until restarted, on purpose: answering some of them would reveal which backups exist. Fix the cause, then: `sudo systemctl stop recoverbull && sudo runuser -u recoverbull -- /opt/recoverbull/bin/recoverbull check-database /var/lib/recoverbull/database.sqlite3`, and `sudo deploy/recoverbull install` to start it again (it asks first).
-
-The server logs one line per server error and one summary every five minutes, never request contents. journald limits each service to 10,000 lines per 30 seconds by default; to tighten it, add a drop-in and restart the service:
+The server writes one line per server error and one summary every five minutes. Configure rate and retention limits in your log daemon. For systemd, an example service drop-in is:
 
 ```ini
 # /etc/systemd/system/recoverbull.service.d/logging.conf
@@ -125,35 +168,6 @@ LogRateLimitIntervalSec=30s
 LogRateLimitBurst=200
 ```
 
-Debian security updates for Tor and nginx install automatically through `unattended-upgrades`. Upgrades of the server itself are yours to schedule (rule 4).
+Apply unit changes with `systemctl daemon-reload`; they take effect on the next deliberate service start. Suppression can discard the five-minute summaries too. Review the host's journal size and retention settings (`SystemMaxUse`, `RuntimeMaxUse`, `MaxRetentionSec`) and current usage with `journalctl --disk-usage`; those limits affect other services sharing the journal. See [systemd's service logging settings](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html#LogRateLimitIntervalSec=) and [journal retention settings](https://www.freedesktop.org/software/systemd/man/latest/journald.conf.html#SystemMaxUse=).
 
-## Configuration
-
-`/var/lib/recoverbull/.env` starts from [`deploy/recoverbull.env.example`](../deploy/recoverbull.env.example), which explains each required value. These optional settings have safe defaults; change one only for a measured reason, then restart.
-
-| Setting | Default | Meaning |
-|---|---|---|
-| `STORE_RATE_LIMIT_BURST` / `_REFILL_PER_SECOND` | 10 / 2 | Global limit on new backups |
-| `LOOKUP_RATE_LIMIT_BURST` / `_REFILL_PER_SECOND` | 100 / 5 | Global limit on `/fetch` and `/trash` |
-| `ATTEMPTS_RATE_LIMIT_BURST` / `_REFILL_PER_SECOND` | 20 / 2 | Global limit on uncached `/attempts` |
-| `ATTEMPTS_SNAPSHOT_TTL_SECONDS` | 60 | How long one `/attempts` snapshot is reused |
-| `RATE_LIMIT_MAX_IDENTIFIERS` | 100000 | Identifiers tracked at once; more get `503` |
-| `RATE_LIMIT_MEMORY_BUDGET_MB` | 512 | Keep equal to `MemoryMax=` in the systemd unit |
-| `STORAGE_RESERVE_MB` | 64 | Free space on the data volume below which `/store` answers `503`; 0 disables it |
-| `DATABASE_MAX_CONCURRENCY` | 16 | Parallel database operations |
-
-The server checks every value at startup and refuses to start, with an explicit message, if one is out of bounds or if the identifier capacity does not fit the memory budget. The older name `RATE_LIMIT_MAX_FAILED_ATTEMPTS` is still accepted for `RATE_LIMIT_MAX_ATTEMPTS`, with a warning.
-
-The default capacity peaked at 117 MB on one host and about 250 MB on another. After raising `RATE_LIMIT_MAX_IDENTIFIERS` or `RATE_LIMIT_MAX_ATTEMPTS`, let the map fill up and compare the peak with `MemoryMax`:
-
-```sh
-sudo grep VmHWM /proc/$(systemctl show -p MainPID --value recoverbull)/status
-```
-
-## What the script does not do
-
-- Delete or overwrite a database, onion keys or a backup: it refuses (`--database` or `--onion-keys` when the live ones exist), or moves things aside with a date.
-- Back up anything off the host (see [Backups](#backups)).
-- Harden SSH, set up a firewall, or update the operating system beyond Debian security updates.
-
-The files under `deploy/` are the reference configuration; the comments in each explain its choices. The reasoning behind the security model and its accepted risks is in [SECURITY.md](../SECURITY.md).
+Canary file edits take effect within ten minutes without a restart, unless a `CANARY` process-environment override takes precedence. Keep the normal value aligned with what clients expect. Never use `RUST_LOG=trace`, which can expose request bodies. See [SECURITY.md](../SECURITY.md) and the [API response contracts](API.md).

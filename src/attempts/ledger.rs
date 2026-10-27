@@ -203,7 +203,9 @@ impl AttemptsLedgerState {
                 // that is later refunded (database busy, cancellation before
                 // transfer, or an error before commit) consumed nothing, so it
                 // must not slide `last_secret_id_at`/`resets_at` nor postpone
-                // expiry. Only `finalize` advances the window, once a distinct
+                // expiry after refund. While Pending, it retains this window
+                // so expiry cannot erase work that can still commit. Only
+                // `finalize` advances the window, once a distinct
                 // secret_id actually commits. The status returned now still
                 // resets from this request's own time, because a New admission
                 // that does commit resets its cooldown from itself.
@@ -326,7 +328,7 @@ impl AttemptsLedgerState {
             .collect()
     }
 
-    /// Drops identifiers whose last distinct secret_id is outside cooldown.
+    /// Drops completed identifiers whose last distinct secret_id is outside cooldown.
     ///
     /// Takes no wall-clock argument on purpose: retention is an expiry
     /// decision, and expiry reads the monotonic clock.
@@ -360,7 +362,9 @@ impl AttemptsLedgerState {
     }
 }
 
-/// The single expiry decision, on the monotonic clock.
+/// The single expiry decision, using the monotonic clock and retaining
+/// in-flight work. A Pending operation can still consume an attempt, so its
+/// generation must survive until finalization or refund.
 ///
 /// `saturating_duration_since` keeps a reading that is not in the past from
 /// expiring an entry, and a cooldown that cannot be represented as a
@@ -369,7 +373,13 @@ impl AttemptsLedgerState {
 /// fail-closed direction.
 fn is_expired(info: &RateLimitInfo, now: Instant, cooldown: TimeDelta) -> bool {
     match cooldown.to_std() {
-        Ok(cooldown) => now.saturating_duration_since(info.last_secret_id_instant) > cooldown,
+        Ok(cooldown) => {
+            now.saturating_duration_since(info.last_secret_id_instant) > cooldown
+                && !info
+                    .secret_ids
+                    .values()
+                    .any(|state| *state == SecretIdState::Pending)
+        }
         Err(_) => false,
     }
 }
@@ -507,5 +517,174 @@ impl Drop for ReservationGuard {
                 state.refund(&id_hash, &secret_id, generation).await;
             });
         };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const IDENTIFIER: &str = "cooldown-boundary-identifier";
+
+    async fn admit_new(
+        ledger: &AttemptsLedgerState,
+        candidate: &str,
+        requested_at: DateTime<Utc>,
+    ) -> (AttemptStatus, DateTime<Utc>, ReservationGuard) {
+        match ledger
+            .admit(
+                IDENTIFIER.to_owned(),
+                candidate.to_owned(),
+                requested_at,
+                3,
+                1,
+                TimeDelta::minutes(1),
+            )
+            .await
+        {
+            Admission::New {
+                status,
+                generation,
+                reservation,
+            } => (status, generation, reservation),
+            _ => panic!("expected a new candidate: {candidate}"),
+        }
+    }
+
+    async fn seed_committed(ledger: &AttemptsLedgerState, at: DateTime<Utc>) -> DateTime<Utc> {
+        let (_, generation, reservation) = admit_new(ledger, "committed", at).await;
+        reservation.transfer();
+        ledger
+            .finalize(IDENTIFIER, "committed", generation, LookupOutcome::Miss, at)
+            .await;
+        generation
+    }
+
+    async fn age(ledger: &AttemptsLedgerState, seconds: u64) {
+        ledger
+            .lock_for_test()
+            .await
+            .get_mut(IDENTIFIER)
+            .expect("seeded identifier exists")
+            .set_monotonic_age_for_test(std::time::Duration::from_secs(seconds));
+    }
+
+    async fn pending_at_cooldown_boundary(
+        ledger: &AttemptsLedgerState,
+        at: DateTime<Utc>,
+    ) -> DateTime<Utc> {
+        let generation = seed_committed(ledger, at - TimeDelta::seconds(59)).await;
+        age(ledger, 59).await;
+        let (status, pending_generation, reservation) = admit_new(ledger, "pending", at).await;
+        assert_eq!(pending_generation, generation);
+        assert_eq!(status.total_attempts, 2);
+        reservation.transfer();
+        // Simulate an in-flight database operation crossing the cooldown
+        // boundary without sleeping or advancing the published wall clock.
+        age(ledger, 61).await;
+        generation
+    }
+
+    #[tokio::test]
+    async fn pending_completion_stays_counted_across_cooldown_expiry() {
+        let ledger = AttemptsLedgerState::new();
+        let pending_at = Utc::now();
+        let generation = pending_at_cooldown_boundary(&ledger, pending_at).await;
+        let later_at = pending_at + TimeDelta::seconds(2);
+        let (status, later_generation, reservation) = admit_new(&ledger, "later", later_at).await;
+        reservation.transfer();
+        ledger
+            .finalize(
+                IDENTIFIER,
+                "later",
+                later_generation,
+                LookupOutcome::Miss,
+                later_at,
+            )
+            .await;
+        ledger
+            .finalize(
+                IDENTIFIER,
+                "pending",
+                generation,
+                LookupOutcome::Miss,
+                pending_at,
+            )
+            .await;
+
+        let map = ledger.lock_for_test().await;
+        let info = map
+            .get(IDENTIFIER)
+            .expect("completed lookups retain budget");
+        assert!(
+            info.secret_ids.get("pending") == Some(&SecretIdState::Committed),
+            "a successful pending completion must not be erased by expiry"
+        );
+        assert_eq!(status.total_attempts, 3);
+        assert_eq!(later_generation, generation);
+        assert_eq!(info.consumed_slots(), 3);
+        assert_eq!(info.failed_secret_ids, 3);
+    }
+
+    #[tokio::test]
+    async fn capacity_sweep_retains_pending_work_across_cooldown_expiry() {
+        let ledger = AttemptsLedgerState::new();
+        pending_at_cooldown_boundary(&ledger, Utc::now()).await;
+        let admission = ledger
+            .admit(
+                "another-identifier".to_owned(),
+                "another-candidate".to_owned(),
+                Utc::now(),
+                3,
+                1,
+                TimeDelta::minutes(1),
+            )
+            .await;
+        assert!(
+            matches!(admission, Admission::Saturated),
+            "capacity eviction must not discard an in-flight reservation"
+        );
+        assert!(ledger.lock_for_test().await.contains_key(IDENTIFIER));
+    }
+
+    #[tokio::test]
+    async fn snapshot_retention_preserves_pending_work_across_cooldown_expiry() {
+        let ledger = AttemptsLedgerState::new();
+        let at = Utc::now();
+        let generation = pending_at_cooldown_boundary(&ledger, at).await;
+        ledger.retain_active(TimeDelta::minutes(1)).await;
+        ledger
+            .finalize(IDENTIFIER, "pending", generation, LookupOutcome::Miss, at)
+            .await;
+        let map = ledger.lock_for_test().await;
+        let info = map
+            .get(IDENTIFIER)
+            .expect("snapshot retention must preserve in-flight work");
+        assert!(info.secret_ids.get("pending") == Some(&SecretIdState::Committed));
+        assert_eq!(info.consumed_slots(), 2);
+        assert_eq!(info.failed_secret_ids, 2);
+    }
+
+    #[tokio::test]
+    async fn cooldown_expiry_still_resets_completed_windows() {
+        let ledger = AttemptsLedgerState::new();
+        let at = Utc::now();
+        let old_generation = seed_committed(&ledger, at - TimeDelta::seconds(61)).await;
+        age(&ledger, 61).await;
+        let (status, generation, _reservation) = admit_new(&ledger, "later", at).await;
+        assert_ne!(generation, old_generation);
+        assert_eq!(status.total_attempts, 1);
+    }
+
+    #[tokio::test]
+    async fn refunded_pending_work_does_not_extend_cooldown() {
+        let ledger = AttemptsLedgerState::new();
+        let at = Utc::now();
+        let old_generation = pending_at_cooldown_boundary(&ledger, at).await;
+        ledger.refund(IDENTIFIER, "pending", old_generation).await;
+        let (status, generation, _reservation) =
+            admit_new(&ledger, "later", at + TimeDelta::seconds(2)).await;
+        assert_ne!(generation, old_generation);
+        assert_eq!(status.total_attempts, 1);
     }
 }

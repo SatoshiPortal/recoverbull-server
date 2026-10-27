@@ -190,3 +190,66 @@ fn check_database_rejects_a_corrupt_secret_data_page() {
     );
     assert!(String::from_utf8_lossy(&corrupt.stderr).contains("integrity"));
 }
+
+#[test]
+fn backup_removes_a_copy_that_fails_its_integrity_check() {
+    let directory = TestDirectory::new();
+    let source = directory.0.join("source.sqlite3");
+    let destination = directory.0.join("copy.sqlite3");
+    initialized_database(&source);
+
+    // VACUUM's transfer optimization can copy a malformed row without
+    // enforcing NOT NULL. The subsequent integrity check must reject the copy.
+    let mut connection = SqliteConnection::establish(source.to_str().unwrap()).unwrap();
+    sql_query("CREATE TABLE evidence(value TEXT)")
+        .execute(&mut connection)
+        .unwrap();
+    sql_query("INSERT INTO evidence VALUES (NULL)")
+        .execute(&mut connection)
+        .unwrap();
+    sql_query("PRAGMA writable_schema = ON")
+        .execute(&mut connection)
+        .unwrap();
+    sql_query(
+        "UPDATE sqlite_schema SET sql = 'CREATE TABLE evidence(value TEXT NOT NULL)' \
+         WHERE name = 'evidence'",
+    )
+    .execute(&mut connection)
+    .unwrap();
+    drop(connection);
+
+    #[derive(QueryableByName)]
+    struct IntegrityCheck {
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        integrity_check: String,
+    }
+    let mut probe = SqliteConnection::establish(source.to_str().unwrap()).unwrap();
+    let verdict = sql_query("PRAGMA integrity_check")
+        .get_result::<IntegrityCheck>(&mut probe)
+        .unwrap();
+    assert_eq!(verdict.integrity_check, "NULL value in evidence.value");
+    drop(probe);
+    let original = std::fs::read(&source).unwrap();
+
+    let result = Command::new(env!("CARGO_BIN_EXE_recoverbull"))
+        .current_dir(&directory.0)
+        .arg("backup")
+        .arg(&source)
+        .arg(&destination)
+        .output()
+        .unwrap();
+
+    assert_eq!(result.status.code(), Some(1), "{result:?}");
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains("copy failed SQLite's integrity check")
+    );
+    assert_eq!(
+        std::fs::read(&source).unwrap(),
+        original,
+        "a failed backup must leave its source unchanged"
+    );
+    assert!(
+        !destination.exists(),
+        "a rejected copy must not remain under the backup filename"
+    );
+}

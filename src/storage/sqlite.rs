@@ -301,26 +301,28 @@ pub(crate) fn backup_database(
                 .map_err(|_| BackupError::Copy)?;
             Ok(())
         });
-    if let Err(error) = copied {
-        // A refused or partial copy must not look like a backup.
+    let verified = copied.and_then(|()| {
+        #[derive(QueryableByName)]
+        struct IntegrityCheck {
+            #[diesel(sql_type = diesel::sql_types::Text)]
+            integrity_check: String,
+        }
+        let mut copy = SqliteConnection::establish(&format!("file:{destination_uri}?mode=ro"))
+            .map_err(|_| BackupError::Integrity)?;
+        let verdict = sql_query("PRAGMA integrity_check")
+            .load::<IntegrityCheck>(&mut copy)
+            .map_err(|_| BackupError::Integrity)?;
+        if verdict.len() != 1 || verdict[0].integrity_check != "ok" {
+            return Err(BackupError::Integrity);
+        }
+        Ok(())
+    });
+    if verified.is_err() {
+        // Both connections have closed. Neither a partial copy nor a rejected
+        // integrity check may leave a file looking like a usable backup.
         let _ = std::fs::remove_file(destination);
-        return Err(error);
     }
-
-    #[derive(QueryableByName)]
-    struct IntegrityCheck {
-        #[diesel(sql_type = diesel::sql_types::Text)]
-        integrity_check: String,
-    }
-    let mut copy = SqliteConnection::establish(&format!("file:{destination_uri}?mode=ro"))
-        .map_err(|_| BackupError::Integrity)?;
-    let verdict = sql_query("PRAGMA integrity_check")
-        .load::<IntegrityCheck>(&mut copy)
-        .map_err(|_| BackupError::Integrity)?;
-    if verdict.len() != 1 || verdict[0].integrity_check != "ok" {
-        return Err(BackupError::Integrity);
-    }
-    Ok(())
+    verified
 }
 
 /// Validates an already-initialized database for the restore drill.

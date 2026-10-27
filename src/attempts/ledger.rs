@@ -362,8 +362,8 @@ impl AttemptsLedgerState {
     }
 }
 
-/// The single expiry decision, retaining in-flight work before consulting the
-/// monotonic clock. A Pending operation can still consume an attempt, so its
+/// The single expiry decision, using the monotonic clock and retaining
+/// in-flight work. A Pending operation can still consume an attempt, so its
 /// generation must survive until finalization or refund.
 ///
 /// `saturating_duration_since` keeps a reading that is not in the past from
@@ -372,15 +372,14 @@ impl AttemptsLedgerState {
 /// validation rejects) retains the entry: keeping a budget is the
 /// fail-closed direction.
 fn is_expired(info: &RateLimitInfo, now: Instant, cooldown: TimeDelta) -> bool {
-    if info
-        .secret_ids
-        .values()
-        .any(|state| *state == SecretIdState::Pending)
-    {
-        return false;
-    }
     match cooldown.to_std() {
-        Ok(cooldown) => now.saturating_duration_since(info.last_secret_id_instant) > cooldown,
+        Ok(cooldown) => {
+            now.saturating_duration_since(info.last_secret_id_instant) > cooldown
+                && !info
+                    .secret_ids
+                    .values()
+                    .any(|state| *state == SecretIdState::Pending)
+        }
         Err(_) => false,
     }
 }
